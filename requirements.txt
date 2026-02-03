@@ -9,3 +9,4 @@ planetary-computer
 sentry-sdk
 geopandas
 shapely
+google-generativeai

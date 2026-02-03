@@ -49,6 +49,7 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<string>('');
   const [isSearching, setIsSearching] = useState(false);
+  const [includeNarrative, setIncludeNarrative] = useState<boolean>(true);
   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
   const [uploadedGeojson, setUploadedGeojson] = useState<Feature<Geometry> | FeatureCollection<Geometry> | null>(null);
 
@@ -155,7 +156,12 @@ export default function Home() {
     landcover?: LandcoverStats;
   }
 
-  function summarizeData(summary: Summary): string {
+  function summarizeData(summary: Summary, narrative?: string): string {
+  // If narrative is provided, use it instead of the basic summary
+  if (narrative) {
+    return narrative;
+  }
+  
   if (!summary) return "No summary available.";
 
   const { dem, ndvi, landcover } = summary;
@@ -244,7 +250,8 @@ export default function Home() {
         };
       }
       console.log("Sending to backend:", JSON.stringify({ geojson }, null, 2));
-      const response = await fetch(`${backendUrl}/generate-context`, {
+      // Add include_narrative parameter to the URL based on checkbox state
+      const response = await fetch(`${backendUrl}/generate-context?include_narrative=${includeNarrative}&audience=academic`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -286,9 +293,9 @@ export default function Home() {
 
       // ✅ Now parse only the final JSON payload
       if(!jsonString) throw new Error("No JSON summary received");
-      const data = JSON.parse(jsonString); 
-      setResponse(summarizeData(data.summary)); 
-      setSummaryText(summarizeData(data.summary));
+      const data = JSON.parse(jsonString);
+      setResponse(summarizeData(data.summary, data.narrative));
+      setSummaryText(summarizeData(data.summary, data.narrative));
       } catch (err) {
         console.error(err);
         setSummaryText("Error: " + (err as Error).message);
@@ -417,8 +424,32 @@ export default function Home() {
                 </p>
               </CardContent>
             </Card>
+            {/* Options */}
+            <Card className="bg-white/10 backdrop-blur border-white/20">
+              <CardHeader>
+                <CardTitle className="text-white">Options</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="includeNarrative"
+                    checked={includeNarrative}
+                    onChange={(e) => setIncludeNarrative(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                  />
+                  <label htmlFor="includeNarrative" className="text-sm text-slate-300">
+                    Include AI-generated narrative description
+                  </label>
+                </div>
+                <p className="text-xs text-slate-400 mt-2">
+                  Enhances statistical data with contextual descriptions
+                </p>
+              </CardContent>
+            </Card>
+            
             {/* Analyze Button */}
-            <Button 
+            <Button
               onClick={handleAnalyze}
               disabled={!boundingBox && !uploadedGeojson || isLoading}
               className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white py-6 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"

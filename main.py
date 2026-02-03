@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import httpx, rasterio
 from rasterio.mask import mask
 import numpy as np
@@ -14,16 +14,19 @@ import asyncio
 import json
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Union, List, Dict
-import sentry_sdk
+# import sentry_sdk
 import geopandas as gpd
 from shapely.geometry import shape, mapping, box
+import os
+from typing import Literal
+import google.generativeai as genai
 
-sentry_sdk.init(
-    dsn="https://f3b3208c800a9df29c5e72da1b28fb1a@o4509989478596608.ingest.de.sentry.io/4509989482397776",
-    # Add data like request headers and IP for users,
-    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
-    send_default_pii=True,
-)
+# sentry_sdk.init(
+#     dsn="https://f3b3208c800a9df29c5e72da1b28fb1a@o4509989478596608.ingest.de.sentry.io/4509989482397776",
+#     # Add data like request headers and IP for users,
+#     # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+#     send_default_pii=True,
+# )
 
 
 app = FastAPI(title="GeoContext Generator API")
@@ -43,6 +46,7 @@ class GeoJSONRequest(BaseModel):
 
 class ContextResponse(BaseModel):
     summary: Dict[str, Any]
+    narrative: Optional[str] = None
 
 # ----------- Helpers ------------ #
 async def query_stac(collection: str, geojson: dict, limit: int = 1, time_range: str = None):
@@ -226,10 +230,57 @@ def compute_modis_lst(item, geom, to_celsius: bool = True) -> Dict[str, float]:
     except Exception as e:
         return {"error": str(e)}
 
+def load_prompt_template(template_name: str) -> str:
+    """Load a prompt template from the prompts directory."""
+    prompt_path = os.path.join("prompts", template_name)
+    with open(prompt_path, "r") as f:
+        return f.read()
+
+def generate_study_area_narrative(
+    summary: Dict[str, Any],
+    audience: Literal["academic", "investor", "farmer", "policy"] = "academic"
+) -> str:
+    """
+    Takes precomputed geospatial statistics and returns
+    a factual, non-speculative narrative description.
+    """
+    try:
+        # Configure the API key (would typically come from environment)
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            return "AI narrative generation unavailable: API key not configured"
+        
+        genai.configure(api_key=api_key)
+        
+        # Select the model
+        model = genai.GenerativeModel('gemini-pro')
+        
+        # Load the prompt template
+        prompt_template = load_prompt_template("study_area_v1.txt")
+        
+        # Format the prompt with the summary data and audience
+        formatted_prompt = prompt_template.format(
+            summary_data=str(summary),
+            audience=audience
+        )
+        
+        # Generate the content
+        response = model.generate_content(formatted_prompt)
+        
+        # Extract the text from the response
+        narrative = response.text.strip()
+        
+        return narrative
+    
+    except Exception as e:
+        # Log the error in production
+        print(f"Error generating narrative: {str(e)}")
+        return ""
+
 
 # ----------- API Endpoint ------------ #
 @app.post("/generate-context")
-async def generate_context(request: GeoJSONRequest):
+async def generate_context(request: GeoJSONRequest, include_narrative: bool = False, audience: str = "academic"):
     """Generate geospatial context for a given GeoJSON polygon."""
     
     geojson = normalize_geojson(request.geojson)
@@ -340,6 +391,18 @@ async def generate_context(request: GeoJSONRequest):
             "ndvi": yearly_stats if yearly_stats else None,
             "landcover": lc_stats,
         }
-        yield f"data: {json.dumps({'summary': summary})}\n\n"
+        
+        # Conditionally generate narrative
+        result = {"summary": summary}
+        if include_narrative:
+            try:
+                narrative = generate_study_area_narrative(summary, audience)
+                result["narrative"] = narrative
+            except Exception as e:
+                # If narrative generation fails, continue with just the summary
+                print(f"Narrative generation failed: {str(e)}")
+                pass
+        
+        yield f"data: {json.dumps(result)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
