@@ -18,8 +18,11 @@ from typing import Union, List, Dict
 import geopandas as gpd
 from shapely.geometry import shape, mapping, box
 import os
+from dotenv import load_dotenv
 from typing import Literal
 import google.generativeai as genai
+
+load_dotenv()
 
 # sentry_sdk.init(
 #     dsn="https://f3b3208c800a9df29c5e72da1b28fb1a@o4509989478596608.ingest.de.sentry.io/4509989482397776",
@@ -253,7 +256,7 @@ def generate_study_area_narrative(
         genai.configure(api_key=api_key)
         
         # Select the model
-        model = genai.GenerativeModel('gemini-pro')
+        model = genai.GenerativeModel('gemini-2.5-flash')
         
         # Load the prompt template
         prompt_template = load_prompt_template("study_area_v1.txt")

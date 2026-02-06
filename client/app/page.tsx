@@ -226,7 +226,7 @@ export default function Home() {
     setResponse('');
 
     try {
-      const backendUrl = 'https://geocontextualize.onrender.com'; // Replace with your backend URL
+      const backendUrl = 'http://127.0.0.1:8000'; // Replace with your backend URL
       let geojson;
       // Construct GeoJSON polygon from boundingBox
       if (uploadedGeojson) {
