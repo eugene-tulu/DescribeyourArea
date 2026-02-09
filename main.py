@@ -23,6 +23,11 @@ load_dotenv()
 
 app = FastAPI(title="GeoContext Generator API")
 
+origins = [
+    "https://describearea.vercel.app", 
+    "http://localhost:3000",            # For local testing
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
