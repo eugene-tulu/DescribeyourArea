@@ -226,7 +226,7 @@ export default function Home() {
     setResponse('');
 
     try {
-      const backendUrl = 'http://127.0.0.1:8000'; // Replace with your backend URL
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || 'http://127.0.0.1:8000';
       let geojson;
       // Construct GeoJSON polygon from boundingBox
       if (uploadedGeojson) {
