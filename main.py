@@ -19,13 +19,19 @@ import os
 from dotenv import load_dotenv
 import google.generativeai as genai
 
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
 load_dotenv()
 
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
 app = FastAPI(title="GeoContext Generator API")
 
 origins = [
-    "https://describearea.vercel.app", 
-    "http://localhost:3000",            # For local testing
+    "https://describearea.vercel.app",
+    "http://localhost:3000",
 ]
 
 app.add_middleware(
@@ -38,7 +44,9 @@ app.add_middleware(
 
 STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1"
 
-# ---------------- Schemas ---------------- #
+# --------------------------------------------------
+# SCHEMAS
+# --------------------------------------------------
 class GeoJSONRequest(BaseModel):
     geojson: dict
 
@@ -46,7 +54,9 @@ class ContextResponse(BaseModel):
     summary: Dict[str, Any]
     narrative: Optional[str] = None
 
-# ---------------- Landcover Lookup ---------------- #
+# --------------------------------------------------
+# LANDCOVER LOOKUP
+# --------------------------------------------------
 ESA_WORLDCOVER_CLASSES = {
     10: "Tree cover",
     20: "Shrubland",
@@ -62,25 +72,31 @@ ESA_WORLDCOVER_CLASSES = {
 }
 
 def label_landcover(percentages: Dict[str, float]) -> Dict[str, float]:
-    labeled = {}
-    for code, pct in percentages.items():
-        label = ESA_WORLDCOVER_CLASSES.get(int(code), f"Unknown ({code})")
-        labeled[label] = pct
-    return labeled
+    return {
+        ESA_WORLDCOVER_CLASSES.get(int(code), f"Unknown ({code})"): pct
+        for code, pct in percentages.items()
+    }
 
-# ---------------- Helpers ---------------- #
+# --------------------------------------------------
+# HELPERS
+# --------------------------------------------------
 def normalize_geojson(geojson: dict) -> dict:
     if geojson.get("type") == "FeatureCollection":
         return geojson["features"][0]
     if geojson.get("type") == "Feature":
         return geojson
-    raise HTTPException(400, "Unsupported GeoJSON type")
+    raise HTTPException(status_code=400, detail="Unsupported GeoJSON type")
 
 def compute_raster_stats(asset_href: str, geojson: dict) -> Dict[str, float]:
     try:
         signed_url = planetary_computer.sign(asset_href)
         with rasterio.open(signed_url) as src:
-            clipped, _ = mask(src, [geojson["geometry"]], crop=True, nodata=src.nodata)
+            clipped, _ = mask(
+                src,
+                [geojson["geometry"]],
+                crop=True,
+                nodata=src.nodata,
+            )
             arr = clipped[0].astype(float)
             arr[arr == src.nodata] = np.nan
 
@@ -94,7 +110,7 @@ def compute_raster_stats(asset_href: str, geojson: dict) -> Dict[str, float]:
         return {"error": str(e)}
 
 def interpret_terrain(dem: Dict[str, float]) -> Dict[str, Any]:
-    if not dem or dem.get("mean") is None:
+    if not dem or "mean" not in dem:
         return dem
 
     elevation_range = dem["max"] - dem["min"]
@@ -116,44 +132,49 @@ def compute_landcover_percentages(asset_href: str, geojson: dict) -> Dict[str, A
     try:
         signed_url = planetary_computer.sign(asset_href)
         with rasterio.open(signed_url) as src:
-            clipped, _ = mask(src, [geojson["geometry"]], crop=True, nodata=src.nodata)
+            clipped, _ = mask(
+                src,
+                [geojson["geometry"]],
+                crop=True,
+                nodata=src.nodata,
+            )
             arr = clipped[0].astype(int)
             arr = arr[arr != src.nodata]
 
-            total = arr.size
-            if total == 0:
+            if arr.size == 0:
                 return {"error": "No valid landcover pixels"}
 
             counts = Counter(arr.flatten())
+            total = arr.size
+
             percentages = {
                 str(k): round((v / total) * 100, 2)
                 for k, v in counts.items()
             }
 
             labeled = label_landcover(percentages)
-
             dominant_class = max(labeled, key=labeled.get)
-            dominant_percentage = labeled[dominant_class]
 
             return {
                 "classes": labeled,
                 "dominant_class": dominant_class,
-                "dominant_percentage": dominant_percentage,
+                "dominant_percentage": labeled[dominant_class],
             }
-
     except Exception as e:
         return {"error": str(e)}
 
-# ---------------- Gemini ---------------- #
+# --------------------------------------------------
+# GEMINI
+# --------------------------------------------------
 def load_prompt_template(name: str) -> str:
-    with open(os.path.join("prompts", name), "r") as f:
+    path = os.path.join("prompts", name)
+    with open(path, "r") as f:
         return f.read()
 
 def generate_study_area_narrative(
     summary: Dict[str, Any],
     audience: Literal["academic", "investor", "farmer", "policy"] = "academic",
 ) -> str:
-
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return "AI narrative generation unavailable: API key not configured"
@@ -169,85 +190,89 @@ def generate_study_area_narrative(
     response = model.generate_content(prompt)
     return response.text.strip()
 
-# ---------------- API ---------------- #
-@app.post("/generate-context")
+# --------------------------------------------------
+# API
+# --------------------------------------------------
+@app.post("/generate-context", response_model=ContextResponse)
 async def generate_context(
     request: GeoJSONRequest,
     include_narrative: bool = False,
     audience: str = "academic",
 ):
-
     geojson = normalize_geojson(request.geojson)
+
     coords = geojson["geometry"]["coordinates"][0]
     xs = [c[0] for c in coords]
     ys = [c[1] for c in coords]
     bbox = [min(xs), min(ys), max(xs), max(ys)]
 
     catalog = pystac_client.Client.open(
-        STAC_URL, modifier=planetary_computer.sign_inplace
+        STAC_URL,
+        modifier=planetary_computer.sign_inplace,
     )
 
-    async def event_stream():
-        # DEM
-        dem_items = list(
-            catalog.search(collections=["nasadem"], bbox=bbox, limit=1).items()
+    # DEM
+    dem_items = list(
+        catalog.search(collections=["nasadem"], bbox=bbox, limit=1).items()
+    )
+    dem_href = dem_items[0].assets["elevation"].href if dem_items else None
+
+    # LANDCOVER
+    lc_items = list(
+        catalog.search(collections=["esa-worldcover"], bbox=bbox, limit=1).items()
+    )
+    lc_href = lc_items[0].assets["map"].href if lc_items else None
+
+    raw_dem, landcover = await asyncio.gather(
+        asyncio.to_thread(compute_raster_stats, dem_href, geojson),
+        asyncio.to_thread(compute_landcover_percentages, lc_href, geojson),
+    )
+
+    dem = interpret_terrain(raw_dem)
+
+    # NDVI (MODIS – coarse but fast)
+    year = datetime.date.today().year - 1
+    months = ["01", "04", "07", "10"]
+    ndvi_vals = []
+
+    for m in months:
+        search = catalog.search(
+            collections=["modis-13A1-061"],
+            bbox=bbox,
+            datetime=f"{year}-{m}",
         )
-        dem_href = dem_items[0].assets["elevation"].href if dem_items else None
-
-        # NDVI (MODIS)
-        year = datetime.date.today().year - 1
-        months = {"Jan": "01", "Apr": "04", "Jul": "07", "Oct": "10"}
-        ndvi_vals = []
-
-        for m in months.values():
-            search = catalog.search(
-                collections=["modis-13A1-061"], bbox=bbox, datetime=f"{year}-{m}"
+        try:
+            item = next(search.items())
+            href = planetary_computer.sign(
+                item.assets["500m_16_days_NDVI"].href
             )
-            try:
-                item = next(search.items())
-                href = planetary_computer.sign(item.assets["500m_16_days_NDVI"].href)
-                with rasterio.open(href) as src:
-                    arr = src.read(1).astype(float)
-                    arr[arr <= -2000] = np.nan
-                    ndvi_vals.append(arr * 0.0001)
-            except StopIteration:
-                continue
+            with rasterio.open(href) as src:
+                arr = src.read(1).astype(float)
+                arr[arr <= -2000] = np.nan
+                ndvi_vals.append(arr * 0.0001)
+        except StopIteration:
+            continue
 
-        ndvi = (
-            {
-                "mean": float(np.nanmean(ndvi_vals)),
-                "min": float(np.nanmin(ndvi_vals)),
-                "max": float(np.nanmax(ndvi_vals)),
-                "std": float(np.nanstd(ndvi_vals)),
-            }
-            if ndvi_vals
-            else None
-        )
-
-        # Landcover
-        lc_items = list(
-            catalog.search(collections=["esa-worldcover"], bbox=bbox, limit=1).items()
-        )
-        lc_href = lc_items[0].assets["map"].href if lc_items else None
-
-        raw_dem, landcover = await asyncio.gather(
-            asyncio.to_thread(compute_raster_stats, dem_href, geojson),
-            asyncio.to_thread(compute_landcover_percentages, lc_href, geojson),
-        )
-
-        dem = interpret_terrain(raw_dem)
-
-        summary = {
-            "dem": dem,
-            "ndvi": ndvi,
-            "landcover": landcover,
+    ndvi = (
+        {
+            "mean": float(np.nanmean(ndvi_vals)),
+            "min": float(np.nanmin(ndvi_vals)),
+            "max": float(np.nanmax(ndvi_vals)),
+            "std": float(np.nanstd(ndvi_vals)),
         }
+        if ndvi_vals
+        else None
+    )
 
-        result = {"summary": summary}
+    summary = {
+        "dem": dem,
+        "ndvi": ndvi,
+        "landcover": landcover,
+    }
 
-        if include_narrative:
-            result["narrative"] = generate_study_area_narrative(summary, audience)
+    result = {"summary": summary}
 
-        yield f"data: {json.dumps(result)}\n\n"
+    if include_narrative:
+        result["narrative"] = generate_study_area_narrative(summary, audience)
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+    return result
