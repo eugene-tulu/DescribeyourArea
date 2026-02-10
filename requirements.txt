@@ -1,13 +1,29 @@
-fastapi
-uvicorn[standard]
-httpx
-rasterio
-numpy
-pystac-client
-odc-stac
-planetary-computer
-sentry-sdk
-geopandas
-shapely
-google-generativeai
-python-dotenv
+# Core API
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+python-multipart>=0.0.6
+
+# CORS
+fastapi-cors>=0.0.1
+
+# Geospatial & STAC
+pystac-client>=0.7.5
+planetary-computer>=1.0.0
+odc-stac>=0.4.2
+rioxarray>=0.15.0
+xarray>=2023.12.0
+dask[array]>=2023.12.0
+rasterio>=1.3.6
+shapely>=2.0.2
+geopandas>=0.14.2
+
+# Scientific Computing
+numpy>=1.26.0
+scipy>=1.11.0
+
+# AI/ML
+google-generativeai>=0.4.0
+
+# Environment
+python-dotenv>=1.0.0
