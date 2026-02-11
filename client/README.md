@@ -1,36 +1,57 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# GeoContext Frontend
 
-## Getting Started
+This is the frontend for the GeoContext Generator API, built with Next.js.
 
-First, run the development server:
+## Configuration
+
+To connect the frontend to the deployed backend, set the following environment variable:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+NEXT_PUBLIC_BACKEND_URL=https://describeyourarea-production.up.railway.app
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### Development
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+For local development with a locally running backend:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+# Install dependencies
+npm install
 
-## Learn More
+# Run the development server
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+The frontend will automatically connect to `http://127.0.0.1:8000` by default when no `NEXT_PUBLIC_BACKEND_URL` is set.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+### Production
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+To run with the deployed Railway backend:
 
-## Deploy on Vercel
+```bash
+# Set the environment variable
+export NEXT_PUBLIC_BACKEND_URL=https://describeyourarea-production.up.railway.app
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+# Install dependencies
+npm install
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+# Build the application
+npm run build
+
+# Start the production server
+npm start
+```
+
+## Features
+
+- Interactive map for selecting study areas
+- GeoJSON upload capability
+- Elevation analysis
+- NDVI (Normalized Difference Vegetation Index) analysis
+- Landcover classification
+- AI-powered narrative descriptions
+- Responsive design for all devices
+
+## Deployment
+
+The frontend can be deployed to Vercel, Netlify, or any platform that supports Next.js applications.

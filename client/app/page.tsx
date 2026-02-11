@@ -50,6 +50,7 @@ export default function Home() {
   const [response, setResponse] = useState<string>('');
   const [isSearching, setIsSearching] = useState(false);
   const [includeNarrative, setIncludeNarrative] = useState<boolean>(true);
+  const [includeNdvi, setIncludeNdvi] = useState<boolean>(true);
   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
   const [uploadedGeojson, setUploadedGeojson] = useState<Feature<Geometry> | FeatureCollection<Geometry> | null>(null);
 
@@ -129,6 +130,8 @@ export default function Home() {
   min: number;
   max: number;
   std: number;
+  elevation_range_m?: number;
+  terrain_type?: string;
   }
 
   // interface TemperatureStats {
@@ -143,6 +146,12 @@ export default function Home() {
   min: number;
   max: number;
   std: number;
+  p25?: number;
+  p75?: number;
+  scene_count?: number;
+  resolution_m?: number;
+  method?: string;
+  warning?: string;
   }
 
   interface LandcoverStats {
@@ -172,6 +181,9 @@ export default function Home() {
     lines.push(
       `Elevation: averages around ${dem.mean.toFixed(0)} m (range: ${dem.min}–${dem.max} m, Standard deviation of ${dem.std.toFixed(1)}).`
     );
+    if (dem.terrain_type) {
+      lines.push(`Terrain: ${dem.terrain_type}.`);
+    }
   }
 
   // // 2. Temperature context
@@ -184,8 +196,14 @@ export default function Home() {
   // 3. Vegetation NDVI context
   if (ndvi?.mean != null) {
     lines.push(
-      `Vegetation health: (NDVI ≈ ${ndvi.mean.toFixed(2)}, on a scale -1 to +1).`
+      `Vegetation health: NDVI ≈ ${ndvi.mean.toFixed(2)} (scale: -1 to +1, where higher values indicate denser vegetation).`
     );
+    if (ndvi.method) {
+      lines.push(`NDVI method: ${ndvi.method}.`);
+    }
+    if (ndvi.warning) {
+      lines.push(`Note: ${ndvi.warning}.`);
+    }
   }
 
   // 4. Landcover breakdown
@@ -204,13 +222,30 @@ export default function Home() {
   };
 
   if (landcover && typeof landcover === "object") {
-    const parts: string[] = [];
-    for (const [code, pct] of Object.entries(landcover)) {
-      const label = classMap[code] || `Class ${code}`;
-      parts.push(`${label} (${(+pct).toFixed(2)}%)`);
-    }
-    if (parts.length > 0) {
-      lines.push(`Land cover composition: ${parts.join(", ")}.`);
+    // Check if this is the new structure with classes, dominant_class, etc.
+    if (landcover.classes) {
+      // Handle new structure: { classes: {...}, dominant_class: "...", dominant_percentage: ... }
+      const landcoverClasses = landcover.classes;
+      const parts: string[] = [];
+      
+      for (const [code, pct] of Object.entries(landcoverClasses)) {
+        const label = classMap[code] || `Class ${code}`;
+        parts.push(`${label} (${(+pct).toFixed(2)}%)`);
+      }
+      
+      if (parts.length > 0) {
+        lines.push(`Land cover composition: ${parts.join(", ")}.`);
+      }
+    } else {
+      // Handle old structure: direct code-percentage mapping
+      const parts: string[] = [];
+      for (const [code, pct] of Object.entries(landcover)) {
+        const label = classMap[code] || `Class ${code}`;
+        parts.push(`${label} (${(+pct).toFixed(2)}%)`);
+      }
+      if (parts.length > 0) {
+        lines.push(`Land cover composition: ${parts.join(", ")}.`);
+      }
     }
   }
 
@@ -250,8 +285,8 @@ export default function Home() {
         };
       }
       console.log("Sending to backend:", JSON.stringify({ geojson }, null, 2));
-      // Add include_narrative parameter to the URL based on checkbox state
-      const response = await fetch(`${backendUrl}/generate-context?include_narrative=${includeNarrative}&audience=academic`, {
+      // Add include_narrative and include_ndvi parameters to the URL based on checkbox states
+      const response = await fetch(`${backendUrl}/generate-context?include_narrative=${includeNarrative}&audience=academic&include_ndvi=${includeNdvi}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -261,39 +296,7 @@ export default function Home() {
 
       if (!response.ok) throw new Error(`HTTP error! ${response.status}`);
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error("No response body");
-
-      const decoder = new TextDecoder();
-      let fullText = "";
-      let jsonString = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        fullText += chunk;
-
-        // Each SSE message is separated by newlines
-        chunk.split("\n").forEach((line) => {
-          if (line.startsWith("data:")) {
-            const msg = line.replace("data:", "").trim();
-
-            try {
-              // Check if it's valid JSON (the final summary)
-              jsonString = msg; // save final JSON string
-            } catch {
-              // Not JSON (just a progress message), ignore
-              console.log("SSE message:", msg);
-            }
-          }
-        });
-      }
-
-      // ✅ Now parse only the final JSON payload
-      if(!jsonString) throw new Error("No JSON summary received");
-      const data = JSON.parse(jsonString);
+      const data = await response.json();
       setResponse(summarizeData(data.summary, data.narrative));
       setSummaryText(summarizeData(data.summary, data.narrative));
       } catch (err) {
@@ -430,21 +433,35 @@ export default function Home() {
                 <CardTitle className="text-white">Options</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="includeNarrative"
-                    checked={includeNarrative}
-                    onChange={(e) => setIncludeNarrative(e.target.checked)}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                  />
-                  <label htmlFor="includeNarrative" className="text-sm text-slate-300">
-                    Include AI-generated narrative description
-                  </label>
+                <div className="space-y-3">
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="includeNarrative"
+                      checked={includeNarrative}
+                      onChange={(e) => setIncludeNarrative(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                    />
+                    <label htmlFor="includeNarrative" className="text-sm text-slate-300">
+                      Include AI-generated narrative description
+                    </label>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="checkbox"
+                      id="includeNdvi"
+                      checked={includeNdvi}
+                      onChange={(e) => setIncludeNdvi(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                    />
+                    <label htmlFor="includeNdvi" className="text-sm text-slate-300">
+                      Include NDVI analysis (recommended for areas under 10 km²)
+                    </label>
+                  </div>
+                  <p className="text-xs text-slate-400 mt-2">
+                    Enhances statistical data with contextual descriptions
+                  </p>
                 </div>
-                <p className="text-xs text-slate-400 mt-2">
-                  Enhances statistical data with contextual descriptions
-                </p>
               </CardContent>
             </Card>
             
