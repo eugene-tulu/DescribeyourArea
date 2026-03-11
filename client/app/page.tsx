@@ -54,7 +54,6 @@ export default function Home() {
   const [response, setResponse] = useState<string>('');
   const [isSearching, setIsSearching] = useState(false);
   const [includeNarrative, setIncludeNarrative] = useState<boolean>(true);
-  const [includeNdvi, setIncludeNdvi] = useState<boolean>(true);
   const [audience, setAudience] = useState<string>('academic');
   const [summaryType, setSummaryType] = useState<'raw' | 'narrative'>('narrative');
   const [selectedDatasets, setSelectedDatasets] = useState<string[]>(['dem', 'landcover', 'ndvi']);
@@ -296,7 +295,9 @@ export default function Home() {
       // Add include_narrative and include_ndvi parameters to the URL based on selections
       const includeNarrativeParam = summaryType === 'narrative';
       const datasetsParam = selectedDatasets.join(',');
-      const response = await fetch(`${backendUrl}/generate-context?include_narrative=${includeNarrativeParam}&audience=${audience}&include_ndvi=${includeNdvi}&datasets=${datasetsParam}`, {
+      // Determine if NDVI should be included based on dataset selection
+      const includeNdviParam = selectedDatasets.includes('ndvi');
+      const response = await fetch(`${backendUrl}/generate-context?include_narrative=${includeNarrativeParam}&audience=${audience}&include_ndvi=${includeNdviParam}&datasets=${datasetsParam}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -499,18 +500,6 @@ export default function Home() {
                         </div>
                       ))}
                     </div>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <input
-                      type="checkbox"
-                      id="includeNdvi"
-                      checked={includeNdvi}
-                      onChange={(e) => setIncludeNdvi(e.target.checked)}
-                      className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-                    />
-                    <label htmlFor="includeNdvi" className="text-sm text-slate-300">
-                      Include NDVI analysis (recommended for areas under 10 km²)
-                    </label>
                   </div>
                   <p className="text-xs text-slate-400 mt-2">
                     Enhances statistical data with contextual descriptions
