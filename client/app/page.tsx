@@ -13,6 +13,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Feature, FeatureCollection, Geometry } from "geojson";
 import CopySummary from '@/components/Copy';
+import { useToast } from '@/hooks/use-toast';
 
 
 // Dynamic imports to avoid SSR issues with Leaflet
@@ -44,22 +45,22 @@ interface BoundingBox {
 }
 
 export default function Home() {
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [summaryText, setSummaryText] = useState<string>('');
-  const [showResults, setShowResults] = useState(false);
-  const [selectedLocation, setSelectedLocation] = useState<{lat: number, lng: number} | null>(null);
-  const [boundingBox, setBoundingBox] = useState<BoundingBox | null>(null);
-  const [isLoading, setIsLoading] = useState(false);
-  const [response, setResponse] = useState<string>('');
-  const [isSearching, setIsSearching] = useState(false);
-  const [includeNarrative, setIncludeNarrative] = useState<boolean>(true);
-  const [audience, setAudience] = useState<string>('academic');
-  const [summaryType, setSummaryType] = useState<'raw' | 'narrative'>('narrative');
-  const [selectedDatasets, setSelectedDatasets] = useState<string[]>(['dem', 'landcover', 'ndvi']);
-  const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
-  const searchTimeout = useRef<NodeJS.Timeout | null>(null);
-  const [uploadedGeojson, setUploadedGeojson] = useState<Feature<Geometry> | FeatureCollection<Geometry> | null>(null);
+   const { toast } = useToast();
+   const [searchQuery, setSearchQuery] = useState('');
+   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+   const [summaryText, setSummaryText] = useState<string>('');
+   const [showResults, setShowResults] = useState(false);
+   const [selectedLocation, setSelectedLocation] = useState<{lat: number, lng: number} | null>(null);
+   const [boundingBox, setBoundingBox] = useState<BoundingBox | null>(null);
+   const [isLoading, setIsLoading] = useState(false);
+   const [response, setResponse] = useState<string>('');
+   const [isSearching, setIsSearching] = useState(false);
+   const [audience, setAudience] = useState<string>('academic');
+   const [summaryType, setSummaryType] = useState<'raw' | 'narrative'>('narrative');
+   const [selectedDatasets, setSelectedDatasets] = useState<string[]>(['dem', 'landcover', 'ndvi']);
+   const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
+   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
+   const [uploadedGeojson, setUploadedGeojson] = useState<Feature<Geometry> | FeatureCollection<Geometry> | null>(null);
 
 
   // Search for places using Nominatim
@@ -124,9 +125,17 @@ export default function Home() {
         const parsed = JSON.parse(event.target?.result as string);
         setUploadedGeojson(parsed);
         // boundingBox auto-updated in MapComponent
+        toast({
+          title: "Success",
+          description: "GeoJSON file uploaded successfully.",
+        });
       } catch (err) {
         console.error("Invalid GeoJSON file", err);
-        alert("Invalid GeoJSON file.");
+        toast({
+          title: "Error",
+          description: "Invalid GeoJSON file. Please check the file format.",
+          variant: "destructive",
+        });
       }
     };
     reader.readAsText(file);
@@ -578,7 +587,7 @@ export default function Home() {
                 {summaryText && <CopySummary summaryText={summaryText} />}
               </CardHeader>
               <CardContent>
-                <div className="bg-black/20 rounded-lg p-4 min-h-[200px] font-mono text-sm">
+                <div className="bg-black/20 rounded-lg p-4 min-h-[200px]">
                   {isLoading ? (
                     <div className="flex items-center justify-center h-48">
                       <div className="text-center">
@@ -593,7 +602,11 @@ export default function Home() {
                       </div>
                     </div>
                   ) : response ? (
-                    <pre className="text-slate-200 whitespace-pre-wrap break-words">{response}</pre>
+                    <div className="text-slate-200 whitespace-pre-wrap break-words text-base leading-relaxed">
+                      {response.split('\n').map((paragraph, index) => (
+                        <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
+                      ))}
+                    </div>
                   ) : (
                     <div className="flex items-center justify-center h-48 text-slate-400">
                       <div className="text-center">

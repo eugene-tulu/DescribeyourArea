@@ -30,7 +30,7 @@ interface BoundingBox {
 interface MapComponentProps {
   selectedLocation: { lat: number; lng: number } | null;
   onBoundingBoxCreated: (bbox: BoundingBox) => void;
-  uploadedGeoJSON?: GeoJSON.GeoJsonObject | null; // NEW PROP
+  uploadedGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
 }
 
@@ -65,6 +65,51 @@ function MapController({
     return geojsonData;
   }, []);
 
+  // Memoize event handlers to prevent recreation on every render
+  const handleCreated = useCallback((e: any) => {
+    if (!drawnItemsRef.current) return;
+    
+    const { layer } = e;
+    drawnItemsRef.current.clearLayers();
+    drawnItemsRef.current.addLayer(layer);
+
+    const bounds = layer.getBounds();
+    const bbox: BoundingBox = {
+      north: bounds.getNorth(),
+      south: bounds.getSouth(),
+      east: bounds.getEast(),
+      west: bounds.getWest(),
+    };
+    onBoundingBoxCreated(bbox);
+    
+    if (onSaveFeatures) {
+      const geojsonData = convertToGeoJSON();
+      if (geojsonData) {
+        onSaveFeatures(geojsonData);
+      }
+    }
+  }, [onBoundingBoxCreated, onSaveFeatures, convertToGeoJSON]);
+
+  const handleDeleted = useCallback(() => {
+    onBoundingBoxCreated({ north: 0, south: 0, east: 0, west: 0 });
+    
+    if (onSaveFeatures) {
+      const geojsonData = convertToGeoJSON();
+      if (geojsonData) {
+        onSaveFeatures(geojsonData);
+      }
+    }
+  }, [onBoundingBoxCreated, onSaveFeatures, convertToGeoJSON]);
+
+  const handleEdited = useCallback((e: any) => {
+    if (onSaveFeatures) {
+      const geojsonData = convertToGeoJSON();
+      if (geojsonData) {
+        onSaveFeatures(geojsonData);
+      }
+    }
+  }, [onSaveFeatures, convertToGeoJSON]);
+
   useEffect(() => {
     if (selectedLocation) {
       map.setView([selectedLocation.lat, selectedLocation.lng], 12);
@@ -74,13 +119,14 @@ function MapController({
   useEffect(() => {
     // Add graticule overlay
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (L as any).latlngGraticule({
+    const graticule = (L as any).latlngGraticule({
       showLabel: true,
       opacity: 0.6,
       weight: 0.8,
       color: "#999",
       zoomInterval: [{ start: 2, end: 20, interval: 1 }],
-    }).addTo(map);
+    });
+    graticule.addTo(map);
 
     // Init drawn items
     if (!drawnItemsRef.current) {
@@ -132,58 +178,22 @@ function MapController({
       drawControlRef.current = drawControl;
       map.addControl(drawControl);
 
-      // Handle draw events
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      map.on(L.Draw.Event.CREATED, (e: any) => {
-        const { layer } = e;
+      map.on(L.Draw.Event.CREATED, handleCreated);
+      map.on(L.Draw.Event.DELETED, handleDeleted);
+      map.on(L.Draw.Event.EDITED, handleEdited);
 
-        if (drawnItemsRef.current) {
-          drawnItemsRef.current.clearLayers();
-          drawnItemsRef.current.addLayer(layer);
+      // Return cleanup function
+      return () => {
+        map.off(L.Draw.Event.CREATED, handleCreated);
+        map.off(L.Draw.Event.DELETED, handleDeleted);
+        map.off(L.Draw.Event.EDITED, handleEdited);
+        if (drawControlRef.current) {
+          map.removeControl(drawControlRef.current);
+          drawControlRef.current = null;
         }
-
-        // Get the bounds regardless of the shape type
-        const bounds = layer.getBounds();
-        const bbox: BoundingBox = {
-          north: bounds.getNorth(),
-          south: bounds.getSouth(),
-          east: bounds.getEast(),
-          west: bounds.getWest(),
-        };
-        onBoundingBoxCreated(bbox);
-        
-        // Convert to GeoJSON and save if callback is provided
-        if (onSaveFeatures) {
-          const geojsonData = convertToGeoJSON();
-          if (geojsonData) {
-            onSaveFeatures(geojsonData);
-          }
-        }
-      });
-
-      map.on(L.Draw.Event.DELETED, () => {
-        onBoundingBoxCreated({ north: 0, south: 0, east: 0, west: 0 });
-        
-        // Convert to GeoJSON and save if callback is provided
-        if (onSaveFeatures) {
-          const geojsonData = convertToGeoJSON();
-          if (geojsonData) {
-            onSaveFeatures(geojsonData);
-          }
-        }
-      });
-      
-      // Handle edit events
-      map.on(L.Draw.Event.EDITED, (e: any) => {
-        if (onSaveFeatures) {
-          const geojsonData = convertToGeoJSON();
-          if (geojsonData) {
-            onSaveFeatures(geojsonData);
-          }
-        }
-      });
+      };
     }
-  }, [map, onBoundingBoxCreated, onSaveFeatures, convertToGeoJSON]);
+  }, [map, handleCreated, handleDeleted, handleEdited]);
 
   return null;
 }
