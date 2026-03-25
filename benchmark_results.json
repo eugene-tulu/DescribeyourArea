@@ -1,0 +1,12 @@
+{
+  "stac_connection_ms": 114,
+  "stac_search_ms": 594,
+  "zarr_url_lookup_ms": 0,
+  "zarr_open_ms": 4308,
+  "datatree_inspect_ms": 0,
+  "data_load_10km2_ms": 1140,
+  "data_load_10km2_mb": 19.1,
+  "ndvi_compute_ms": 19,
+  "total_time_ms": 6175,
+  "estimated_speedup_vs_pc": 1.1
+}

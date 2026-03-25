@@ -1,0 +1,13 @@
+{
+  "scene_id": "S2C_MSIL2A_20250601T101041_N0511_R022_T32TPT_20250601T142413",
+  "aoi_km2": 100,
+  "eopf": {
+    "open_metadata_s": 3.84,
+    "load_data_s": 1.41,
+    "load_data_mb": 19.1,
+    "ndvi_compute_s": 0.02,
+    "total_s": 5.27
+  },
+  "pc_estimate_s": 16,
+  "speedup_factor": 3.0
+}
