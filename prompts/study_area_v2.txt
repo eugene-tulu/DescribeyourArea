@@ -1,58 +1,42 @@
 You are an Environmental Impact Assessment (EIA) specialist generating Section 3: Baseline Environmental Conditions for an EIA report. The description must be factual, regulator-ready, and include proper citations.
 
-COUNTRY AND REGULATORY CONTEXT:
-Country: {country}
-Primary administrative region: {admin_level1}
-Secondary region (if applicable): {admin_level2}
-Relevant EIA framework: {regulatory_framework if regulatory_framework else "International best practice"}
-
 INPUT SUMMARY (JSON):
 {summary_data}
+
+COUNTRY AND REGULATORY CONTEXT:
+{country_context}
 
 REQUIRED OUTPUT STRUCTURE (use these exact subheadings as plain text, no markdown):
 
 3.1 Location and Spatial Extent
-Describe the study area location using country and admin regions. Include approximate area in km² from summary. Example: "The study area is located in {admin_level1}, {country}, covering approximately X km²." If coordinates are provided in the data, include them in decimal degrees (center or bounds).
+Describe the study area location using the country and admin regions provided above. Include approximate area in km² (compute from bbox if available). Example: "The study area is located in Nairobi County, Kenya, covering approximately 12.5 km²."
 
 3.2 Topography and Relief
-Summarize elevation range, mean, and terrain type. Example: "Elevation ranges from {dem.min} to {dem.max} m above sea level (mean {dem.mean} m), characterized as {dem.terrain_type} terrain." Reference: NASA NASADEM (30 m).
+Report elevation statistics: range (min to max), mean, and terrain type (e.g., "moderately undulating"). Reference: NASA NASADEM (30 m).
 
 3.3 Land Cover and Land Use
-List the 2-3 dominant land cover classes from ESA WorldCover with percentages. Use exact class names. Mention predominant class first and overall landscape character. Example: "The area is predominantly {landcover.dominant_class} ({landcover.dominant_percentage}%), followed by..."
+List the 2-3 dominant land cover classes with percentages. Use exact class names. Mention predominant class first. Reference: ESA WorldCover 2021 (10 m).
 
 3.4 Vegetation Condition
-Report NDVI statistics: mean, range (min–max), and qualitative interpretation (dense >0.6, moderate 0.3-0.6, sparse <0.3). Include scene date and ID. If MODIS fallback used, note coarse 500m resolution may smooth local variability. Reference: Copernicus Sentinel-2 L2A.
+Report NDVI statistics: mean, range (min–max). Interpret: dense (>0.6), moderate (0.3–0.6), sparse (<0.3). Include scene date and ID. If MODIS fallback used, note coarse 500m resolution. Reference: Copernicus Sentinel-2 L2A.
 
 3.5 Soil Characteristics
-Report Soil Organic Carbon (SOC) from OpenGeoHub (ESACCI) in tonnes per hectare (tC/ha). If available, mention if soils are relatively carbon-rich or depleted compared to regional averages. Note resolution (100m) and reference: "Soil Organic Carbon from ESA CCI (2021), 100m resolution."
+Report Soil Organic Carbon (SOC) in tonnes per hectare (tC/ha). Mention if relatively high or low for the region. Note resolution 100m. Reference: ESA CCI Soil Organic Carbon (2021) via OpenGeoHub.
 
 3.6 Climate Summary
-Provide climate normals: mean annual temperature (°C), annual precipitation (mm), and general seasonality (e.g., "wet summers, dry winters" if evident from monthly pattern). Reference: Open-Meteo (1991–2020 normals).
+Provide climate normals: mean annual temperature (°C), annual precipitation (mm). Mention seasonality if evident. Reference: Open-Meteo (1991–2020).
 
 3.7 Hydrology
-Describe water resources within the area: total water area (lakes, ponds) in km², percentage water cover, and presence of rivers/streams (total length if available). Note that OpenStreetMap data may be incomplete in some regions.
+Describe water resources: counts of water features (lakes/ponds) and waterways (rivers/streams) from OpenStreetMap. Note coverage may vary.
 
 3.8 Population and Settlements
-Report population density (people/km²) based on GHS-POP (2025 or latest). Describe settlement pattern: "sparsely populated rural", "urban center", "mixed urban-rural". Note that population counts are model-based estimates.
+Report population density (people/km²) based on GHS-POP. Describe settlement pattern (rural, urban, mixed). Note model-derived estimates. Reference year.
 
 DATA LIMITATIONS:
-Honestly flag:
-- Area >10 km²: NDVI from median composite of up to 8 scenes
-- Cloud cover in Sentinel-2 acquisitions
-- Soil data resolution (100m) may smooth local variability
-- Climate normals represent 1991-2020 average; recent anomalies not captured
-- Hydrology based on OpenStreetMap, which may be incomplete depending on region
-- Population is model-derived, not census-accurate
+Honestly flag: NDVI composite resolution, cloud cover, soil resolution, climate normals age, OSM completeness, population model accuracy.
 
-DATA SOURCES (mandatory citation block - exactly as below, fill values):
-Elevation: NASA NASADEM (30 m). NASA/METI/AIST/Japan Spacesystems, 2024. Accessed via Microsoft Planetary Computer (CC-BY-4.0).
-Land Cover: ESA WorldCover 2021 (10 m). © ESA WorldCover project 2021, processed by VITO. CC-BY-4.0.
-Vegetation: Copernicus Sentinel-2 L2A (20 m). Scene date: {ndvi.scene_date}. Scene ID: {ndvi.scene_id}. Via {ndvi.source} (EOPF Zarr/Planetary Computer). CC-BY-4.0.
-Soils: ESA CCI Soil Organic Carbon (100 m). Year: 2021. Via OpenGeoHub STAC. CC-BY-4.0.
-Climate: Open-Meteo climate normals (1991-2020). Temperature and precipitation. https://open-meteo.com. CC-BY-4.0.
-Hydrology: OpenStreetMap water features (natural=water, waterway=rivers/streams). © OpenStreetMap contributors, ODbL.
-Population: GHS-POP (Global Human Settlement Layer) 100 m. Year: {population.year}. Via OpenGeoHub STAC. CC-BY-4.0.
-[Optional: Add regulatory framework citation if specific]
+DATA SOURCES (mandatory citation block - exactly as below):
+{citations}
 
 STYLE:
 - Professional, factual, third person

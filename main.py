@@ -860,6 +860,33 @@ async def fetch_hydrology(bbox: list, geojson_geom: dict) -> dict | None:
         print(f"⚠️ Hydrology fetch failed: {type(e).__name__}: {str(e)[:100]}", file=sys.stderr)
         return None
 
+async def get_country_from_centroid(geojson_geom: dict) -> Optional[str]:
+    """Return country name using Nominatim."""
+    try:
+        from shapely.geometry import shape
+        centroid = shape(geojson_geom).centroid
+        lat, lon = centroid.y, centroid.x
+
+        resp = await asyncio.to_thread(
+            requests.get,
+            "https://nominatim.openstreetmap.org/reverse",
+            params={
+                "format": "json",
+                "lat": lat,
+                "lon": lon,
+                "zoom": 4,
+                "addressdetails": 1,
+            },
+            headers={"User-Agent": "GeoContextualize/1.0"},
+            timeout=10.0,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            return data.get("address", {}).get("country")
+    except Exception as e:
+        print(f"⚠️ Country lookup failed: {e}", file=sys.stderr)
+    return None
+
 # --------------------------------------------------
 # GEMINI
 # --------------------------------------------------
@@ -879,9 +906,39 @@ def generate_study_area_narrative(
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel("gemini-2.5-flash")
 
-    prompt = load_prompt_template("study_area_v1.txt").format(
+    # Build country/regulatory context
+    country = summary.get("country", "Unknown")
+    admin1 = summary.get("admin_level1") or ""
+    admin2 = summary.get("admin_level2") or ""
+    reg_fw = summary.get("regulatory_framework")
+    parts = [f"Country: {country}"]
+    if admin1:
+        parts.append(f"Primary administrative region: {admin1}")
+    if admin2:
+        parts.append(f"Secondary region: {admin2}")
+    if reg_fw:
+        parts.append(f"Relevant EIA framework: {reg_fw}")
+    else:
+        parts.append("Relevant EIA framework: International best practice")
+    country_context = "\n".join(parts)
+
+    # Build citations block
+    ndvi = summary.get("ndvi", {})
+    pop = summary.get("population", {})
+    citations = f"""Elevation: NASA NASADEM (30 m). NASA/METI/AIST/Japan Spacesystems, 2024. Accessed via Microsoft Planetary Computer (CC-BY-4.0).
+Land Cover: ESA WorldCover 2021 (10 m). © ESA WorldCover project 2021, processed by VITO. CC-BY-4.0.
+Vegetation: Copernicus Sentinel-2 L2A (20 m). Scene date: {ndvi.get('scene_date','')}. Scene ID: {ndvi.get('scene_id','')}. Via {ndvi.get('source','Planetary Computer')}. CC-BY-4.0.
+Soils: ESA CCI Soil Organic Carbon (100 m). Year: 2021. Via OpenGeoHub STAC. CC-BY-4.0.
+Climate: Open-Meteo climate normals (1991-2020). Temperature and precipitation. https://open-meteo.com. CC-BY-4.0.
+Hydrology: OpenStreetMap water features (natural=water, waterway=rivers/streams). © OpenStreetMap contributors, ODbL.
+Population: GHS-POP (Global Human Settlement Layer) 100 m. Year: {pop.get('year','')}. Via OpenGeoHub STAC. CC-BY-4.0."""
+    if reg_fw:
+        citations += f"\nRegulatory framework: {reg_fw}"
+
+    prompt = load_prompt_template("study_area_v2.txt").format(
         summary_data=json.dumps(summary, indent=2),
-        audience=audience,
+        country_context=country_context,
+        citations=citations,
     )
 
     response = model.generate_content(prompt)
@@ -896,6 +953,7 @@ async def generate_context(
     include_narrative: bool = False,
     audience: str = "academic",
     include_ndvi: bool = True,
+    regulatory_framework: Optional[str] = None,
 ):
     try:
         geojson = normalize_geojson(request.geojson)
@@ -978,6 +1036,23 @@ async def generate_context(
             print("⚠️ Extra datasets timeout, proceeding without them", file=sys.stderr)
             soil_result = pop_result = climate_result = hydro_result = None
 
+        # Get country
+        country = await get_country_from_centroid(geom)
+
+        # Extract scene metadata for citations
+        scene_dates = {}
+        scene_ids = {}
+        if ndvi_stats:
+            if "scene_date" in ndvi_stats:
+                scene_dates["ndvi"] = ndvi_stats["scene_date"]
+            if "scene_id" in ndvi_stats:
+                scene_ids["ndvi"] = ndvi_stats["scene_id"]
+            # Could also add from composite if multiple scenes
+            if "scene_dates" in ndvi_stats:
+                scene_dates["ndvi_composite"] = ", ".join(ndvi_stats["scene_dates"])
+            if "scene_ids" in ndvi_stats:
+                scene_ids["ndvi_composite"] = ", ".join(ndvi_stats["scene_ids"])
+
         summary = {
             "dem": dem,
             "ndvi": ndvi_stats,
@@ -986,6 +1061,12 @@ async def generate_context(
             "population": pop_result,
             "climate": climate_result,
             "hydrology": hydro_result,
+            "country": country,
+            "admin_level1": "",  # TODO: fetch from OSM
+            "admin_level2": "",  # TODO: fetch from OSM
+            "regulatory_framework": regulatory_framework or "",
+            "scene_dates": scene_dates,
+            "scene_ids": scene_ids,
         }
 
         result = {"summary": summary}
@@ -994,7 +1075,7 @@ async def generate_context(
             try:
                 narrative = await asyncio.wait_for(
                     asyncio.to_thread(generate_study_area_narrative, summary, audience),
-                    timeout=10.0  # Narrative is fast but guard anyway
+                    timeout=10.0
                 )
                 result["narrative"] = narrative
             except asyncio.TimeoutError:
