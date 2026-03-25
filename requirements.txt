@@ -28,7 +28,11 @@ google-generativeai>=0.4.0
 # Environment
 python-dotenv>=1.0.0
 
-# New dependencies (EOPF integration)
+# EOPF integration
 pandas>=2.0.0
 xarray-eopf>=0.1.0
 pyproj>=3.6.0
+
+# Extra datasets (Sprint 2)
+requests>=2.31.0
+overpy>=0.6

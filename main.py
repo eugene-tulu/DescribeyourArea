@@ -19,11 +19,19 @@ from dotenv import load_dotenv
 import google.generativeai as genai
 import sys
 from shapely.geometry import shape
+import requests
 
 # Datacube imports (CRITICAL: rioxarray registers .rio accessor)
 from odc.stac import load as stac_load
 import xarray as xr
 import rioxarray  # MUST be imported to enable .rio methods
+
+# Optional imports for external datasets
+try:
+    import overpy
+    OVERPY_AVAILABLE = True
+except ImportError:
+    OVERPY_AVAILABLE = False
 
 # --------------------------------------------------
 # ADDITIONAL IMPORTS & EOPF SETUP
@@ -651,6 +659,208 @@ async def compute_median_ndvi(
     return await compute_ndvi_pc_optimized(bbox, geojson_geom, max_area_km2, max_scenes, resolution_m)
 
 # --------------------------------------------------
+# EXTERNAL DATASETS: Soils, Population, Climate, Hydrology
+# --------------------------------------------------
+
+def get_aoi_centroid(geojson: dict) -> tuple:
+    """Return (lat, lon) of centroid."""
+    from shapely.geometry import shape
+    centroid = shape(geojson["geometry"]).centroid
+    return centroid.y, centroid.x
+
+async def fetch_soil_soc(bbox: list, geojson_geom: dict) -> dict | None:
+    """Fetch Soil Organic Carbon (SOC) from OpenGeoHub STAC."""
+    try:
+        catalog = pystac_client.Client.open("https://stac.opengeohub.org/")
+        collection = "biomass.soc_esacci.l4.cpool_go_landmetric"
+        # Search for items (static, single date)
+        search = catalog.search(
+            collections=[collection],
+            bbox=bbox,
+            limit=1
+        )
+        items = list(search.items())
+        if not items:
+            print("⚠️ No SOC items found", file=sys.stderr)
+            return None
+
+        item = items[0]
+        # Get COG asset (the one without qml/sld)
+        cog_key = [k for k in item.assets.keys() if k.endswith('_go_epsg4326') or k.endswith('.tif')][0]
+        href = item.assets[cog_key].href
+
+        # Load with rasterio (public S3)
+        with rio.open(href) as src:
+            clipped, _ = mask(
+                src,
+                [geojson_geom],
+                crop=True,
+                nodata=src.nodata,
+                all_touched=True
+            )
+            arr = clipped[0].astype(float)
+            arr[arr == src.nodata] = np.nan
+            valid = arr[~np.isnan(arr)]
+            if valid.size == 0:
+                return None
+            mean_soc = float(np.mean(valid))
+            return {
+                "mean_soc_tC_ha": round(mean_soc, 2),
+                "units": "tC/ha",
+                "source": "OpenGeoHub",
+                "collection": collection,
+                "date": item.datetime.isoformat() if hasattr(item.datetime, "isoformat") else str(item.datetime),
+            }
+    except Exception as e:
+        print(f"⚠️ SOC fetch failed: {type(e).__name__}: {str(e)[:100]}", file=sys.stderr)
+        return None
+
+async def fetch_population(bbox: list, geojson_geom: dict) -> dict | None:
+    """Fetch population from GHS-POP via OpenGeoHub STAC."""
+    try:
+        catalog = pystac_client.Client.open("https://stac.opengeohub.org/")
+        collection = "pop.count_ghs_go_landmetric"
+        # Get items, pick most recent
+        search = catalog.search(
+            collections=[collection],
+            bbox=bbox,
+            limit=10  # get multiple years, sort later
+        )
+        items = list(search.items())
+        if not items:
+            print("⚠️ No POP items found", file=sys.stderr)
+            return None
+
+        # Pick latest datetime
+        latest = max(items, key=lambda it: it.datetime)
+        cog_key = [k for k in latest.assets.keys() if k.startswith('pop.') and not k.endswith('qml')][0]
+        href = latest.assets[cog_key].href
+
+        with rio.open(href) as src:
+            clipped, _ = mask(
+                src,
+                [geojson_geom],
+                crop=True,
+                nodata=src.nodata,
+                all_touched=True
+            )
+            arr = clipped[0].astype(float)
+            arr[arr == src.nodata] = np.nan
+            valid = arr[~np.isnan(arr)]
+            total_pop = float(np.nansum(valid))
+            # Compute area of AOI in km²
+            from shapely.geometry import shape
+            area_km2 = shape(geojson_geom).area * (111.32**2)  # approximate degrees to km²
+            density = total_pop / area_km2 if area_km2 > 0 else None
+            return {
+                "total_pop": int(round(total_pop)),
+                "density_per_km2": round(density, 1) if density else None,
+                "year": latest.datetime.year if hasattr(latest.datetime, "year") else None,
+                "source": "OpenGeoHub",
+                "collection": collection,
+            }
+    except Exception as e:
+        print(f"⚠️ Population fetch failed: {type(e).__name__}: {str(e)[:100]}", file=sys.stderr)
+        return None
+
+async def fetch_climate(geojson_geom: dict) -> dict | None:
+    """Fetch climate normals from Open-Meteo."""
+    try:
+        lat, lon = get_aoi_centroid(geojson_geom)
+        url = (
+            "https://climate-api.open-meteo.com/v1/climate"
+            f"?latitude={lat}&longitude={lon}"
+            "&start_date=1991-01-01&end_date=2020-12-31"
+            "&daily=temperature_2m_mean,precipitation_sum"
+        )
+        resp = await asyncio.to_thread(requests.get, url, timeout=15)
+        if resp.status_code != 200:
+            print(f"⚠️ Open-Meteo returned {resp.status_code}", file=sys.stderr)
+            return None
+        data = resp.json()
+        daily = data.get("daily", {})
+        temps = [t for t in daily.get("temperature_2m_mean", []) if t is not None]
+        precips = [p for p in daily.get("precipitation_sum", []) if p is not None]
+        if not temps or not precips:
+            return None
+        mean_temp = float(np.mean(temps))
+        annual_precip = float(np.sum(precips)) / (len(precips) / 365.25)  # per year
+        return {
+            "mean_temp_c": round(mean_temp, 1),
+            "annual_precip_mm": round(annual_precip, 0),
+            "period": "1991-2020",
+            "source": "Open-Meteo",
+        }
+    except Exception as e:
+        print(f"⚠️ Climate fetch failed: {type(e).__name__}: {str(e)[:100]}", file=sys.stderr)
+        return None
+
+async def fetch_hydrology(bbox: list, geojson_geom: dict) -> dict | None:
+    """Fetch water features from OpenStreetMap via Overpass."""
+    try:
+        from shapely.geometry import shape
+        import overpy
+        minx, miny, maxx, maxy = bbox
+        # Expand bbox slightly to catch features on edges
+        buffer = 0.001  # ~100m
+        minx -= buffer; miny -= buffer; maxx += buffer; maxy += buffer
+
+        query = f"""
+        [out:json][timeout:25];
+        (
+          way["natural"="water"](bbox:{miny},{minx},{maxy},{maxx});
+          relation["natural"="water"](bbox:{miny},{minx},{maxy},{maxx});
+          way["waterway"~"^(river|stream|canal)$"](bbox:{miny},{minx},{maxy},{maxx});
+        );
+        out body;
+        >;
+        out skel qt;
+        """
+
+        api = overpy.Overpass()
+        result = await asyncio.to_thread(api.query, query)
+
+        # Calculate water area (polygons) and waterway length (lines)
+        water_area_m2 = 0.0
+        waterway_length_km = 0.0
+        aoi_geom = shape(geojson_geom)
+
+        for elem in result.ways + result.relations:
+            tags = elem.tags
+            # Build shapely geometry from nodes (simplified: use OSM polygon if available)
+            # For MVP, use is_polygon flag
+            if hasattr(elem, "geometry") and elem.geometry:
+                try:
+                    from shapely import wkt
+                    geom = wkt.loads(elem.geometry)
+                except Exception:
+                    geom = None
+                if geom and not geom.is_empty:
+                    if geom.area > 0 and "natural" in tags and tags["natural"] == "water":
+                        # Estimate area in WGS84 degrees -> m² (rough conversion)
+                        area_deg2 = geom.area
+                        # Approximate: 1 deg ≈ 111km, so m² = area_deg2 * (111320)^2
+                        area_m2 = area_deg2 * (111320.0**2)
+                        water_area_m2 += area_m2
+                    elif geom.length > 0 and "waterway" in tags:
+                        length_deg = geom.length
+                        length_km = length_deg * 111.32  # rough
+                        waterway_length_km += length_km
+
+        water_area_km2 = water_area_m2 / 1e6
+        water_cover_pct = (water_area_km2 / (aoi_geom.area * (111.32**2))) * 100 if aoi_geom.area > 0 else 0
+
+        return {
+            "water_area_km2": round(water_area_km2, 3),
+            "water_cover_pct": round(water_cover_pct, 1),
+            "waterway_length_km": round(waterway_length_km, 1),
+            "source": "OpenStreetMap",
+        }
+    except Exception as e:
+        print(f"⚠️ Hydrology fetch failed: {type(e).__name__}: {str(e)[:100]}", file=sys.stderr)
+        return None
+
+# --------------------------------------------------
 # GEMINI
 # --------------------------------------------------
 def load_prompt_template(name: str) -> str:
@@ -753,10 +963,29 @@ async def generate_context(
                 print("⚠️ Falling back to MODIS NDVI (coarse resolution)", file=sys.stderr)
                 ndvi_stats = await compute_modis_ndvi_fallback(bbox)
 
+        # Fetch additional datasets in parallel
+        try:
+            soil_result, pop_result, climate_result, hydro_result = await asyncio.wait_for(
+                asyncio.gather(
+                    fetch_soil_soc(bbox, geom),
+                    fetch_population(bbox, geom),
+                    fetch_climate(geom),
+                    fetch_hydrology(bbox, geom),
+                ),
+                timeout=30.0  # total extra datasets budget
+            )
+        except asyncio.TimeoutError:
+            print("⚠️ Extra datasets timeout, proceeding without them", file=sys.stderr)
+            soil_result = pop_result = climate_result = hydro_result = None
+
         summary = {
-            "dem": des,
+            "dem": dem,
             "ndvi": ndvi_stats,
             "landcover": landcover,
+            "soils": soil_result,
+            "population": pop_result,
+            "climate": climate_result,
+            "hydrology": hydro_result,
         }
 
         result = {"summary": summary}
