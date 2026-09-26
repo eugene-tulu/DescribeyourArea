@@ -115,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         start = time.perf_counter()
         try:
             payload = rainfall.build_and_cache(
-                geom, start=args.start, end=args.end, source=source, publish=args.publish)
+                geom, start=args.start, end=args.end, source=source, upload=args.publish)
         except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
             print(f"  {name:24s} FAIL    {type(exc).__name__}: {str(exc)[:90]}")
             failed += 1

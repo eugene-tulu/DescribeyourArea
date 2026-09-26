@@ -263,6 +263,26 @@ class ForgetEndpointTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["removed"])
 
+    def test_removal_clears_the_object_store_too(self):
+        """A deletion that only cleared the local copy would leave the published
+        artefact in the bucket, which is the copy that survives a redeploy."""
+        import os as _os
+        _os.environ[__import__("rainfall").REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
+        try:
+            import rainfall
+            from tests.test_rainfall import _StubClient
+
+            client = _StubClient()
+            rainfall._s3_client = lambda: client
+            rainfall.publish(self.key)
+
+            response = self.client.post("/admin/rainfall/forget", json={"cache_key": self.key})
+            self.assertTrue(response.json()["remote"], "the stored object was not removed")
+            self.assertTrue(response.json()["removed"])
+            self.assertFalse(client.objects, "an object survived the removal")
+        finally:
+            _os.environ.pop(__import__("rainfall").REMOTE_URI_ENV, None)
+
     def test_removal_is_idempotent(self):
         self.client.post("/admin/rainfall/forget", json={"cache_key": self.key})
         response = self.client.post("/admin/rainfall/forget", json={"cache_key": self.key})
@@ -282,10 +302,22 @@ class ForgetEndpointTests(unittest.TestCase):
                              "a sibling area must survive the removal")
 
     def test_a_valid_but_absent_key_is_a_no_op(self):
-        absent = "0" * 32
-        response = self.client.post("/admin/rainfall/forget", json={"cache_key": absent})
-        self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.json()["removed"])
+        import os as _os
+
+        _os.environ[__import__("rainfall").REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
+        try:
+            import rainfall
+            from tests.test_rainfall import _StubClient
+
+            rainfall._s3_client = lambda: _StubClient()  # empty store
+            absent = "0" * 32
+            response = self.client.post("/admin/rainfall/forget", json={"cache_key": absent})
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(response.json()["removed"])
+            self.assertFalse(response.json()["local"])
+            self.assertFalse(response.json()["remote"])
+        finally:
+            _os.environ.pop(__import__("rainfall").REMOTE_URI_ENV, None)
 
     def test_a_traversal_key_is_refused(self):
         for key in ("../../etc/passwd", "..", "z" * 32, "ABCDEF" + "0" * 26, "0" * 31, "",

@@ -435,12 +435,26 @@ class _StubObject:
         return json.dumps(self._payload).encode()
 
 
+class _StubPaginator:
+    def __init__(self, objects):
+        self.objects = objects
+
+    def paginate(self, Bucket, Prefix=""):
+        contents = [
+            {"Key": key, "Size": len(json.dumps(value))}
+            for (bucket, key), value in self.objects.items()
+            if bucket == Bucket and key.startswith(Prefix)
+        ]
+        return [{"Contents": contents}]
+
+
 class _StubClient:
     """Minimal stand-in for a boto3 S3 client."""
 
     def __init__(self):
         self.objects = {}
         self.uploads = []
+        self.deletes = []
         self.gets = 0
         self.raises = None
 
@@ -452,10 +466,207 @@ class _StubClient:
             raise KeyError(Key)
         return {"Body": _StubObject(self.objects[(Bucket, Key)])}
 
+    def get_paginator(self, name):
+        return _StubPaginator(self.objects)
+
     def upload_file(self, path, bucket, key):
         self.uploads.append((bucket, key))
         self.objects[(bucket, key)] = json.loads(open(path).read())
 
+    def delete_object(self, Bucket, Key):
+        self.deletes.append((Bucket, Key))
+        if (Bucket, Key) not in self.objects:
+            raise KeyError(Key)
+        del self.objects[(Bucket, Key)]
+
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UploadPathTests(unittest.TestCase):
+    """The upload flag is only exercised when it is set, so it needs its own test.
+
+    A parameter named ``publish`` shadows the module-level ``publish()`` function
+    and turns the upload into a call on a bool, which fails only on the upload path.
+    """
+
+    def setUp(self):
+        self.previous = {
+            key: os.environ.get(key)
+            for key in ("RAINFALL_CACHE_DIR", rainfall.REMOTE_URI_ENV)
+        }
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/geocontextualize/rainfall"
+        self.client = _StubClient()
+        self._patcher = unittest.mock.patch.object(rainfall, "_s3_client", lambda: self.client)
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._restore)
+        self.built = []
+
+    def _restore(self):
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _patch_compute(self):
+        def fake_compute(geom, **kwargs):
+            self.built.append(kwargs)
+            return {
+                "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+                "indicator": "monthly_precipitation",
+                "series": [{"month": "2020-01", "precip_mm": 2.0}],
+            }
+
+        patcher = unittest.mock.patch.object(rainfall, "compute_series", fake_compute)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    AOI = {"type": "Polygon", "coordinates": [[[1, 1], [2, 1], [2, 2], [1, 2], [1, 1]]]}
+
+    def test_upload_true_actually_uploads(self):
+        self._patch_compute()
+        rainfall.build_and_cache(self.AOI, start="2020-01-01", upload=True)
+        self.assertEqual(len(self.client.uploads), 1)
+        bucket, key = self.client.uploads[0]
+        self.assertEqual(bucket, "bucket")
+        self.assertTrue(key.startswith("geocontextualize/rainfall/series/"))
+
+    def test_upload_false_writes_only_locally(self):
+        self._patch_compute()
+        rainfall.build_and_cache(self.AOI, start="2020-01-01", upload=False)
+        self.assertEqual(self.client.uploads, [])
+        self.assertIsNotNone(
+            rainfall.read_cache(rainfall.geometry_hash(self.AOI))
+        )
+
+    def test_the_flag_is_not_named_publish(self):
+        import inspect
+
+        parameters = inspect.signature(rainfall.build_and_cache).parameters
+        self.assertIn("upload", parameters)
+        self.assertNotIn("publish", parameters, "a publish parameter shadows publish()")
+
+
+class EndpointNormalisationTests(unittest.TestCase):
+    """boto3 puts the bucket in the hostname, so a bucket-qualified endpoint
+    double-counts it and fails with NoSuchKey."""
+
+    def test_a_bucket_qualified_endpoint_is_reduced_to_the_regional_form(self):
+        self.assertEqual(
+            rainfall._normalise_endpoint("https://primero.fra1.digitaloceanspaces.com", "primero"),
+            "https://fra1.digitaloceanspaces.com",
+        )
+
+    def test_the_bare_regional_form_is_unchanged(self):
+        for endpoint in ("https://fra1.digitaloceanspaces.com", "https://nyc3.digitaloceanspaces.com"):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(rainfall._normalise_endpoint(endpoint, "primero"), endpoint)
+
+    def test_a_legacy_style_endpoint_is_rewritten_from_the_region_hint(self):
+        # https://<bucket>.digitaloceanspaces.com carries no region, so the
+        # configured one supplies it.
+        previous = os.environ.get(rainfall.REMOTE_REGION_ENV)
+        os.environ[rainfall.REMOTE_REGION_ENV] = "fra1"
+        try:
+            self.assertEqual(
+                rainfall._normalise_endpoint("https://primero.digitaloceanspaces.com", "primero"),
+                "https://fra1.digitaloceanspaces.com",
+            )
+        finally:
+            if previous is None:
+                os.environ.pop(rainfall.REMOTE_REGION_ENV, None)
+            else:
+                os.environ[rainfall.REMOTE_REGION_ENV] = previous
+
+    def test_another_buckets_endpoint_is_left_alone(self):
+        self.assertEqual(
+            rainfall._normalise_endpoint("https://nyc3.digitaloceanspaces.com", "primero"),
+            "https://nyc3.digitaloceanspaces.com",
+        )
+
+    def test_absent_endpoint_stays_absent(self):
+        self.assertIsNone(rainfall._normalise_endpoint(None, "primero"))
+        self.assertIsNone(rainfall._normalise_endpoint("", "primero"))
+
+
+class PublishAndListAgreeTests(unittest.TestCase):
+    """The write side and the read side must use one key convention.
+
+    They disagreed for a while: publishing wrote to
+    "geocontextualize/rainfall/series/<key>" while listing looked under
+    "primero/geocontextualize/rainfall/series", so a successful publish reported
+    zero objects. A stub client could not catch it, because both sides shared the
+    same wrong convention and therefore agreed with each other.
+    """
+
+    def setUp(self):
+        self.previous = {
+            key: os.environ.get(key)
+            for key in ("RAINFALL_CACHE_DIR", rainfall.REMOTE_URI_ENV)
+        }
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        os.environ[rainfall.REMOTE_URI_ENV] = "s3://primero/geocontextualize/rainfall"
+        self.client = _StubClient()
+        for name in ("_s3_client",):
+            patcher = unittest.mock.patch.object(rainfall, name, lambda: self.client)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_the_listed_prefix_is_the_one_objects_are_written_to(self):
+        from tools import sync_rainfall_cache
+
+        self.assertEqual(sync_rainfall_cache._bucket(), "primero")
+        self.assertEqual(sync_rainfall_cache._prefix(), "geocontextualize/rainfall")
+        # The key prefix must never repeat the bucket.
+        self.assertNotIn(sync_rainfall_cache._prefix().split("/")[0], ("primero",))
+
+    def test_a_published_object_is_found_by_a_listing(self):
+        from tools import sync_rainfall_cache
+
+        key = rainfall.geometry_hash(
+            {"type": "Polygon", "coordinates": [[[1, 1], [2, 1], [2, 2], [1, 2], [1, 1]]]}
+        )
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        rainfall.publish(key)
+
+        # Exactly the prefix listing() uses.
+        self.client.keys = [k for _bucket, k in self.client.objects]
+        prefix = f"{sync_rainfall_cache._prefix()}/series/"
+        matched = [k for k in self.client.keys if k.startswith(prefix)]
+        self.assertEqual(len(matched), 1, f"published {self.client.keys}, listed under {prefix}")
+        self.assertTrue(matched[0].endswith(f"{key}.json"))
+
+    def test_pull_lands_the_object_where_a_read_can_find_it(self):
+        from tools import sync_rainfall_cache
+
+        geom = {"type": "Polygon", "coordinates": [[[3, 3], [4, 3], [4, 4], [3, 4], [3, 3]]]}
+        key = rainfall.geometry_hash(geom)
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        rainfall.publish(key)
+        (rainfall.cache_path(key)).unlink()
+        self.assertIsNone(rainfall.read_cache(key))
+
+        sync_rainfall_cache.pull()
+        self.assertIsNotNone(rainfall.read_cache(key), "pull did not restore the series")

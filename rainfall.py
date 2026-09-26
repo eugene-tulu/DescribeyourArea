@@ -94,16 +94,52 @@ def remote_prefix() -> Optional[str]:
     return remainder
 
 
+def _normalise_endpoint(endpoint: Optional[str], bucket: str) -> Optional[str]:
+    """Accept either form of a Spaces endpoint.
+
+    DigitalOcean documents both ``https://<bucket>.fra1.digitaloceanspaces.com``
+    and ``https://fra1.digitaloceanspaces.com``. boto3 puts the bucket in the
+    hostname itself, so feeding it the first form requests
+    ``<bucket>.fra1.digitaloceanspaces.com/<bucket>/...`` and fails with
+    ``NoSuchKey``. Stripping a leading bucket leaves boto3 to add it back, so both
+    spellings work.
+    """
+    if not endpoint:
+        return None
+    host = endpoint.split("://", 1)[-1].strip("/")
+    for suffix in (".digitaloceanspaces.com",):
+        if host.endswith(suffix):
+            head = host[: -len(suffix)]
+            if head == bucket:
+                host = f"{region_hint()}{suffix}"
+                break
+            if head.startswith(f"{bucket}."):
+                head = head[len(bucket) + 1:]
+                host = f"{head}{suffix}" if head else f"{suffix.lstrip('.')}"
+                break
+    scheme = endpoint.split("://", 1)[0] if "://" in endpoint else "https"
+    return f"{scheme}://{host}"
+
+
+def region_hint() -> str:
+    return (os.getenv(REMOTE_REGION_ENV) or "us-east-1").strip()
+
+
 def _s3_client():
     """A boto3 S3 client pointed at the configured endpoint, or None."""
     prefix = remote_prefix()
     if prefix is None:
         return None
     import boto3
+    from botocore.config import Config
 
-    endpoint = os.getenv(REMOTE_ENDPOINT_ENV) or None
-    region = os.getenv(REMOTE_REGION_ENV) or "us-east-1"
-    return boto3.client("s3", endpoint_url=endpoint, region_name=region)
+    return boto3.client(
+        "s3",
+        endpoint_url=_normalise_endpoint(os.getenv(REMOTE_ENDPOINT_ENV) or None, _bucket()),
+        region_name=region_hint() or "us-east-1",
+        # Path-style keeps the request valid whichever endpoint spelling is used.
+        config=Config(signature_version="s3v4"),
+    )
 
 
 def _bucket() -> str:
@@ -137,6 +173,30 @@ def publish(key: str) -> Optional[str]:
     name = series_object(key)
     _s3_client().upload_file(str(path), _bucket(), _remote_key(name))
     return name
+
+
+def forget(key: str) -> dict:
+    """Remove a series from local disk and, when configured, from the store.
+
+    Both. A deletion request that only cleared the local copy would leave the
+    published artefact sitting in the bucket, which is the copy that outlives a
+    redeploy.
+    """
+    path = cache_path(key)
+    local = path.exists()
+    if local:
+        path.unlink()
+
+    remote = False
+    if remote_prefix() is not None:
+        try:
+            _s3_client().delete_object(
+                Bucket=_bucket(), Key=_remote_key(series_object(key))
+            )
+            remote = True
+        except Exception:  # noqa: BLE001 - report the local outcome regardless
+            remote = False
+    return {"local": local, "remote": remote, "remote_configured": remote_prefix() is not None}
 
 
 def fetch(key: str) -> Optional[dict]:
@@ -580,18 +640,22 @@ def build_and_cache(
     *,
     start: str = "2015-01-01",
     source=None,
-    publish: bool = False,
+    upload: bool = False,
     **kwargs,
 ) -> dict:
     """Compute and store a series, returning the cached payload.
 
-    With ``publish`` the series is also uploaded, so the portfolio becomes a
+    With ``upload`` the series is also published, so the portfolio becomes a
     published artefact rather than local state tied to one machine.
+
+    The flag is named ``upload``, not ``publish``: a parameter called ``publish``
+    shadows the module-level ``publish()`` and turns the upload into a call on a
+    bool, which only fails on the upload path.
     """
     key = geometry_hash(geojson_geom)
     payload = compute_series(geojson_geom, start=start, source=source, **kwargs)
     write_cache(key, payload)
-    if publish:
+    if upload:
         publish(key)
     return payload
 

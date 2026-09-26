@@ -232,7 +232,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 
 @app.middleware("http")
@@ -1528,14 +1528,16 @@ async def forget_rainfall_series(payload: ForgetRequest):
     if not re.fullmatch(r"[0-9a-f]{32}", key):
         raise HTTPException(status_code=422, detail="cache_key must be 32 hexadecimal characters")
 
-    path = rainfall.cache_path(key)
-    if path.parent.resolve() != rainfall.cache_dir().resolve():
+    if rainfall.cache_path(key).parent.resolve() != rainfall.cache_dir().resolve():
         raise HTTPException(status_code=400, detail="refusing a path outside the cache")
-    removed = path.exists()
-    if removed:
-        path.unlink()
-    print(f"rainfall cache: {'removed' if removed else 'no entry for'} {key}", file=sys.stderr)
-    return {"cache_key": key, "removed": removed, "data": "rainfall series"}
+    # Both stores: clearing only the local copy would leave the published artefact
+    # in the bucket, which is the copy that survives a redeploy.
+    outcome = rainfall.forget(key)
+    print(f"rainfall cache: local={outcome['local']} remote={outcome['remote']} for {key}",
+          file=sys.stderr)
+    return {"cache_key": key, "removed": bool(outcome["local"] or outcome["remote"]),
+            "local": outcome["local"], "remote": outcome["remote"],
+            "data": "rainfall series"}
 
 
 @app.get("/version")

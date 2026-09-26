@@ -36,7 +36,18 @@ LOCAL_PREFIX = "series/"
 
 
 def _bucket() -> str:
-    return rainfall.remote_prefix().split("/", 1)[0]
+    return rainfall._bucket()
+
+
+def _prefix() -> str:
+    """Key prefix inside the bucket, with the bucket name stripped.
+
+    The same trap as the endpoint: an object key does not repeat the bucket, so
+    listing under "primero/geocontextualize/..." finds nothing that was published
+    to "geocontextualize/...". The publish side and the list side disagreed, which
+    a stub client could not catch because both used the same wrong convention.
+    """
+    return rainfall._key_prefix().strip("/")
 
 
 def _iter_local() -> list[Path]:
@@ -53,7 +64,7 @@ def _iter_local() -> list[Path]:
 
 def pull() -> int:
     client = rainfall._s3_client()
-    bucket, prefix = _bucket(), rainfall.remote_prefix()
+    bucket, prefix = _bucket(), _prefix()
     directory = rainfall.cache_dir()
     directory.mkdir(parents=True, exist_ok=True)
     paginator = client.get_paginator("list_objects_v2")
@@ -79,7 +90,7 @@ def pull() -> int:
 
 def push() -> int:
     client = rainfall._s3_client()
-    bucket, prefix = _bucket(), rainfall.remote_prefix()
+    bucket, prefix = _bucket(), _prefix()
     pushed = 0
     for path in _iter_local():
         key = path.stem
@@ -93,7 +104,7 @@ def push() -> int:
 
 def listing() -> None:
     client = rainfall._s3_client()
-    bucket, prefix = _bucket(), rainfall.remote_prefix()
+    bucket, prefix = _bucket(), _prefix()
     paginator = client.get_paginator("list_objects_v2")
     total = count = 0
     for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/series/"):

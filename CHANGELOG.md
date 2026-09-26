@@ -31,6 +31,69 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.9.1 — Spaces round trip verified against the live bucket
+
+With credentials configured, the first end-to-end run against the real DigitalOcean
+Spaces bucket found three defects that the stub client could not, because both
+sides of every assertion shared the same wrong convention.
+
+### 1. A bucket-qualified endpoint is unusable as given
+
+DigitalOcean documents both `https://<bucket>.fra1.digitaloceanspaces.com` and
+`https://fra1.digitaloceanspaces.com`. boto3 puts the bucket in the hostname
+itself, so the first form requests
+`<bucket>.fra1.digitaloceanspaces.com/<bucket>/...` and fails with `NoSuchKey`.
+Measured against the live bucket:
+
+| Endpoint form | Result |
+| --- | --- |
+| `https://primero.fra1.digitaloceanspaces.com` | `NoSuchKey` |
+| `https://primero.digitaloceanspaces.com` | `NoSuchKey` |
+| `https://fra1.digitaloceanspaces.com` | works |
+
+Both spellings are now accepted: a leading bucket is stripped so boto3 adds it
+back, and a legacy form takes the region from the configuration.
+
+### 2. Publishing and listing disagreed about the key
+
+Publishing wrote to `geocontextualize/rainfall/series/<key>.json`; the sync tool
+listed under `primero/geocontextualize/rainfall/series`, so a **successful
+publish reported zero objects**. An object key does not repeat the bucket. The
+write side and the read side now share one helper. A stub client could not catch
+this, because the stub agreed with both.
+
+### 3. Deletion only cleared one of the two stores
+
+`forget` removed the local file and left the published object in the bucket —
+which is the copy that survives a redeploy, and therefore the copy a deletion
+request most needs to reach. It now clears both and reports `local` and `remote`
+separately, so a partial failure is visible rather than assumed.
+
+### Also fixed: the upload flag shadowed the upload function
+
+`build_and_cache(..., publish=False)` shadowed the module-level `publish()`, so
+`--publish` called a **bool** and raised `TypeError: 'bool' object is not
+callable`. That path only executes when uploading, which is why no test had
+reached it. The flag is now `upload`, with a test that asserts the name and
+another that asserts an upload actually happens.
+
+### Verified against the live bucket
+
+Build from ERA5 → publish → list → pull into a clean cache on a second "host" →
+serve a request from that cold cache → forget → bucket empty. The served series
+carried its full provenance: ERA5, 2 cells, 135 months, a 735.1 mm annual normal
+and the source DOI. Test objects were removed; the prefix is empty.
+
+### One test flake of my own
+
+Two window tests asserted `date.today()` across the call. A run that crossed
+midnight UTC saw `2026-09-26` on one side and `2026-09-27` on the other. They now
+assert the span, with a day of tolerance on the end date.
+
+Tests 211 -> 223.
+
+---
+
 ## 1.9.0 — Privacy-preserving usage events, and a way to honour a deletion request
 
 ### The schema, with the privacy properties made structural

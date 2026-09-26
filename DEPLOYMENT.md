@@ -68,6 +68,16 @@ Spaces credentials come from the standard AWS environment variables
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). The per-read cell cache under
 `cells/` is a build accelerator and is deliberately not transferred.
 
+`RAINFALL_S3_ENDPOINT` accepts either documented form —
+`https://<bucket>.<region>.digitaloceanspaces.com` or
+`https://<region>.digitaloceanspaces.com`. A leading bucket is stripped before
+the request, because boto3 puts the bucket in the hostname itself and the
+bucket-qualified form otherwise requests it twice and fails with `NoSuchKey`.
+
+`POST /admin/rainfall/forget` clears **both** stores: the local file and the
+published object. It reports `local` and `remote` separately so a partial failure
+is visible rather than assumed.
+
 ## Usage events
 
 Set `USAGE_EVENTS_PATH` to append one JSON line per analysis. Unset, events go to

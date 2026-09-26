@@ -189,10 +189,14 @@ class PlausibilityTests(unittest.TestCase):
 
 class WindowResolutionTests(unittest.TestCase):
     def test_default_lookback_from_today(self):
+        # Assert the span, not the absolute end date: a run that crosses midnight
+        # UTC legitimately sees two different values for "today".
         start, end = main._resolve_window(None, None, 30)
-        self.assertEqual(end, datetime.date.today().isoformat())
         self.assertEqual(
             (datetime.date.fromisoformat(end) - datetime.date.fromisoformat(start)).days, 30
+        )
+        self.assertLessEqual(
+            abs((datetime.date.today() - datetime.date.fromisoformat(end)).days), 1
         )
 
     def test_explicit_range_is_kept(self):
@@ -201,10 +205,13 @@ class WindowResolutionTests(unittest.TestCase):
 
     def test_explicit_start_wins_over_the_lookback(self):
         # An explicit start is honoured and the window runs to today; window_days
-        # is only the default when no range is given.
+        # is only the default when no range is given. The end is compared with a
+        # day of tolerance so a midnight-UTC crossing is not a failure.
         start, end = main._resolve_window("2024-01-01", None, 90)
         self.assertEqual(start, "2024-01-01")
-        self.assertEqual(end, datetime.date.today().isoformat())
+        self.assertLessEqual(
+            abs((datetime.date.today() - datetime.date.fromisoformat(end)).days), 1
+        )
 
     def test_inverted_range_is_rejected(self):
         with self.assertRaises(ValueError) as raised:
