@@ -225,7 +225,7 @@ class RealNdviTests(unittest.TestCase):
         self.assertEqual(len(result["scene_ids"]), result["scene_count"])
         self.assertEqual(len(result["scene_dates"]), result["scene_count"])
         self.assertEqual(result["resolution_m"], 20)
-        self.assertEqual(result["method"], "sentinel_2_median_composite")
+        self.assertEqual(result["method"], "sentinel-2_median_composite")
 
     def test_reports_provenance_coverage(self):
         aoi = _bypass_sync_cap(II_NGWESI)

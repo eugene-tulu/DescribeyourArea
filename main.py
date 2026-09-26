@@ -29,6 +29,20 @@ from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 from affine import Affine
 from pyproj import CRS, Geod, Transformer
+
+from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
+    DEFAULT_SENSOR,
+    cloud_mask,
+    plausible,
+    MODIS,
+    MODIS_MIN_AREA_KM2,
+    NDVI_MIN_PLAUSIBLE,
+    SCL_REJECTED,
+    SENSORS,
+    Sensor,
+    get_sensor,
+    select_sensor,
+)
 import requests
 
 
@@ -81,6 +95,12 @@ MAX_NDVI_BBOX_KM2 = _env_float("MAX_NDVI_BBOX_KM2", 100.0)
 # the NDVI path inside a 1.8 GB container.
 MAX_LANDCOVER_BBOX_KM2 = _env_float("MAX_LANDCOVER_BBOX_KM2", 1_000.0)
 MAX_PC_SCENES = _env_int("MAX_PC_SCENES", 4)
+# Ceiling on a requested window, not a cost limit: a request takes max_scenes
+# scenes however long the window is, so a decade costs the same as a month. The
+# bound exists to catch a mistyped year, not to ration data. It is set above the
+# 29 years that separate 1997 from today, so the historical question the
+# conservancy audience asked can be asked directly.
+MAX_WINDOW_DAYS = _env_int("MAX_WINDOW_DAYS", 12000)
 # A study area can straddle many source tiles; bound the fan-out so a pathological
 # bounding box cannot issue an unbounded number of COG opens.
 MAX_SOURCE_TILES = _env_int("MAX_SOURCE_TILES", 64)
@@ -186,7 +206,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 
 
 @app.middleware("http")
@@ -567,75 +587,18 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict) -> Dict
 # --------------------------------------------------
 # NDVI COMPUTATION: BOUNDED PLANETARY COMPUTER WORKFLOW
 # --------------------------------------------------
-async def _search_sentinel_items(bbox: list[float], max_scenes: int) -> list:
-    """Fetch the clearest available scenes, retrying only transient failures."""
-    end = datetime.datetime.now(datetime.UTC)
-    start = end - datetime.timedelta(days=90)
-    time_window = f"{start.date().isoformat()}/{end.date().isoformat()}"
-
-    def search_once() -> list:
-        catalog = pystac_client.Client.open(STAC_URL)
-        search = catalog.search(
-            collections=["sentinel-2-l2a"],
-            bbox=bbox,
-            datetime=time_window,
-            query={"eo:cloud_cover": {"lt": 30}},
-            limit=max_scenes,
-            max_items=max_scenes,
-        )
-        return list(search.items())
-
-    for attempt in range(3):
-        try:
-            items = search_once()
-            if items:
-                # Scene-level cloud cover describes the whole 110 km tile, so a
-                # scene can score near zero and still be fully overcast over the
-                # study area. Taking the least cloudy candidates first is the
-                # cheapest way to avoid a composite made entirely of cloud.
-                items.sort(key=lambda item: (item.properties or {}).get("eo:cloud_cover", 100.0))
-            return items
-        except Exception:
-            if attempt == 2:
-                print("STAC search failed after 3 attempts", file=sys.stderr)
-                return []
-            await asyncio.sleep(0.5 * (2 ** attempt))
-    return []
-
-
-
-# Sentinel-2 Scene Classification codes. A pixel is unusable for a vegetation
-# index when it is nodata, defective, in shadow, or flagged as cirrus or probable
-# cloud.
-#
-# Classes 4 (cloud) and 5 (bright cloud) are deliberately NOT rejected outright.
-# The brightness test behind them flags bright semi-arid ground and desert as
-# "bright cloud" across entire tiles: a Sahara tile reads 100% class 5 while its
-# B04/B08 reflectance (0.41/0.49) and NDVI (~0.09) are plainly desert, not cloud.
-# Rejecting them empties the result for exactly the rangeland this service is
-# built for. Residual cloud is removed by discarding implausible NDVI instead,
-# because both cloud and open water give a near-zero or negative index.
-SCL_REJECTED = frozenset({0, 1, 3, 8, 9, 10, 11})
-NDVI_MIN_PLAUSIBLE = 0.0
-SCL_LABELS = {
-    0: "nodata", 1: "saturated", 2: "dark", 3: "cloud shadow", 4: "cloud",
-    5: "bright cloud", 6: "water", 7: "unclassified", 8: "cloud (medium)",
-    9: "cloud (high)", 10: "thin cirrus", 11: "snow",
-}
-
-# Grid CRS for the NDVI composite. EPSG:6933 (WGS 84 / NSIDC EASE-Grid 2.0
-# Global) is equal-area with metre units, so a pixel is the same area everywhere
-# and a reported area percentage means the same thing in Kenya as in Canada. One
-# global CRS also avoids the UTM zone-edge problem, where a single conservancy
-# straddling a zone boundary would need two grids stitched together.
-# It is only valid to ~86 degrees latitude, so polar study areas fall back to a
-# local UTM zone.
+# Grid CRS for the composite. EPSG:6933 (WGS 84 / NSIDC EASE-Grid 2.0 Global) is
+# equal-area with metre units, so a pixel is the same area everywhere and a
+# reported percentage means the same thing in Kenya as in Canada. One global CRS
+# also avoids the UTM zone-edge problem, where a single conservancy straddling a
+# zone boundary would need two grids stitched together. It is only valid to about
+# 86 degrees latitude, so polar study areas fall back to a local UTM zone.
 NDVI_TARGET_EPSG = _env_int("NDVI_TARGET_EPSG", 6933)
 _EASE_GRID_MAX_LAT = 85.0
 
 
 def _target_crs(bbox: list[float]):
-    """Pick the analysis CRS, falling back to a local UTM zone near the poles."""
+    """Analysis CRS, falling back to a local UTM zone near the poles."""
     if abs(bbox[1]) <= _EASE_GRID_MAX_LAT and abs(bbox[3]) <= _EASE_GRID_MAX_LAT:
         return CRS.from_epsg(NDVI_TARGET_EPSG)
     centre_lon = (bbox[0] + bbox[2]) / 2.0
@@ -644,8 +607,8 @@ def _target_crs(bbox: list[float]):
     return CRS.from_epsg((32700 if centre_lat < 0 else 32600) + zone)
 
 
-def _sentinel_target_grid(bbox: list[float], resolution_m: int) -> tuple:
-    """Build one projected output grid covering the AOI.
+def _vegetation_target_grid(bbox: list[float], resolution_m: int) -> tuple:
+    """One projected output grid covering the AOI, in metres per pixel.
 
     Working in a projected CRS means the metres-per-pixel request is honoured
     exactly. A degree grid cannot do that, because a degree of longitude shrinks
@@ -668,13 +631,11 @@ def _read_window(src, window, target_res: Optional[float], resampling):
 
     Returns ``(values, transform)`` for the pixels actually read.
 
-    Planetary Computer Sentinel-2 assets are separate single-band COGs with no
-    band metadata, so the asset href already selects the band. B04/B08 are
-    published at 10 m while the composite is built at 20 m, and reading the
-    full-resolution blocks for that is the single largest cost in this path.
-    Requesting a COG overview reads a fraction of the bytes, but only if the
-    *window* is expressed on the overview's own grid, which is why this is not
-    just an ``out_shape`` argument.
+    Planetary Computer assets are single-band COGs with no band metadata, so the
+    asset href already selects the band. Where a band is published finer than the
+    requested resolution, reading a COG overview fetches a fraction of the bytes,
+    but only if the *window* is expressed on the overview's own grid, which is why
+    this is not just an ``out_shape`` argument.
     """
     win_transform = window_transform(window, src.transform)
     native = abs(src.transform.a) or 0.0
@@ -709,15 +670,11 @@ def _read_window(src, window, target_res: Optional[float], resampling):
     )
 
 
-def _reproject_to_grid(
-    values: np.ndarray,
-    src_transform,
-    src_crs,
-    target,
-    resampling,
-    nodata,
-) -> np.ndarray:
-    # target is (crs, transform, width, height); numpy arrays are (rows, cols).
+def _reproject_to_grid(values: np.ndarray, src_transform, src_crs, target, resampling, nodata):
+    """Warp a source block onto the shared output grid.
+
+    ``target`` is (crs, transform, width, height); numpy arrays are (rows, cols).
+    """
     out = np.full((target[3], target[2]), nodata, dtype="float32")
     reproject(
         source=values,
@@ -736,70 +693,140 @@ def _reproject_to_grid(
     return out
 
 
-def _scene_ndvi_on_grid(item, target, bbox, resolution_m: int) -> Optional[np.ndarray]:
-    """Return per-pixel NDVI for one scene on the shared target grid.
+def _read_asset(item, asset: str, bbox, resolution_m: int, resampling, grid_shape=None):
+    """Open one asset and return ``(values, transform, crs)`` for the AOI window."""
+    with rio.open(planetary_computer.sign(item.assets[asset].href)) as src:
+        window = _window_for_bbox(src, bbox)
+        if window is None:
+            return None
+        values, transform = _read_window(src, window, resolution_m, resampling)
+        if values is None:
+            return None
+        if grid_shape is not None and values.shape != grid_shape:
+            values = _resize_nearest(values, grid_shape)
+        return values, transform, src.crs
 
-    SCL is read with nearest-neighbour sampling because it is a class map:
-    averaging it would invent boundaries and pull cloud edges into clear ground.
+
+def _scene_index_on_grid(item, sensor: Sensor, target, bbox, resolution_m: int):
+    """Per-pixel NDVI for one scene on the shared output grid.
+
+    A product sensor reads a finished index. A band sensor computes the ratio after
+    applying the sensor's scale and offset, which for Landsat is the difference
+    between a plausible number and a wrong one: the -0.2 reflectance offset does
+    not cancel in the ratio, and skipping it moves NDVI by tens of percent.
     """
     try:
-        hrefs = {
-            band: item.assets[band].href
-            for band in ("B04", "B08", "SCL")
-            if band in item.assets
-        }
-    except AttributeError:
-        return None
-    if len(hrefs) < 3:
-        return None
-
-    try:
-        with rio.open(planetary_computer.sign(hrefs["B04"])) as red_src:
-            red_window = _window_for_bbox(red_src, bbox)
-            if red_window is None:
+        if sensor.computes_ndvi:
+            red = _read_asset(item, sensor.red, bbox, resolution_m, Resampling.average)
+            if red is None:
                 return None
-            red, transform = _read_window(red_src, red_window, resolution_m, Resampling.average)
-            crs = red_src.crs
-        with rio.open(planetary_computer.sign(hrefs["B08"])) as nir_src:
-            nir_window = _window_for_bbox(nir_src, bbox)
-            if nir_window is None:
+            grid_shape = red[0].shape
+            nir = _read_asset(item, sensor.nir, bbox, resolution_m,
+                              Resampling.average, grid_shape)
+            if nir is None:
                 return None
-            nir, _ = _read_window(nir_src, nir_window, resolution_m, Resampling.average)
-        if red is None or nir is None or nir.shape != red.shape:
-            return None
-
-        # Sentinel-2 surface reflectance is uint16. Cast before subtracting so a
-        # negative difference cannot wrap around to a large unsigned value.
-        red_f = red.astype("float32")
-        nir_f = nir.astype("float32")
-        with np.errstate(divide="ignore", invalid="ignore"):
-            ndvi = (nir_f - red_f) / (nir_f + red_f + 1e-8)
-
-        with rio.open(planetary_computer.sign(hrefs["SCL"])) as scl_src:
-            scl_window = _window_for_bbox(scl_src, bbox)
-            if scl_window is None:
+            # Reflectance units before any arithmetic. Sentinel-2 L2A is a plain
+            # uint16 ratio; Landsat needs the published scale and offset.
+            red_f = red[0].astype("float32") * sensor.scale + sensor.offset
+            nir_f = nir[0].astype("float32") * sensor.scale + sensor.offset
+            with np.errstate(divide="ignore", invalid="ignore"):
+                index = (nir_f - red_f) / (nir_f + red_f + 1e-8)
+            index = np.where(np.isfinite(index), index, np.nan)
+            index_transform, index_crs = red[1], red[2]
+        else:
+            product = _read_asset(item, sensor.ndvi_asset, bbox, resolution_m,
+                                  Resampling.average)
+            if product is None:
                 return None
-            scl, scl_transform = _read_window(scl_src, scl_window, resolution_m, Resampling.nearest)
-            scl_crs = scl_src.crs
-        if scl is None:
-            return None
-        if scl.shape != red.shape:
-            scl = _resize_nearest(scl, red.shape)
+            index = product[0].astype("float32") * sensor.scale + sensor.offset
+            index = np.where(np.isfinite(index), index, np.nan)
+            index_transform, index_crs = product[1], product[2]
+            grid_shape = index.shape
 
-        on_grid = _reproject_to_grid(ndvi, transform, crs, target,
+        on_grid = _reproject_to_grid(index, index_transform, index_crs, target,
                                      Resampling.bilinear, np.nan)
-        classes = _reproject_to_grid(scl.astype("float32"), scl_transform, scl_crs,
-                                     target, Resampling.nearest, -1.0)
-        rejected = np.isin(np.nan_to_num(classes, nan=-1.0).astype("int16"),
-                           tuple(SCL_REJECTED))
-        on_grid[rejected] = np.nan
-        on_grid[~np.isfinite(on_grid)] = np.nan
-        on_grid[(on_grid < NDVI_MIN_PLAUSIBLE) | (on_grid > 1.0)] = np.nan
+
+        if sensor.cloud:
+            cloud = _read_asset(item, sensor.cloud, bbox, resolution_m,
+                                Resampling.nearest, grid_shape)
+            if cloud is not None:
+                classes = _reproject_to_grid(
+                    cloud[0].astype("float32"), cloud[1], cloud[2], target,
+                    Resampling.nearest, -1.0,
+                )
+                on_grid[~cloud_mask(sensor, on_grid, classes)] = np.nan
+
+        # Discard implausible values rather than trusting a class that flags bright
+        # desert as cloud. A product sensor is already masked by its producer, but
+        # the guard is cheap and the fill range is common.
+        on_grid[~plausible(on_grid)] = np.nan
         return on_grid
     except Exception as exc:  # noqa: BLE001 - one bad scene must not fail the request
-        print(f"NDVI scene skipped ({getattr(item, 'id', '?')}): {type(exc).__name__}: {str(exc)[:120]}",
-              file=sys.stderr)
+        print(f"vegetation scene skipped ({getattr(item, 'id', '?')}): "
+              f"{type(exc).__name__}: {str(exc)[:120]}", file=sys.stderr)
         return None
+
+
+async def _search_items(
+    bbox: list[float],
+    sensor: Sensor,
+    max_scenes: int,
+    window_start: str = "",
+    window_end: str = "",
+) -> list:
+    """Fetch scenes for a sensor, retrying only transient failures."""
+    if not window_start or not window_end:
+        window_start, window_end = _resolve_window(None, None, 90)
+    time_window = f"{window_start}/{window_end}"
+
+    def search_once() -> list:
+        catalog = pystac_client.Client.open(STAC_URL)
+        arguments: dict[str, Any] = {
+            "collections": [sensor.collection],
+            "bbox": bbox,
+            "datetime": time_window,
+            "limit": max_scenes,
+            "max_items": max_scenes,
+        }
+        # A product sensor is already cloud-masked, so there is no reason to spend
+        # the scene budget on a cloudy scene.
+        if sensor.cloud_mask != "product":
+            arguments["query"] = {"eo:cloud_cover": {"lt": 30}}
+        return list(catalog.search(**arguments).items())
+
+    for attempt in range(3):
+        try:
+            items = search_once()
+            if not items:
+                return []
+            # Scene-level cloud cover describes the whole tile, so a scene can score
+            # near zero and still be fully overcast over the study area. Taking the
+            # least cloudy first is the cheapest way to avoid a composite of cloud.
+            if sensor.cloud_mask != "product":
+                items.sort(key=lambda item: (item.properties or {}).get("eo:cloud_cover", 100.0))
+            else:
+                # MODIS publishes datetime=null and only start_datetime, so the
+                # default ordering is by recency using the field that exists.
+                items.sort(key=_item_start_datetime, reverse=True)
+            return items
+        except Exception:
+            if attempt == 2:
+                print(f"STAC search failed after 3 attempts for {sensor.id}", file=sys.stderr)
+                return []
+            await asyncio.sleep(0.5 * (2 ** attempt))
+    return []
+
+
+def _item_start_datetime(item) -> float:
+    """Sort key that works whether or not an item sets ``datetime``.
+
+    MODIS items on Planetary Computer carry ``datetime: null`` and only populate
+    ``start_datetime``, so sorting on ``datetime`` raises a TypeError on them.
+    """
+    for value in (getattr(item, "datetime", None), getattr(item, "start_datetime", None)):
+        if value is not None:
+            return value.timestamp()
+    return 0.0
 
 
 def _resize_nearest(arr: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
@@ -813,14 +840,17 @@ def _load_and_summarize_ndvi(
     bbox: list[float],
     geojson_geom: dict,
     resolution_m: int,
+    sensor: Sensor,
+    sensor_reason: str = "",
+    window: Optional[dict] = None,
 ) -> dict:
     """Build a per-pixel median NDVI composite and summarize it.
 
-    Replaces an odc-stac/dask cube with direct windowed COG reads. The old path
-    cost ~372 MB of framework overhead before touching a pixel, dominated
-    concurrency; this reads only the AOI window of each band.
+    Sensor-parameterised: a band sensor computes the index from red and NIR after
+    applying the sensor's radiometric scale and offset, while a product sensor
+    reads a finished index the producer has already cloud-masked.
     """
-    target = _sentinel_target_grid(bbox, resolution_m)
+    target = _vegetation_target_grid(bbox, resolution_m)
     geometry = shape(geojson_geom)
     in_aoi = _geometry_mask_on_grid(geometry, target, bbox)
 
@@ -828,7 +858,7 @@ def _load_and_summarize_ndvi(
     scene_ids: list[str] = []
     scene_dates: list[str] = []
     for item in items:
-        grid = _scene_ndvi_on_grid(item, target, bbox, resolution_m)
+        grid = _scene_index_on_grid(item, sensor, target, bbox, resolution_m)
         if grid is None:
             continue
         grid = np.where(in_aoi, grid, np.nan)
@@ -836,18 +866,25 @@ def _load_and_summarize_ndvi(
             continue
         scenes.append(grid)
         scene_ids.append(item.id)
-        stamp = getattr(item, "datetime", None)
-        scene_dates.append(stamp.isoformat() if stamp else None)
+        stamp = _item_start_datetime(item)
+        scene_dates.append(
+            datetime.datetime.fromtimestamp(stamp, datetime.UTC).date().isoformat()
+            if stamp else None
+        )
+
+    provenance = sensor.provenance()
 
     if not scenes:
         return {
             "status": "unavailable",
             "source": "Planetary Computer",
+            "sensor": provenance,
+            "sensor_reason": sensor_reason,
             "scenes_examined": len(items),
             "warning": (
-                "No usable Sentinel-2 pixels were available for this study area. "
+                f"No usable {sensor.label} pixels were available for this study area. "
                 "Every candidate scene was flagged as cloud, shadow or snow over the "
-                "study area; no vegetation value is reported rather than reporting cloud."
+                "study area, so no vegetation value is reported rather than reporting cloud."
             ),
         }
 
@@ -863,14 +900,21 @@ def _load_and_summarize_ndvi(
         return {
             "status": "unavailable",
             "source": "Planetary Computer",
-            "warning": "Cloud and scene-quality masking left no valid Sentinel-2 pixels.",
-        "scenes_examined": len(items),
+            "sensor": provenance,
+            "sensor_reason": sensor_reason,
+            "scenes_examined": len(items),
+            "warning": (
+                f"Scene-quality masking left no valid {sensor.label} pixels."
+            ),
         }
 
     covered = float(observed.sum()) / float(in_aoi.size)
     return {
         "status": "ok",
         "source": "Planetary Computer",
+        "sensor": provenance,
+        "sensor_reason": sensor_reason,
+        "window": window or {},
         "mean": float(values.mean()),
         "min": float(values.min()),
         "max": float(values.max()),
@@ -882,7 +926,11 @@ def _load_and_summarize_ndvi(
         "resolution_m": resolution_m,
         "valid_pixel_count": int(values.size),
         "valid_pixel_fraction": round(covered, 4),
-        "method": "sentinel_2_median_composite",
+        "method": (
+            f"{sensor.id}_median_composite"
+            if sensor.computes_ndvi
+            else f"{sensor.id}_product_composite"
+        ),
         "scene_ids": scene_ids,
         "scene_dates": [d for d in scene_dates if d],
     }
@@ -918,6 +966,154 @@ def _target_bounds(target, bbox: list[float]) -> tuple[float, float, float, floa
 
 
 
+async def compute_vegetation_index(
+    bbox: list[float],
+    geojson_geom: dict,
+    max_area_km2: float = MAX_NDVI_BBOX_KM2,
+    max_scenes: int = MAX_PC_SCENES,
+    resolution_m: int = 20,
+    sensor_id: str = "auto",
+    window_days: int = 90,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> dict:
+    """Compute a bounded vegetation index from Planetary Computer only.
+
+    The sensor is chosen by :func:`sensors.select_sensor` unless one is named.
+    Nothing is ever silently downgraded: a study area past the cap, or a window
+    the chosen sensor does not cover, produces an explicit reason.
+    """
+    bbox_area_km2 = _bbox_area_km2(bbox)
+    # An explicit range is what makes a historical question answerable at all: a
+    # lookback from today cannot reach 1997, which is the question the conservancy
+    # audience actually asked.
+    try:
+        window_start, window_end = _resolve_window(start, end, window_days)
+        sensor, reason = select_sensor(
+            sensor_id, window_start=window_start, bbox_area_km2=bbox_area_km2
+        )
+    except ValueError as exc:
+        return {
+            "status": "unavailable",
+            "source": "Planetary Computer",
+            "warning": str(exc),
+        }
+
+    # MODIS is a 250 m product, so the cap that guards a 10 m or 30 m source does
+    # not apply to it: the whole point is that it covers areas the others cannot.
+    cap = max_area_km2 if sensor.id != "modis" else float("inf")
+    if bbox_area_km2 > cap:
+        return {
+            "status": "skipped",
+            "source": "Planetary Computer",
+            "sensor": sensor.provenance(),
+            "sensor_reason": reason,
+            "bbox_area_km2": round(bbox_area_km2, 2),
+            "warning": (
+                f"A {sensor.label} index is available for bounding boxes up to "
+                f"{max_area_km2:g} km²; use a smaller study area for this "
+                "synchronous analysis."
+            ),
+        }
+
+    if window_start < sensor.archive_start:
+        return {
+            "status": "skipped",
+            "source": "Planetary Computer",
+            "sensor": sensor.provenance(),
+            "sensor_reason": reason,
+            "window": {"start": window_start, "end": window_end},
+            "warning": (
+                f"{sensor.label} begins on {sensor.archive_start}, so the requested "
+                f"window from {window_start} is not covered. Narrow the window or name a "
+                "sensor whose archive reaches back that far."
+            ),
+        }
+
+    bounded_scenes = min(max(sensor.default_max_scenes, MAX_PC_SCENES), max(1, int(max_scenes)))
+    # This is the I/O-heavy, latency-sensitive path, so it has its own guard. On
+    # exhaustion the caller still gets terrain and land cover with an explicit
+    # reason, rather than a 429 for the whole request.
+    try:
+        await asyncio.wait_for(NDVI_SEMAPHORE.acquire(), timeout=NDVI_ACQUIRE_SECONDS)
+    except asyncio.TimeoutError:
+        return {
+            "status": "unavailable",
+            "source": "Planetary Computer",
+            "sensor": sensor.provenance(),
+            "warning": (
+                "Vegetation analysis is busy right now. Terrain and land cover are "
+                "unaffected; retry shortly for a vegetation value."
+            ),
+        }
+    try:
+        items = await _search_items(bbox, sensor, bounded_scenes, window_start, window_end)
+        if not items:
+            return {
+                "status": "unavailable",
+                "source": "Planetary Computer",
+                "sensor": sensor.provenance(),
+                "sensor_reason": reason,
+                "sensor_reason": reason,
+                "window": {"start": window_start, "end": window_end},
+                "warning": (
+                    f"No usable {sensor.label} scenes covered this study area between "
+                    f"{window_start} and {window_end}."
+                ),
+            }
+        try:
+            return await asyncio.wait_for(
+                run_blocking(
+                    _load_and_summarize_ndvi, items, bbox, geojson_geom, resolution_m,
+                    sensor, reason, {"start": window_start, "end": window_end},
+                ),
+                timeout=75.0,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "status": "unavailable",
+                "source": "Planetary Computer",
+                "sensor": sensor.provenance(),
+                "warning": "Vegetation processing timed out; try a smaller study area.",
+            }
+        except Exception as exc:
+            print(f"⚠️ vegetation processing failed ({sensor.id}): "
+                  f"{type(exc).__name__}: {str(exc)[:120]}", file=sys.stderr)
+            return {
+                "status": "unavailable",
+                "source": "Planetary Computer",
+                "sensor": sensor.provenance(),
+                "warning": "Vegetation could not be processed for this study area.",
+            }
+    finally:
+        NDVI_SEMAPHORE.release()
+
+
+def _resolve_window(start: Optional[str], end: Optional[str], window_days: int) -> tuple[str, str]:
+    """Normalise an explicit date range, or fall back to a lookback from today."""
+    today = datetime.datetime.now(datetime.UTC).date()
+    end_date = today if not end else _parse_date(end, "end")
+    if start:
+        start_date = _parse_date(start, "start")
+    else:
+        start_date = end_date - datetime.timedelta(days=max(1, window_days))
+    if start_date > end_date:
+        raise ValueError("window start must not be after the end")
+    if (end_date - start_date).days > MAX_WINDOW_DAYS:
+        raise ValueError(
+            f"window spans {(end_date - start_date).days} days, beyond the "
+            f"{MAX_WINDOW_DAYS} a synchronous request will read"
+        )
+    return start_date.isoformat(), end_date.isoformat()
+
+
+def _parse_date(value: str, label: str) -> datetime.date:
+    try:
+        return datetime.date.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"window {label} must be an ISO date (YYYY-MM-DD)") from exc
+
+
 async def compute_median_ndvi(
     bbox: list[float],
     geojson_geom: dict,
@@ -925,67 +1121,18 @@ async def compute_median_ndvi(
     max_scenes: int = MAX_PC_SCENES,
     resolution_m: int = 20,
 ) -> dict:
-    """Compute a small Sentinel-2 composite from Planetary Computer only.
+    """Sentinel-2 composite, kept for callers that want that sensor specifically.
 
-    A skipped result is explicit: the application never falls back to an
-    unbounded MODIS raster read for a large study area.
+    The sensor is chosen automatically by :func:`compute_vegetation_index`.
     """
-    bbox_area_km2 = _bbox_area_km2(bbox)
-    if bbox_area_km2 > max_area_km2:
-        return {
-            "status": "skipped",
-            "source": "Planetary Computer",
-            "bbox_area_km2": round(bbox_area_km2, 2),
-            "warning": (
-                f"NDVI is available for bounding boxes up to {max_area_km2:g} km²; "
-                "use a smaller study area for this synchronous analysis."
-            ),
-        }
+    return await compute_vegetation_index(
+        bbox, geojson_geom,
+        max_area_km2=max_area_km2,
+        max_scenes=max_scenes,
+        resolution_m=resolution_m,
+        sensor_id="sentinel-2",
+    )
 
-    bounded_scenes = min(MAX_PC_SCENES, max(1, int(max_scenes)))
-    # NDVI is the I/O-heavy, latency-sensitive path, so it has its own guard. On
-    # exhaustion the caller still gets its terrain and land cover with an explicit
-    # reason attached, rather than a 429 for the whole request.
-    try:
-        await asyncio.wait_for(NDVI_SEMAPHORE.acquire(), timeout=NDVI_ACQUIRE_SECONDS)
-    except asyncio.TimeoutError:
-        return {
-            "status": "unavailable",
-            "source": "Planetary Computer",
-            "warning": (
-                "Vegetation analysis is busy right now. Terrain and land cover are "
-                "unaffected; retry shortly for a vegetation value."
-            ),
-        }
-    try:
-        items = await _search_sentinel_items(bbox, bounded_scenes)
-        if not items:
-            return {
-                "status": "unavailable",
-                "source": "Planetary Computer",
-                "warning": "No cloud-filtered Sentinel-2 scenes were available in the last 90 days.",
-            }
-
-        try:
-            return await asyncio.wait_for(
-                run_blocking(_load_and_summarize_ndvi, items, bbox, geojson_geom, resolution_m),
-                timeout=75.0,
-            )
-        except asyncio.TimeoutError:
-            return {
-                "status": "unavailable",
-                "source": "Planetary Computer",
-                "warning": "NDVI processing timed out; try a smaller study area shortly.",
-            }
-        except Exception as exc:
-            print(f"⚠️ NDVI processing failed: {type(exc).__name__}: {str(exc)[:120]}", file=sys.stderr)
-            return {
-                "status": "unavailable",
-                "source": "Planetary Computer",
-                "warning": "NDVI could not be processed for this study area right now.",
-            }
-    finally:
-        NDVI_SEMAPHORE.release()
 
 # --------------------------------------------------
 # COUNTRY CONTEXT
@@ -1100,6 +1247,10 @@ async def generate_context(
     request: GeoJSONRequest,
     include_ndvi: bool = True,
     datasets: Optional[str] = None,
+    sensor: str = "auto",
+    window_days: int = 90,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
 ):
     try:
         requested = _requested_datasets(datasets)
@@ -1151,12 +1302,16 @@ async def generate_context(
 
         ndvi_stats = None
         if include_ndvi and "ndvi" in requested:
-            ndvi_stats = await compute_median_ndvi(
+            ndvi_stats = await compute_vegetation_index(
                 bbox=bbox,
                 geojson_geom=geom,
                 max_area_km2=MAX_NDVI_BBOX_KM2,
                 max_scenes=MAX_PC_SCENES,
                 resolution_m=20,
+                sensor_id=sensor,
+                window_days=window_days,
+                start=window_start,
+                end=window_end,
             )
 
         # Rainfall is read from a precomputed cache. A single ERA5 grid cell takes
@@ -1231,6 +1386,18 @@ async def get_version():
             "separate_ndvi_concurrency_guard",
         ],
         "available_datasets": sorted(AVAILABLE_DATASETS),
+        "available_sensors": {
+            sid: {
+                "label": sn.label,
+                "collection": sn.collection,
+                "native_resolution_m": sn.native_res_m,
+                "archive_start": sn.archive_start,
+                "ndvi": "computed from bands" if sn.computes_ndvi else "product",
+                "cloud_mask": sn.cloud_mask,
+            }
+            for sid, sn in sorted(SENSORS.items())
+        },
+        "default_sensor": "auto",
         "max_sync_bbox_km2": MAX_SYNC_BBOX_KM2,
         "max_ndvi_bbox_km2": MAX_NDVI_BBOX_KM2,
         "max_landcover_bbox_km2": MAX_LANDCOVER_BBOX_KM2,

@@ -83,6 +83,19 @@ interface DemStats {
   error?: string;
 }
 
+interface SensorProvenance {
+  id: string;
+  label: string;
+  collection: string;
+  native_resolution_m: number;
+  archive_start: string;
+  ndvi: string;
+  cloud_mask: string;
+  scale?: number;
+  offset?: number;
+  mask_authoritative?: boolean;
+}
+
 interface NdviStats {
   mean?: number;
   min?: number;
@@ -96,6 +109,14 @@ interface NdviStats {
   status?: string;
   warning?: string;
   source?: string;
+  valid_pixel_count?: number;
+  valid_pixel_fraction?: number;
+  scenes_examined?: number;
+  sensor?: SensorProvenance;
+  sensor_reason?: string;
+  window?: { start?: string; end?: string };
+  scene_ids?: string[];
+  scene_dates?: string[];
 }
 
 interface LandcoverStats {

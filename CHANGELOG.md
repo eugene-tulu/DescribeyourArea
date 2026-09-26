@@ -31,6 +31,91 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.8.0 — Sensor ladder: Landsat 30 m and MODIS 250 m, chosen by measurement
+
+One code path now serves three sensors, selected automatically, and the selection
+is driven by a cross-sensor measurement rather than by resolution alone.
+
+### The cross-sensor measurement that changed the default
+
+The same 60 km2 study area, the same 90-day window, three sources:
+
+| Sensor | Mask | NDVI mean |
+| --- | --- | --- |
+| MODIS MOD13Q1 | NASA, producer-masked | **+0.418** |
+| Landsat C2 L2 | QA_PIXEL bits | **+0.357** |
+| Sentinel-2 L2A | SCL, relaxed | **+0.161** |
+
+MODIS and Landsat agree to within 0.06. Sentinel-2 read **0.20 low**, because
+its SCL classes 4 and 5 are deliberately kept — that relaxation is what stops
+bright desert being flagged as cloud, but in cloudy conditions it lets cloud into
+the composite and cloud drags the median down.
+
+So `auto` now prefers **Landsat** despite being coarser. At 30 m a 100 km2 area
+gains nothing from 10 m, and the QA_PIXEL mask can be trusted. Sentinel-2 still
+wins for the last few days, where Landsat has no scene yet, and its result is
+labelled "relaxed cloud mask" so a low reading is explainable. Both facts live in
+the registry as `mask_authoritative`, and the tests assert the direction of the
+disagreement rather than a bare number.
+
+### The Landsat offset trap, confirmed rather than assumed
+
+`landsat-c2-l2` publishes `scale=2.75e-05, offset=-0.2` **in the STAC item only** —
+the file's own band tags are empty. The offset is in reflectance units and does
+**not** cancel in the NDVI ratio: on a real scene it moved the mean from 0.085 to
+0.147, a 73% change, while staying comfortably inside [-1, 1]. It is therefore a
+constant in the registry, applied before any band arithmetic, with a test that
+fails if the ratio and the scaled ratio ever agree.
+
+### MODIS is a product, not a computation
+
+`modis-13Q1-061` ships `250m_16_days_NDVI`: int16, `scale=0.0001`, fill -3000, in
+a sinusoidal projection. No band arithmetic and no cloud mask to get wrong, which
+makes it both the cheapest and the most defensible source at country scale. Two
+details handled: its items carry `datetime: null` and only `start_datetime`, so
+ordering falls back to that, and the product is read at its own resolution rather
+than resampled from bands.
+
+### A historical window is now expressible
+
+`window_days` is a lookback, so a user could not ask for 1997 — which was the
+whole point of adding Landsat. `window_start` and `window_end` accept an explicit
+ISO range, and the 1997/98 El Niño question is answered end to end: Landsat, NDVI
+0.240 over 1997-01 to 1999-12.
+
+`MAX_WINDOW_DAYS` is 12,000 and explicitly **not** a cost limit: a request takes
+`max_scenes` however long the window is, so a decade costs the same as a month. It
+catches a mistyped year.
+
+### Surface
+
+- `?sensor=auto|sentinel-2|landsat|modis` and `?window_start=&window_end=`.
+- Every vegetation result carries its sensor provenance — collection, native
+  resolution, scale, offset, cloud mask, whether NDVI is computed or a product —
+  plus the reason the sensor was chosen and the window read.
+- `/version` publishes the whole ladder.
+- The vegetation card names the sensor and flags a relaxed mask; the text summary
+  says "Vegetation (Landsat Collection 2 Level 2)".
+
+### Tests: 128 -> 168
+
+- 33 offline tests: registry completeness, the offset trap, the SCL and QA bit
+  masks, the plausibility filter, the full selection-policy table, and window
+  resolution including inverted, malformed and over-long ranges.
+- 7 real-data cross-sensor tests, including the one that matters: MODIS and
+  Landsat must agree within 0.20, which is what catches a mis-scaled sensor. A
+  per-sensor "plausible value" test cannot, because a mis-scaled sensor still
+  returns something inside [-1, 1].
+
+### Mistakes made
+
+Index-based slicing of `main.py` to generalise a function deleted three helpers
+(`_read_window`, `_reproject_to_grid` and the scene reader) that only showed up
+as a `NameError` at runtime, then twice more under new names. Restored by
+rewriting the block once and verifying by name, rather than by inspecting splices.
+
+---
+
 ## 1.7.0 — Deployment configuration aligned with the code; Spaces wired end to end
 
 ### A real deployment bug, found while prefilling `.env`
@@ -580,15 +665,15 @@ Ordered by value per unit of effort.
    `NEXT_FEATURE.md`; ship it with the current app. Aggregate outcomes, duration,
    selected datasets, coarse AOI-size band, no raw geometry, no full IP. Nothing
    else can be prioritised without it.
-3. **Self-service polygon submission.** Submit any polygon, queue it for
+2. **Self-service polygon submission.** Submit any polygon, queue it for
    precompute, return a permanent shareable page. The rainfall miss state is
    already the hook: it names the cache key and explains why. This is the
    loudest unanswered question in the webinar — "how do we share our polygons",
    asked five times by four people — and `NEXT_FEATURE.md` as written answers it
    with the wrong answer, an administrator-gated portfolio.
-4. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
+3. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
    Diff the precomputed series on refresh and notify. No new infrastructure, and
    it cannot be retrofitted cheaply.
 
-Only with evidence from 2–4: a durable queue and a monitoring view. The store
+Only with evidence from 1–3: a durable queue and a monitoring view. The store
 should be Postgres or DuckDB — a table, not a cube.

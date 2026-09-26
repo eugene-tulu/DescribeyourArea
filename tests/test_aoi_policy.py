@@ -120,7 +120,7 @@ class ValidateAOITests(unittest.TestCase):
 class NDVIGuardrailTests(unittest.TestCase):
     def test_large_ndvi_bbox_is_skipped_before_a_scene_search(self) -> None:
         large_bbox = [36.0, -1.5, 36.2, -1.3]
-        with patch("main._search_sentinel_items", new_callable=AsyncMock) as search:
+        with patch("main._search_items", new_callable=AsyncMock) as search:
             result = asyncio.run(
                 compute_median_ndvi(
                     large_bbox,

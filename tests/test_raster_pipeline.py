@@ -330,9 +330,9 @@ class NdviTargetGridTests(unittest.TestCase):
         self.assertEqual(crs.to_epsg(), 32634)  # 19E is UTM zone 34N
 
     def test_grid_honours_the_requested_resolution(self):
-        from main import _sentinel_target_grid
+        from main import _vegetation_target_grid
 
-        _crs, transform, width, height = _sentinel_target_grid([37.34, 0.30, 37.40, 0.37], 20)
+        _crs, transform, width, height = _vegetation_target_grid([37.34, 0.30, 37.40, 0.37], 20)
         self.assertAlmostEqual(abs(transform.a), 20.0, delta=0.1)
         self.assertAlmostEqual(abs(transform.e), 20.0, delta=0.1)
         # 0.06 deg lon x 0.07 deg lat is roughly 6.7 x 7.8 km
@@ -340,10 +340,10 @@ class NdviTargetGridTests(unittest.TestCase):
         self.assertTrue(300 < height < 500, height)
 
     def test_coarser_resolution_yields_fewer_pixels(self):
-        from main import _sentinel_target_grid
+        from main import _vegetation_target_grid
 
-        small = _sentinel_target_grid([37.34, 0.30, 37.40, 0.37], 20)
-        large = _sentinel_target_grid([37.34, 0.30, 37.40, 0.37], 100)
+        small = _vegetation_target_grid([37.34, 0.30, 37.40, 0.37], 20)
+        large = _vegetation_target_grid([37.34, 0.30, 37.40, 0.37], 100)
         self.assertLess(large[2] * large[3], small[2] * small[3])
 
 
@@ -359,9 +359,9 @@ class NdviGeometryMaskTests(unittest.TestCase):
     AOI = [37.34, 0.30, 37.40, 0.37]
 
     def test_mask_covers_the_study_area(self):
-        from main import _geometry_mask_on_grid, _sentinel_target_grid
+        from main import _geometry_mask_on_grid, _vegetation_target_grid
 
-        target = _sentinel_target_grid(self.AOI, 20)
+        target = _vegetation_target_grid(self.AOI, 20)
         from main import shape
 
         ring = [
@@ -376,9 +376,9 @@ class NdviGeometryMaskTests(unittest.TestCase):
         self.assertEqual(mask.mean(), 1.0)
 
     def test_a_smaller_polygon_leaves_part_of_the_grid_out(self):
-        from main import _geometry_mask_on_grid, _sentinel_target_grid, shape
+        from main import _geometry_mask_on_grid, _vegetation_target_grid, shape
 
-        target = _sentinel_target_grid(self.AOI, 20)
+        target = _vegetation_target_grid(self.AOI, 20)
         inner = shape({"type": "Polygon", "coordinates": [[
             [37.345, 0.305], [37.395, 0.305], [37.395, 0.365], [37.345, 0.365], [37.345, 0.305]]]})
         mask = _geometry_mask_on_grid(inner, target, self.AOI)
@@ -386,9 +386,9 @@ class NdviGeometryMaskTests(unittest.TestCase):
         self.assertLess(mask.mean(), 1.0, "a polygon inside the bbox must not fill the grid")
 
     def test_a_moved_aoi_produces_a_different_mask(self):
-        from main import _geometry_mask_on_grid, _sentinel_target_grid
+        from main import _geometry_mask_on_grid, _vegetation_target_grid
 
-        target = _sentinel_target_grid(self.AOI, 20)
+        target = _vegetation_target_grid(self.AOI, 20)
         from main import shape
 
         near = {"type": "Polygon", "coordinates": [[
