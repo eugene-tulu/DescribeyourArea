@@ -7,8 +7,7 @@ entry point. Browser calls use the same-origin `/api` path.
 ## Prerequisites
 
 - Ubuntu with Docker Compose v2, Git, and Nginx
-- A real `.env` file containing `GEMINI_API_KEY`; copy `.env.example`, do not
-  commit the resulting file
+- A real `.env` file; copy `.env.example`, do not commit the resulting file
 - A public HTTPS hostname is preferred. The checked-in Nginx examples also
   support the current server IP as a short-lived certificate fallback.
 
@@ -18,7 +17,7 @@ entry point. Browser calls use the same-origin `/api` path.
 git clone --branch main https://github.com/eugene-tulu/DescribeyourArea.git /srv/geocontextualize
 cd /srv/geocontextualize
 cp .env.example .env
-# Set GEMINI_API_KEY and, if needed, the explicit CORS_ORIGINS.
+# Set the explicit CORS_ORIGINS if the defaults do not match your host.
 docker compose up -d --build
 docker compose ps
 curl --fail http://127.0.0.1:8001/health
@@ -51,10 +50,25 @@ docker compose up -d --build
 ```
 
 The API admits only polygonal GeoJSON. Defaults are a 500 KB payload, 10,000
-vertices, a 100 km² synchronous bounding-box cap, and a 10 km² NDVI cap. The
-application returns an explicit skipped NDVI result above that smaller cap;
-large asynchronous analyses require a separately deployed durable queue and
-worker.
+vertices, and measured area budgets: 100 km² for a synchronous study area and
+for NDVI, and 1,000 km² for land cover. The application returns an explicit
+`skipped` NDVI result or a `landcover_area_exceeded` error rather than degrading
+silently; large asynchronous analyses require a separately deployed durable
+queue and worker.
+
+Every budget is overridable by environment variable — `MAX_SYNC_BBOX_KM2`,
+`MAX_NDVI_BBOX_KM2`, `MAX_LANDCOVER_BBOX_KM2`, `MAX_SOURCE_TILES`,
+`MAX_CONCURRENT_ANALYSES`, `MAX_CONCURRENT_NDVI`, `ANALYSIS_ACQUIRE_SECONDS`,
+`NDVI_ACQUIRE_SECONDS`, and `ANALYSIS_DRAIN_SECONDS`. See
+[Measured limits](README.md#measured-limits) for the measurements behind them.
+
+`MAX_CONCURRENT_ANALYSES` defaults to 8 and `MAX_CONCURRENT_NDVI` to 3. The
+service is bound by read latency against Planetary Computer rather than by local
+resources: eight concurrent analyses peak at 301 MB RSS and 14% of one core. The
+Nginx 2-second `limit_req` is the outermost throttle, so raise it alongside
+`ANALYSIS_ACQUIRE_SECONDS` or clients will see 503s before the application
+rejects anything. An 1,800 MB `mem_limit` is sufficient headroom for these limits;
+if you raise concurrency substantially, re-measure before assuming it still is.
 
 Open only SSH, HTTP, and HTTPS in the firewall after confirming the Nginx
 route. Do not expose ports 3000 or 8001 publicly.
