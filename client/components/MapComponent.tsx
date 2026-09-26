@@ -123,7 +123,9 @@ function MapController({
   }, [selectedLocation, map]);
 
   useEffect(() => {
-    // Add graticule overlay
+    // Graticule lives in its own effect with no handler dependencies. It used to be
+    // added in the draw-control effect, whose handlers change identity on every
+    // parent render, so a fresh graticule was added and never removed.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const graticule = (L as any).latlngGraticule({
       showLabel: true,
@@ -133,7 +135,12 @@ function MapController({
       zoomInterval: [{ start: 2, end: 20, interval: 1 }],
     });
     graticule.addTo(map);
+    return () => {
+      map.removeLayer(graticule);
+    };
+  }, [map]);
 
+  useEffect(() => {
     // Init drawn items
     if (!drawnItemsRef.current) {
       drawnItemsRef.current = new L.FeatureGroup();

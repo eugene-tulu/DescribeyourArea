@@ -1,14 +1,12 @@
 "use client";
 
-import { useState, useRef, type ReactNode } from 'react';
+import { useState, useRef, useCallback, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import { Search, MapPin, Loader2, Globe, Satellite } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
 import CopySummary from '@/components/Copy';
@@ -48,7 +46,7 @@ interface AnalysisWarning {
   status?: string;
 }
 
-type DatasetId = 'dem' | 'landcover' | 'ndvi' | 'soils' | 'population' | 'climate' | 'hydrology';
+type DatasetId = 'dem' | 'landcover' | 'ndvi' | 'rainfall';
 
 const DATASET_OPTIONS: Array<{
   id: DatasetId;
@@ -58,10 +56,7 @@ const DATASET_OPTIONS: Array<{
   { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain variation' },
   { id: 'landcover', label: 'Land cover', description: 'ESA WorldCover composition' },
   { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Recent Sentinel-2 vegetation condition' },
-  { id: 'soils', label: 'Soil organic carbon', description: 'Soil carbon estimate' },
-  { id: 'population', label: 'Population', description: 'Population and density estimate' },
-  { id: 'climate', label: 'Climate normals', description: 'Temperature and precipitation baseline' },
-  { id: 'hydrology', label: 'Hydrology', description: 'Mapped water and waterways' },
+  { id: 'rainfall', label: 'Rainfall & drought', description: 'ERA5 monthly totals and anomaly vs normal' },
 ];
 
 const LANDCOVER_LABELS: Record<string, string> = {
@@ -111,34 +106,36 @@ interface LandcoverStats {
   [key: string]: unknown;
 }
 
-interface SoilStats {
-  mean_soc_tC_ha?: number;
-  units?: string;
-  source?: string;
-  collection?: string;
-  date?: string;
+interface RainfallSummary {
+  latest_month?: string;
+  latest_precip_mm?: number;
+  latest_anomaly_pct?: number | null;
+  driest_month?: { month: string; precip_mm: number };
+  wettest_month?: { month: string; precip_mm: number };
+  trailing_12m?: {
+    ending: string; months: number; precip_mm: number;
+    normal_mm: number; anomaly_mm: number; anomaly_pct: number | null;
+  } | null;
+  suspect_months?: string[];
 }
 
-interface PopulationStats {
-  total_pop?: number;
-  density_per_km2?: number | null;
-  year?: number | null;
+interface RainfallResult {
+  status: 'ok' | 'not_computed';
+  indicator?: string;
   source?: string;
-  collection?: string;
-}
-
-interface ClimateStats {
-  mean_temp_c?: number;
-  annual_precip_mm?: number;
-  period?: string;
-  source?: string;
-}
-
-interface HydrologyStats {
-  water_area_km2?: number;
-  water_cover_pct?: number;
-  waterway_length_km?: number;
-  source?: string;
+  doi?: string;
+  license?: string;
+  retrieved?: string;
+  resolution_km?: number;
+  grid_cells?: number;
+  processing_version?: string;
+  climatology?: {
+    standard: string;
+    annual_mean_mm: number | null;
+  };
+  series?: Array<{ month: string; precip_mm: number; normal_mm: number; anomaly_pct: number | null }>;
+  summary?: RainfallSummary;
+  message?: string;
 }
 
 interface AnalysisMetadata {
@@ -151,10 +148,7 @@ interface Summary {
   dem?: DemStats | null;
   ndvi?: NdviStats | null;
   landcover?: LandcoverStats | null;
-  soils?: SoilStats | null;
-  population?: PopulationStats | null;
-  climate?: ClimateStats | null;
-  hydrology?: HydrologyStats | null;
+  rainfall?: RainfallResult | null;
   country?: string | null;
   analysis?: AnalysisMetadata;
 }
@@ -266,88 +260,58 @@ function DatasetResultCard({ dataset, summary }: { dataset: DatasetId; summary: 
     );
   }
 
-  if (dataset === 'ndvi') {
-    const ndvi = summary.ndvi;
-    if (!ndvi || ndvi.status === 'skipped' || ndvi.status === 'unavailable') {
-      return <ResultCard title={option.label} description={option.description} unavailable={ndvi?.warning || 'No recent NDVI result was returned for this area.'} />;
+  if (dataset === 'rainfall') {
+    const rain = summary.rainfall;
+    if (!rain || rain.status === 'not_computed') {
+      return (
+        <ResultCard
+          title={option.label}
+          description={option.description}
+          unavailable={rain?.message || 'No precomputed rainfall series for this exact study area.'}
+        />
+      );
     }
+    const s = rain.summary || {};
+    const t = s.trailing_12m;
     return (
       <ResultCard title={option.label} description={option.description}>
         <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Median composite mean" value={formatNumber(ndvi.mean, 2)} />
-          <Metric label="Middle 50%" value={`${formatNumber(ndvi.p25, 2)}–${formatNumber(ndvi.p75, 2)}`} />
-          <Metric label="Value range" value={`${formatNumber(ndvi.min, 2)}–${formatNumber(ndvi.max, 2)}`} />
-          <Metric label="Scenes used" value={formatNumber(ndvi.scene_count, 0)} />
+          <Metric label="Last 12 months" value={t ? `${formatNumber(t.precip_mm, 0)} mm` : '—'} />
+          <Metric
+            label="vs 1991–2020 normal"
+            value={t?.anomaly_pct == null ? '—' : `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}%`}
+          />
+          <Metric label="Annual normal" value={rain.climatology?.annual_mean_mm == null ? '—' : `${formatNumber(rain.climatology.annual_mean_mm, 0)} mm`} />
+          <Metric label="Driest month" value={s.driest_month ? `${s.driest_month.month} · ${formatNumber(s.driest_month.precip_mm, 0)} mm` : '—'} />
         </dl>
+        {s.suspect_months && s.suspect_months.length > 0 && (
+          <p className="mt-3 text-xs text-amber-300">
+            {s.suspect_months.length} month(s) reported near-zero totals and are worth review.
+          </p>
+        )}
         <p className="mt-3 text-xs text-slate-400">
-          {ndvi.source || 'Sentinel-2'}{ndvi.resolution_m ? ` · ${ndvi.resolution_m} m` : ''}
+          {rain.source} · {rain.resolution_km} km grid · {rain.grid_cells} cell{rain.grid_cells === 1 ? '' : 's'} ·{' '}
+          retrieved {rain.retrieved}
         </p>
       </ResultCard>
     );
   }
 
-  if (dataset === 'soils') {
-    const soils = summary.soils;
-    if (!soils) {
-      return <ResultCard title={option.label} description={option.description} unavailable="No soil-carbon data was returned for this area." />;
-    }
-    return (
-      <ResultCard title={option.label} description={option.description}>
-        <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Mean soil organic carbon" value={`${formatNumber(soils.mean_soc_tC_ha, 2)} ${soils.units || 'tC/ha'}`} />
-          <Metric label="Dataset date" value={soils.date ? new Date(soils.date).toLocaleDateString() : '—'} />
-        </dl>
-        {soils.source && <p className="mt-3 text-xs text-slate-400">Source: {soils.source}</p>}
-      </ResultCard>
-    );
-  }
-
-  if (dataset === 'population') {
-    const population = summary.population;
-    if (!population) {
-      return <ResultCard title={option.label} description={option.description} unavailable="No population data was returned for this area." />;
-    }
-    return (
-      <ResultCard title={option.label} description={option.description}>
-        <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Estimated population" value={formatNumber(population.total_pop, 0)} />
-          <Metric label="Density" value={population.density_per_km2 == null ? '—' : `${formatNumber(population.density_per_km2, 1)} / km²`} />
-          <Metric label="Reference year" value={population.year?.toString() || '—'} />
-        </dl>
-        {population.source && <p className="mt-3 text-xs text-slate-400">Source: {population.source}</p>}
-      </ResultCard>
-    );
-  }
-
-  if (dataset === 'climate') {
-    const climate = summary.climate;
-    if (!climate) {
-      return <ResultCard title={option.label} description={option.description} unavailable="No climate-normal data was returned for this area." />;
-    }
-    return (
-      <ResultCard title={option.label} description={option.description}>
-        <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Mean temperature" value={`${formatNumber(climate.mean_temp_c, 1)} °C`} />
-          <Metric label="Annual precipitation" value={`${formatNumber(climate.annual_precip_mm, 0)} mm`} />
-          <Metric label="Reference period" value={climate.period || '—'} />
-        </dl>
-        {climate.source && <p className="mt-3 text-xs text-slate-400">Source: {climate.source}</p>}
-      </ResultCard>
-    );
-  }
-
-  const hydrology = summary.hydrology;
-  if (!hydrology) {
-    return <ResultCard title={option.label} description={option.description} unavailable="No mapped hydrology data was returned for this area." />;
+  const ndvi = summary.ndvi;
+  if (!ndvi || ndvi.status === 'skipped' || ndvi.status === 'unavailable') {
+    return <ResultCard title={option.label} description={option.description} unavailable={ndvi?.warning || 'No recent NDVI result was returned for this area.'} />;
   }
   return (
     <ResultCard title={option.label} description={option.description}>
       <dl className="grid grid-cols-2 gap-2">
-        <Metric label="Mapped water area" value={`${formatNumber(hydrology.water_area_km2, 3)} km²`} />
-        <Metric label="Water cover" value={`${formatNumber(hydrology.water_cover_pct, 1)}%`} />
-        <Metric label="Waterway length" value={`${formatNumber(hydrology.waterway_length_km, 1)} km`} />
+        <Metric label="Median composite mean" value={formatNumber(ndvi.mean, 2)} />
+        <Metric label="Middle 50%" value={`${formatNumber(ndvi.p25, 2)}–${formatNumber(ndvi.p75, 2)}`} />
+        <Metric label="Value range" value={`${formatNumber(ndvi.min, 2)}–${formatNumber(ndvi.max, 2)}`} />
+        <Metric label="Scenes used" value={formatNumber(ndvi.scene_count, 0)} />
       </dl>
-      {hydrology.source && <p className="mt-3 text-xs text-slate-400">Source: {hydrology.source}</p>}
+      <p className="mt-3 text-xs text-slate-400">
+        {ndvi.source || 'Sentinel-2'}{ndvi.resolution_m ? ` · ${ndvi.resolution_m} m` : ''}
+      </p>
     </ResultCard>
   );
 }
@@ -364,9 +328,7 @@ export default function Home() {
    const [response, setResponse] = useState<string>('');
    const [analysisWarnings, setAnalysisWarnings] = useState<AnalysisWarning[]>([]);
    const [isSearching, setIsSearching] = useState(false);
-   const [audience, setAudience] = useState<string>('academic');
-   const [summaryType, setSummaryType] = useState<'raw' | 'narrative'>('narrative');
-   const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi']);
+   const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
    const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
@@ -420,9 +382,15 @@ export default function Home() {
   };
 
   // Handle bounding box creation from map
-  const handleBoundingBoxCreated = (bbox: BoundingBox | null) => {
+  // Stable identity: the map's draw-control effect depends on these, and a new
+  // function on every render tore down and re-registered the control each time.
+  const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
     setBoundingBox(bbox);
-  };
+  }, []);
+
+  const handleFeaturesChange = useCallback((geojson: FeatureCollection) => {
+    setDrawnFeatures(geojson);
+  }, []);
 
   // Handle file upload
   const handleGeojsonUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -462,13 +430,9 @@ export default function Home() {
     };
     reader.readAsText(file);
   };
-  // Build a concise text fallback for copying and for Raw Data mode. The
+  // Build a concise text fallback for copying and for the results pane. The
   // structured cards below remain the authoritative presentation of values.
-  function summarizeData(summary: Summary, narrative?: string): string {
-  if (narrative) {
-    return narrative;
-  }
-
+  function summarizeData(summary: Summary): string {
   const lines: string[] = [];
 
   if (summary.country) {
@@ -502,27 +466,19 @@ export default function Home() {
   }
 
   const landcover = summary.landcover;
+  const rain = summary.rainfall;
+  if (rain?.status === 'ok' && rain.summary?.trailing_12m) {
+    const t = rain.summary.trailing_12m;
+    lines.push(
+      `Rainfall: ${formatNumber(t.precip_mm, 0)} mm over the last 12 months, ` +
+      `${t.anomaly_pct != null ? `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}% ` : ''}` +
+      `against the 1991-2020 normal of ${formatNumber(t.normal_mm, 0)} mm.`,
+    );
+  }
   if (landcover && !landcover.error) {
     const parts = landcoverEntries(landcover)
       .map(([code, percentage]) => `${LANDCOVER_LABELS[code] || code} (${formatNumber(percentage, 1)}%)`);
     if (parts.length > 0) lines.push(`Land cover: ${parts.join(', ')}.`);
-  }
-
-  if (summary.soils?.mean_soc_tC_ha != null) {
-    lines.push(`Soil organic carbon: ${formatNumber(summary.soils.mean_soc_tC_ha, 2)} ${summary.soils.units || 'tC/ha'}.`);
-  }
-  if (summary.population?.total_pop != null) {
-    lines.push(`Estimated population: ${formatNumber(summary.population.total_pop, 0)}.`);
-  }
-  if (summary.climate?.mean_temp_c != null || summary.climate?.annual_precip_mm != null) {
-    lines.push(
-      `Climate normals: ${formatNumber(summary.climate.mean_temp_c, 1)} °C mean temperature and ${formatNumber(summary.climate.annual_precip_mm, 0)} mm annual precipitation.`,
-    );
-  }
-  if (summary.hydrology?.water_area_km2 != null || summary.hydrology?.waterway_length_km != null) {
-    lines.push(
-      `Hydrology: ${formatNumber(summary.hydrology.water_area_km2, 3)} km² mapped water and ${formatNumber(summary.hydrology.waterway_length_km, 1)} km mapped waterways.`,
-    );
   }
 
   return lines.join(' ') || 'The selected data sources did not return values for this area.';
@@ -576,8 +532,6 @@ export default function Home() {
       if (!geojson) return;
 
       const params = new URLSearchParams({
-        include_narrative: String(summaryType === 'narrative'),
-        audience,
         include_ndvi: String(selectedDatasets.includes('ndvi')),
         datasets: selectedDatasets.join(','),
       });
@@ -594,9 +548,9 @@ export default function Home() {
         throw new Error(failure?.detail || `Analysis request failed (${response.status}).`);
       }
 
-      const data = await response.json() as { summary?: Summary; narrative?: string };
+      const data = await response.json() as { summary?: Summary };
       const summary = data.summary || {};
-      const result = summarizeData(summary, data.narrative);
+      const result = summarizeData(summary);
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
       setAnalysisSummary(summary);
@@ -739,37 +693,6 @@ export default function Home() {
               <CardContent>
                 <div className="space-y-4">
                   <div className="space-y-2">
-                    <Label className="text-sm font-medium text-slate-300">Audience Type</Label>
-                    <Select value={audience} onValueChange={setAudience}>
-                      <SelectTrigger className="w-full bg-white/20 border-white/30 text-white">
-                        <SelectValue placeholder="Select audience" />
-                      </SelectTrigger>
-                      <SelectContent className="bg-white text-gray-900">
-                        <SelectItem value="academic">Academic Researcher</SelectItem>
-                        <SelectItem value="investor">Investor</SelectItem>
-                        <SelectItem value="farmer">Farmer</SelectItem>
-                        <SelectItem value="policy">Policy Maker</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label className="text-sm font-medium text-slate-300">Summary Type</Label>
-                    <RadioGroup
-                      value={summaryType}
-                      onValueChange={(value: 'raw' | 'narrative') => setSummaryType(value)}
-                      className="flex space-x-4"
-                    >
-                      <div className="flex items-center space-x-2">
-                        <RadioGroupItem value="raw" id="raw" />
-                        <Label htmlFor="raw" className="text-sm text-slate-300">Raw Data</Label>
-                      </div>
-                      <div className="flex items-center space-x-2">
-                        <RadioGroupItem value="narrative" id="narrative" />
-                        <Label htmlFor="narrative" className="text-sm text-slate-300">Narrative</Label>
-                      </div>
-                    </RadioGroup>
-                  </div>
-                  <div className="space-y-2">
                     <Label className="text-sm font-medium text-slate-300">Datasets to Analyze</Label>
                     <div className="space-y-2">
                       {DATASET_OPTIONS.map((dataset) => (
@@ -795,7 +718,7 @@ export default function Home() {
                     </div>
                   </div>
                   <p className="text-xs text-slate-400 mt-2">
-                    Core datasets are selected by default. Optional sources may be unavailable for some areas.
+                    All datasets are selected by default. Vegetation analysis may be skipped for larger study areas.
                   </p>
                 </div>
               </CardContent>
@@ -838,7 +761,7 @@ export default function Home() {
                       selectedLocation={selectedLocation}
                       onBoundingBoxCreated={handleBoundingBoxCreated}
                       uploadedGeoJSON={uploadedGeojson}
-                      onSaveFeatures={setDrawnFeatures}
+                      onSaveFeatures={handleFeaturesChange}
                     />
                     {drawnFeatures && drawnFeatures.features.length > 0 && (
                       <button

@@ -11,7 +11,14 @@ from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 
-from main import aoi_bbox, canonicalize_geojson, compute_median_ndvi, validate_aoi
+from main import (
+    AVAILABLE_DATASETS,
+    _requested_datasets,
+    aoi_bbox,
+    canonicalize_geojson,
+    compute_median_ndvi,
+    validate_aoi,
+)
 
 
 SMALL_POLYGON = {
@@ -161,6 +168,25 @@ class NDVIGuardrailTests(unittest.TestCase):
             )
 
         self.assertEqual(raised.exception.status_code, 413)
+
+
+class RequestedDatasetsTests(unittest.TestCase):
+    def test_defaults_to_every_supported_module(self) -> None:
+        self.assertEqual(_requested_datasets(None), AVAILABLE_DATASETS)
+
+    def test_parses_a_comma_separated_selection(self) -> None:
+        self.assertEqual(_requested_datasets(" dem , NDVI "), {"dem", "ndvi"})
+
+    def test_rainfall_is_selectable(self) -> None:
+        self.assertEqual(_requested_datasets("rainfall,dem"), {"rainfall", "dem"})
+        self.assertIn("rainfall", AVAILABLE_DATASETS)
+
+    def test_rejects_datasets_that_are_no_longer_supported(self) -> None:
+        for retired in ("soils", "population", "climate", "hydrology"):
+            with self.subTest(dataset=retired):
+                with self.assertRaises(HTTPException) as raised:
+                    _requested_datasets(retired)
+                self.assertEqual(raised.exception.status_code, 422)
 
 
 if __name__ == "__main__":

@@ -7,23 +7,23 @@ python-multipart>=0.0.6
 # Geospatial & STAC
 pystac-client>=0.7.5
 planetary-computer>=1.0.0
-odc-stac>=0.4.2
-rioxarray>=0.15.0
-xarray>=2023.12.0
-dask[array]>=2023.12.0
 rasterio>=1.3.6
+affine>=2.4.0
 shapely>=2.0.2
 pyproj>=3.6.0
 
 # Scientific Computing
 numpy>=1.26.0
 
-# AI/ML
-google-generativeai>=0.4.0
+# Rainfall (ERA5 via the public Earthmover Icechunk store on AWS Open Data).
+# Only the offline precompute path needs these; the request path reads a cache.
+xarray>=2023.12.0
+zarr>=3.0.0
+icechunk>=2.0.0
+pcodec>=1.0.0
 
 # Environment
 python-dotenv>=1.0.0
 
-# Extra datasets (Sprint 2)
+# Country context
 requests>=2.31.0
-overpy>=0.6

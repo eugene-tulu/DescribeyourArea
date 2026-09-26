@@ -49,7 +49,7 @@ npm start
 - Elevation analysis
 - NDVI (Normalized Difference Vegetation Index) analysis
 - Landcover classification
-- AI-powered narrative descriptions
+- Country context for the selected area
 - Responsive design for all devices
 
 ## Deployment
