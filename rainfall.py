@@ -65,6 +65,101 @@ def cache_dir() -> Path:
     return Path(os.getenv("RAINFALL_CACHE_DIR", ".rainfall-cache")).expanduser()
 
 
+# Optional object-store backing, so the portfolio is a published artefact rather
+# than something baked into the image. S3-compatible, which DigitalOcean Spaces
+# is. Unset means everything stays local and every remote operation is a no-op.
+#
+#   RAINFALL_CACHE_S3_URI=s3://my-bucket/geocontextualize/rainfall
+#   RAINFALL_S3_ENDPOINT=https://nyc3.digitaloceanspaces.com
+#   RAINFALL_S3_REGION=nyc3
+#
+# The request path reads locally first and only consults the remote on a miss, so
+# a cache hit never pays a network round trip and the hot path has no new failure
+# mode.
+REMOTE_URI_ENV = "RAINFALL_CACHE_S3_URI"
+REMOTE_ENDPOINT_ENV = "RAINFALL_S3_ENDPOINT"
+REMOTE_REGION_ENV = "RAINFALL_S3_REGION"
+
+
+def remote_prefix() -> Optional[str]:
+    """Bucket and key prefix from the configured URI, or None."""
+    uri = (os.getenv(REMOTE_URI_ENV) or "").strip()
+    if not uri:
+        return None
+    if not uri.startswith("s3://"):
+        raise ValueError(f"{REMOTE_URI_ENV} must start with s3://, got {uri!r}")
+    remainder = uri[len("s3://"):].strip("/")
+    if not remainder:
+        raise ValueError(f"{REMOTE_URI_ENV} is missing a bucket name")
+    return remainder
+
+
+def _s3_client():
+    """A boto3 S3 client pointed at the configured endpoint, or None."""
+    prefix = remote_prefix()
+    if prefix is None:
+        return None
+    import boto3
+
+    endpoint = os.getenv(REMOTE_ENDPOINT_ENV) or None
+    region = os.getenv(REMOTE_REGION_ENV) or "us-east-1"
+    return boto3.client("s3", endpoint_url=endpoint, region_name=region)
+
+
+def _bucket() -> str:
+    return remote_prefix().split("/", 1)[0]
+
+
+def _key_prefix() -> str:
+    """Key prefix inside the bucket, with the bucket name stripped off."""
+    parts = remote_prefix().split("/", 1)
+    return parts[1] if len(parts) > 1 else ""
+
+
+def _remote_key(name: str) -> str:
+    """Object key for a name, relative to the bucket. The bucket is not part of
+    the key, so it must be stripped from the configured prefix."""
+    prefix = _key_prefix().strip("/")
+    return f"{prefix}/{name}" if prefix else name
+
+
+def series_object(key: str) -> str:
+    return f"series/{key}.json"
+
+
+def publish(key: str) -> Optional[str]:
+    """Upload one cached series. Returns the object key, or None if local-only."""
+    if remote_prefix() is None:
+        return None
+    path = cache_path(key)
+    if not path.exists():
+        return None
+    name = series_object(key)
+    _s3_client().upload_file(str(path), _bucket(), _remote_key(name))
+    return name
+
+
+def fetch(key: str) -> Optional[dict]:
+    """Pull one series from the remote and cache it locally. Returns it, or None."""
+    if remote_prefix() is None:
+        return None
+    client = _s3_client()
+    try:
+        response = client.get_object(Bucket=_bucket(), Key=_remote_key(series_object(key)))
+    except Exception:
+        # A miss must stay a miss: an unreachable remote is not an error the
+        # caller should see.
+        return None
+    try:
+        payload = json.loads(response["Body"].read())
+    except (ValueError, KeyError, OSError):
+        return None
+    if payload.get("processing_version") != RAINFALL_PROCESSING_VERSION:
+        return None
+    write_cache(key, payload)
+    return payload
+
+
 def geometry_hash(geojson_geom: dict) -> str:
     """Stable key for a study area."""
     canonical = json.dumps(geojson_geom, sort_keys=True, separators=(",", ":"))
@@ -480,21 +575,36 @@ def compute_series(
     }
 
 
-def build_and_cache(geojson_geom: dict, *, start: str = "2015-01-01", source=None, **kwargs) -> dict:
-    """Compute and store a series, returning the cached payload."""
+def build_and_cache(
+    geojson_geom: dict,
+    *,
+    start: str = "2015-01-01",
+    source=None,
+    publish: bool = False,
+    **kwargs,
+) -> dict:
+    """Compute and store a series, returning the cached payload.
+
+    With ``publish`` the series is also uploaded, so the portfolio becomes a
+    published artefact rather than local state tied to one machine.
+    """
+    key = geometry_hash(geojson_geom)
     payload = compute_series(geojson_geom, start=start, source=source, **kwargs)
-    write_cache(geometry_hash(geojson_geom), payload)
+    write_cache(key, payload)
+    if publish:
+        publish(key)
     return payload
 
 
 def cached_context(geojson_geom: dict) -> dict:
     """Result for the request path: a cached series, or an explicit miss.
 
-    The request path never computes. A miss reports that the area has not been
-    processed yet rather than blocking for the ~20 seconds the read takes.
+    The request path never computes. A local hit is served without any network
+    call; a miss falls back to the remote once and, if found, caches it locally so
+    the next request is a plain file read again.
     """
     key = geometry_hash(geojson_geom)
-    payload = read_cache(key)
+    payload = read_cache(key) or fetch(key)
     if payload is None:
         return {
             "status": "not_computed",

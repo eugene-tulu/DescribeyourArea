@@ -9,6 +9,7 @@ import json
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 import rainfall
@@ -296,6 +297,164 @@ class RealEra5Tests(unittest.TestCase):
         window = payload["coverage"]["window"]
         self.assertIn("months_dropped", window)
         self.assertLessEqual(window["valid_hours"], window["expected_hours"])
+
+
+class RemoteCacheTests(unittest.TestCase):
+    """The optional object-store backing, exercised against a stub client.
+
+    The portfolio is under 1 MB, so the remote exists to keep it out of the image
+    and let it grow, not because of size. A local hit must never touch it.
+    """
+
+    def setUp(self):
+        self.previous = {
+            key: os.environ.get(key)
+            for key in (
+                "RAINFALL_CACHE_DIR",
+                rainfall.REMOTE_URI_ENV,
+                rainfall.REMOTE_ENDPOINT_ENV,
+                rainfall.REMOTE_REGION_ENV,
+            )
+        }
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        for key in (rainfall.REMOTE_URI_ENV, rainfall.REMOTE_ENDPOINT_ENV,
+                    rainfall.REMOTE_REGION_ENV):
+            os.environ.pop(key, None)
+        self.client = _StubClient()
+        self._patcher = unittest.mock.patch.object(rainfall, "_s3_client", lambda: self.client)
+        self._patcher.start()
+        self.addCleanup(self._patcher.stop)
+        self.addCleanup(self.tmp.cleanup)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def _payload(self):
+        return {"processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+                "series": [{"month": "2020-01", "precip_mm": 2.0}]}
+
+    def _configure(self):
+        os.environ[rainfall.REMOTE_URI_ENV] = "s3://my-bucket/geocontextualize/rainfall"
+
+    def test_unconfigured_remote_is_a_noop(self):
+        self.assertIsNone(rainfall.remote_prefix())
+        self.assertIsNone(rainfall.publish("anything"))
+        self.assertIsNone(rainfall.fetch("anything"))
+
+    def test_prefix_is_parsed_from_the_uri(self):
+        self._configure()
+        self.assertEqual(rainfall.remote_prefix(), "my-bucket/geocontextualize/rainfall")
+        self.assertEqual(
+            rainfall.series_object("abc123"), "series/abc123.json"
+        )
+
+    def test_malformed_uri_is_rejected_loudly(self):
+        for uri in ("my-bucket/prefix", "s3://"):
+            with self.subTest(uri=uri):
+                os.environ[rainfall.REMOTE_URI_ENV] = uri
+                with self.assertRaises(ValueError):
+                    rainfall.remote_prefix()
+
+    def test_publish_uploads_the_local_file(self):
+        self._configure()
+        key = "deadbeef"
+        rainfall.write_cache(key, self._payload())
+        name = rainfall.publish(key)
+        self.assertEqual(name, f"series/{key}.json")
+        self.assertEqual(
+            self.client.uploads[-1],
+            ("my-bucket", "geocontextualize/rainfall/series/deadbeef.json"),
+        )
+
+    def test_publish_is_a_noop_without_a_local_file(self):
+        self._configure()
+        self.assertIsNone(rainfall.publish("missing"))
+
+    def test_fetch_caches_locally_on_a_miss(self):
+        self._configure()
+        key = "feedface"
+        self.client.objects[("my-bucket", f"geocontextualize/rainfall/series/{key}.json")] = \
+            self._payload()
+        payload = rainfall.fetch(key)
+        self.assertIsNotNone(payload)
+        # Second read is served from disk, with no further remote call.
+        calls = self.client.gets
+        self.assertIsNotNone(rainfall.read_cache(key))
+        self.assertEqual(self.client.gets, calls)
+
+    def test_fetch_ignores_a_stale_processing_version(self):
+        self._configure()
+        key = "stale01"
+        self.client.objects[
+            ("my-bucket", f"geocontextualize/rainfall/series/{key}.json")
+        ] = {"processing_version": "era5-monthly-0", "series": []}
+        self.assertIsNone(rainfall.fetch(key))
+        self.assertIsNone(rainfall.read_cache(key))
+
+    def test_fetch_survives_an_unreachable_remote(self):
+        self._configure()
+        self.client.raises = RuntimeError("endpoint unreachable")
+        self.assertIsNone(rainfall.fetch("whatever"))
+
+    def test_context_falls_back_to_the_remote_then_caches_locally(self):
+        self._configure()
+        geom = {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]}
+        key = rainfall.geometry_hash(geom)
+        self.assertEqual(rainfall.cached_context(geom)["status"], "not_computed")
+
+        self.client.objects[
+            ("my-bucket", f"geocontextualize/rainfall/series/{key}.json")
+        ] = {"processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+             "series": [{"month": "2020-01", "precip_mm": 3.0}]}
+        context = rainfall.cached_context(geom)
+        self.assertEqual(context["status"], "ok")
+        self.assertEqual(context["series"][0]["precip_mm"], 3.0)
+        self.assertIsNotNone(rainfall.read_cache(key), "fetch should cache locally")
+
+    def test_a_local_hit_never_touches_the_remote(self):
+        self._configure()
+        geom = {"type": "Polygon", "coordinates": [[[2, 2], [3, 2], [3, 3], [2, 3], [2, 2]]]}
+        key = rainfall.geometry_hash(geom)
+        rainfall.write_cache(key, self._payload())
+        before = self.client.gets
+        self.assertEqual(rainfall.cached_context(geom)["status"], "ok")
+        self.assertEqual(self.client.gets, before, "a cache hit must not call out")
+
+
+class _StubObject:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def read(self):
+        return json.dumps(self._payload).encode()
+
+
+class _StubClient:
+    """Minimal stand-in for a boto3 S3 client."""
+
+    def __init__(self):
+        self.objects = {}
+        self.uploads = []
+        self.gets = 0
+        self.raises = None
+
+    def get_object(self, Bucket, Key):
+        self.gets += 1
+        if self.raises:
+            raise self.raises
+        if (Bucket, Key) not in self.objects:
+            raise KeyError(Key)
+        return {"Body": _StubObject(self.objects[(Bucket, Key)])}
+
+    def upload_file(self, path, bucket, key):
+        self.uploads.append((bucket, key))
+        self.objects[(bucket, key)] = json.loads(open(path).read())
 
 
 if __name__ == "__main__":

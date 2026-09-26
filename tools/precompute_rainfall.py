@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -63,13 +64,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true",
                         help="recompute even when a valid cached entry exists")
     parser.add_argument("--only", default=None, help="process only areas whose name matches")
+    parser.add_argument("--publish", action="store_true",
+                        help="upload each freshly built series to RAINFALL_CACHE_S3_URI")
     args = parser.parse_args(argv)
+
+    if args.publish and rainfall.remote_prefix() is None:
+        raise SystemExit(
+            "--publish needs RAINFALL_CACHE_S3_URI (and optionally "
+            "RAINFALL_S3_ENDPOINT / RAINFALL_S3_REGION) to be set"
+        )
 
     areas = load_areas(args.areas or args.conservancies)
     if args.only:
         areas = [(n, a) for n, a in areas if args.only.lower() in n.lower()]
 
     print(f"cache: {rainfall.cache_dir()}")
+    if rainfall.remote_prefix():
+        print(f"remote: s3://{rainfall.remote_prefix()}"
+              + (f" via {os.environ.get('RAINFALL_S3_ENDPOINT')}" if os.environ.get("RAINFALL_S3_ENDPOINT") else ""))
     print(f"areas: {len(areas)}")
 
     usable = [(n, f.get("geometry")) for n, f in areas
@@ -103,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
         start = time.perf_counter()
         try:
             payload = rainfall.build_and_cache(
-                geom, start=args.start, end=args.end, source=source)
+                geom, start=args.start, end=args.end, source=source, publish=args.publish)
         except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
             print(f"  {name:24s} FAIL    {type(exc).__name__}: {str(exc)[:90]}")
             failed += 1
@@ -111,9 +123,10 @@ def main(argv: list[str] | None = None) -> int:
         elapsed = time.perf_counter() - start
         dropped = len(payload["coverage"]["window"]["months_dropped"])
         suspect = len(payload["summary"].get("suspect_months", []))
+        uploaded = "  published" if args.publish else ""
         print(f"  {name:24s} built    {len(payload['series']):4d} months  "
               f"cells={payload['grid_cells']:3d}  {elapsed:5.1f}s  "
-              f"dropped={dropped} suspect={suspect}")
+              f"dropped={dropped} suspect={suspect}{uploaded}")
         built += 1
 
     print(f"\nbuilt {built}, cached {cached}, missing {missed}, failed {failed}")

@@ -27,6 +27,47 @@ The Compose file deliberately binds only `127.0.0.1:3000` and
 `127.0.0.1:8001`. It also caps application resources, retains only small local
 logs, and has no disk-growing STAC cache.
 
+## Rainfall portfolio
+
+Precipitation is computed offline, because a single ERA5 grid cell takes about 20
+seconds to read and a whole request budget is 20-30 seconds. The request path only
+reads a cache, so the portfolio must be present before the service starts.
+
+It lives in an S3-compatible store, which DigitalOcean Spaces is, so it is a
+published artefact rather than state tied to one image. It is small: the 21
+Northern Rangelands Trust conservancies are about 590 KB, roughly 25 KB each.
+
+```bash
+# build, from a machine with the dependencies installed
+RAINFALL_CACHE_DIR=.rainfall-cache \
+RAINFALL_CACHE_S3_URI=s3://my-bucket/geocontextualize/rainfall \
+RAINFALL_S3_ENDPOINT=https://nyc3.digitaloceanspaces.com \
+RAINFALL_S3_REGION=nyc3 \
+python -m tools.precompute_rainfall --conservancies areas.geojson \
+    --start 2010-01-01 --publish
+
+# deploy: fetch before serving
+python -m tools.sync_rainfall_cache --pull
+```
+
+Set `RAINFALL_CACHE_DIR` to a writable path inside the container, for example
+`/app/.rainfall-cache`, and run the pull in the same entrypoint as the server
+start. Both variables are optional: unset, everything stays local and the remote
+calls are no-ops.
+
+Two properties worth relying on:
+
+- **A cache hit never touches the network.** `cached_context()` reads the local
+  file first and consults the remote only on a miss, so the hot path gains neither
+  latency nor a new failure mode.
+- **A miss stays a miss.** An unreachable remote returns `not_computed` rather
+  than an error, so a Spaces outage degrades to "not processed yet" instead of a
+  failed request.
+
+Spaces credentials come from the standard AWS environment variables
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). The per-read cell cache under
+`cells/` is a build accelerator and is deliberately not transferred.
+
 ## Nginx
 
 Install `deploy/nginx/geocontextualize-rate-limit.conf` under

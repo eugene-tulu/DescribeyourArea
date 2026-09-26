@@ -31,6 +31,66 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.6.0 — Rainfall portfolio published to an S3-compatible store
+
+The rainfall series is a **build artefact**, so it has to exist somewhere durable
+and outside the image. Spaces is the natural home: it is S3-compatible, already
+running, and the portfolio is tiny — **21 conservancies, 590 KB, ~25 KB each**.
+
+### Design: the hot path never touches the network
+
+`cached_context()` reads the local file first and consults the remote **only on a
+miss**, caching the result locally so the next request is a plain file read again.
+Two consequences worth relying on:
+
+- A cache hit gains no latency and no new failure mode.
+- A miss stays a miss: an unreachable remote returns `not_computed`, so a Spaces
+  outage degrades to "not processed yet" rather than a failed request. Verified
+  against a stub client that raises.
+
+### Interfaces
+
+```bash
+# build and publish
+python -m tools.precompute_rainfall --conservancies areas.geojson --start 2010-01-01 --publish
+
+# deploy: fetch before serving
+python -m tools.sync_rainfall_cache --pull
+```
+
+Configured with `RAINFALL_CACHE_S3_URI`, plus optional `RAINFALL_S3_ENDPOINT` and
+`RAINFALL_S3_REGION`; credentials come from the standard `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` pair. **All optional** — unset, everything stays local and
+every remote call is a no-op, so nothing about local development changes.
+
+The per-read cell cache under `cells/` is a build accelerator, not an artefact, and
+is deliberately not transferred.
+
+This is also the mechanism self-service submission needs later: a submitted polygon
+gets computed and published, and the next deployment or cache miss picks it up with
+no rebuild.
+
+### Failure modes and their exits
+
+- No remote configured: exit 2 with the variables to set.
+- Unreachable or misconfigured remote: exit 1 with the client error and the four
+  knobs to check, rather than a botocore traceback.
+- `--publish` with no remote configured: refuses rather than silently skipping.
+
+### One bug found and fixed
+
+`_remote_key` built the object key from the whole configured prefix, which
+duplicated the bucket name into the key — every upload and fetch addressed a
+non-existent object. The bucket is not part of an S3 key, so it is now stripped;
+the test asserts the exact key.
+
+Ten new offline tests cover the remote layer against a stub client: no-op when
+unconfigured, URI parsing, rejection of a malformed URI, upload, fetch-then-cache,
+stale-version rejection, survival of an unreachable remote, miss-then-remote
+fallback, and that **a local hit makes no remote call at all**.
+
+---
+
 ## 1.5.0 — Rainfall and drought anomaly from ERA5
 
 The indicator asked about twice in the conservancy webinar ("can we see how the
@@ -458,31 +518,26 @@ Its `rustac` component is the part worth keeping for a future precompute worker.
 
 Ordered by value per unit of effort.
 
-1. **Point the rainfall cache at DigitalOcean Spaces.** The build is done and the
-   cache is keyed by geometry hash, so it is already a deployable artefact. Set
-   `RAINFALL_CACHE_DIR` to an S3-compatible prefix and ship the 21 conservancies
-   with the image. This is the last piece of infrastructure the precompute path
-   needs.
-2. **Sentinel ladder: Landsat 30 m and MODIS 250 m.** Landsat is the only source
+1. **Sentinel ladder: Landsat 30 m and MODIS 250 m.** Landsat is the only source
    that reaches before 2015 for the vegetation index, matching what ERA5 now does
    for rainfall. Two traps: the band is `nir08`, not `nir`, and PC's Landsat C2 L2
    surface reflectance carries `scale=2.75e-05, offset=-0.2` — the offset does
    **not** cancel in NDVI, so a naive port yields plausible wrong numbers. MODIS
    `modis-13Q1-061` ships NDVI as a finished 16-day product, a stronger
    provenance claim than anything computed.
-3. **Usage instrumentation.** The schema is already written in
+2. **Usage instrumentation.** The schema is already written in
    `NEXT_FEATURE.md`; ship it with the current app. Aggregate outcomes, duration,
    selected datasets, coarse AOI-size band, no raw geometry, no full IP. Nothing
    else can be prioritised without it.
-4. **Self-service polygon submission.** Submit any polygon, queue it for
+3. **Self-service polygon submission.** Submit any polygon, queue it for
    precompute, return a permanent shareable page. The rainfall miss state is
    already the hook: it names the cache key and explains why. This is the
    loudest unanswered question in the webinar — "how do we share our polygons",
    asked five times by four people — and `NEXT_FEATURE.md` as written answers it
    with the wrong answer, an administrator-gated portfolio.
-5. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
+4. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
    Diff the precomputed series on refresh and notify. No new infrastructure, and
    it cannot be retrofitted cheaply.
 
-Only with evidence from 3–5: a durable queue and a monitoring view. The store
+Only with evidence from 2–4: a durable queue and a monitoring view. The store
 should be Postgres or DuckDB — a table, not a cube.
