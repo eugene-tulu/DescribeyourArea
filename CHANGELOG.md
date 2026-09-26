@@ -31,6 +31,80 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.9.0 — Privacy-preserving usage events, and a way to honour a deletion request
+
+### The schema, with the privacy properties made structural
+
+`usage.py` exists so the guarantees cannot be forgotten. `build_event` has **no
+parameter that could carry a submitted polygon** — a test asserts the absence of
+every geometry-shaped name in its signature — the area is reduced to a band
+before it leaves the builder, and the client address is truncated to a /24 (or a
+/64) inside it. `assert_no_geometry` walks the finished record for anything
+coordinate-shaped, so a future field cannot reintroduce a polygon unnoticed.
+
+Bands align with the shipped caps (`0-10`, `10-100`, `100-1000`, `1000+`), so a
+pile-up in the `10-100` band reads directly as "the synchronous cap is too tight".
+A recorded outcome is a verdict — `ok`, `skipped`, `unavailable`, `not_computed`,
+`error` — never a measurement, because `{"mean": 1650.25}` is a fact about a
+place. A test asserts the numbers are absent from the serialised record.
+
+```json
+{"v":1,"at":"2026-09-26T20:52:11+00:00","datasets_requested":["dem","landcover","ndvi"],
+ "outcomes":{"dem":"ok","landcover":"ok","ndvi":"ok","rainfall":"not_requested"},
+ "duration_ms":{"dem":3591,"landcover":3591,"ndvi":24010},"total_ms":33180,
+ "aoi_area_km2_band":"10-100","sensor":"landsat","client_prefix":"203.0.113.0/24"}
+```
+
+### The client address needed a trust decision
+
+`request.client.host` is the *proxy*, because Compose binds the API to loopback
+and only Nginx can reach it — so the obvious implementation logs Nginx's address
+and is useless for rate limiting or spotting scraping. The forwarded chain is read,
+but **only when the peer can only be our own Nginx**, so a client cannot forge it.
+Proxy ranges are enumerated explicitly rather than taken from
+`ipaddress.is_private`, which also reports the documentation ranges as private and
+would make `203.0.113.9` look like a proxy. This is safe only while the port stays
+loopback-bound, and the docstring says so.
+
+### The cache is a data store about specific land
+
+The rainfall cache is keyed by a hash of the submitted geometry and holds that
+area's monthly series, so it is a record about a particular place even though the
+polygon is never stored. A request to remove an area's data could not be honoured.
+`POST /admin/rainfall/forget` takes a geometry or a 32-character key, deletes only
+that series, and is idempotent. It refuses anything that is not an exact
+lowercase-hex key, refuses a path outside the cache, and leaves the shared
+per-read cell cache alone.
+
+### Tests: 168 -> 211
+
+43 on the schema and the endpoint: band edges against the shipped caps, IPv4 and
+IPv6 truncation, verdicts that drop their measurements, the absent-geometry
+parameter, a record that carries no geometry, append-as-JSON-lines, a write
+failure that cannot raise, aggregation with no area values recoverable, deletion
+by geometry and by key, idempotency, a sibling area surviving, seven malformed
+keys refused, non-polygon geometry refused, forwarded-header trust including the
+forgery case, and the timer.
+
+### Four bugs found by writing the tests
+
+1. **The endpoint called `_emit_usage_event` but the function did not exist** —
+   every successful request would have returned 500. My own test missed it because
+   it only exercised the rejection path, which returns before the emit site. A
+   string-anchored replacement had silently not applied.
+2. **The NDVI duration read 14,738,217 ms** — four hours. The timer was
+   constructed but never entered, so it measured the interval since the epoch.
+3. **The raster timer recorded nothing** for the same reason, so `duration_ms` was
+   empty.
+4. **`_PRIVATE_PEERS` was a fixed string set** that did not recognise the Docker
+   bridge range, so the forwarded branch never ran and every prefix came out
+   `unknown`.
+
+Two of these were string-anchored replacements that silently failed to apply. I
+now assert the replacement landed.
+
+---
+
 ## 1.8.0 — Sensor ladder: Landsat 30 m and MODIS 250 m, chosen by measurement
 
 One code path now serves three sensors, selected automatically, and the selection
@@ -671,9 +745,9 @@ Ordered by value per unit of effort.
    loudest unanswered question in the webinar — "how do we share our polygons",
    asked five times by four people — and `NEXT_FEATURE.md` as written answers it
    with the wrong answer, an administrator-gated portfolio.
-3. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
+2. **Alerting.** A dashboard is visited once; a subscription is visited monthly.
    Diff the precomputed series on refresh and notify. No new infrastructure, and
    it cannot be retrofitted cheaply.
 
-Only with evidence from 1–3: a durable queue and a monitoring view. The store
+Only with evidence from 1–2: a durable queue and a monitoring view. The store
 should be Postgres or DuckDB — a table, not a cube.

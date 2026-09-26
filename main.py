@@ -20,7 +20,9 @@ import asyncio
 import json
 from fastapi.middleware.cors import CORSMiddleware
 import functools
+import ipaddress
 import math
+import re
 import os
 from dotenv import load_dotenv
 import sys
@@ -44,6 +46,30 @@ from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re
     select_sensor,
 )
 import requests
+
+import usage
+
+# Addresses that can be a trusted proxy in front of this service. Enumerated
+# rather than derived from ipaddress.is_private, which also reports the
+# documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) as private
+# and would make a documentation address look like a proxy.
+_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(cidr) for cidr in (
+        "127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16",
+        "::1/128", "fc00::/7", "fe80::/10",
+    )
+)
+
+
+def _is_trusted_proxy(address: Optional[str]) -> bool:
+    """True when an address can only be our own loopback-bound Nginx."""
+    if not address or address in {"localhost", "backend", "gateway"}:
+        return True if address in {"localhost", "backend", "gateway"} else False
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(parsed in network for network in _PROXY_NETWORKS)
 
 
 # --------------------------------------------------
@@ -206,7 +232,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 
 @app.middleware("http")
@@ -1176,6 +1202,79 @@ AVAILABLE_DATASETS = {
 }
 
 
+async def _timed(timer, coroutine):
+    """Await a coroutine, recording how long it took, even if it raised.
+
+    The timer has to be entered here, not merely constructed: an unentered timer
+    reported the interval since the epoch, which is four hours of nonsense.
+    """
+    timer.__enter__()
+    try:
+        return await coroutine
+    finally:
+        timer.__exit__(None, None, None)
+
+
+def _client_host(http_request) -> Optional[str]:
+    """The caller's address, not the proxy's.
+
+    The Compose file binds the API to loopback and Nginx is the only thing that can
+    reach it, so ``request.client.host`` is the proxy and is useless for rate
+    limiting or for noticing scraping. The forwarded chain is therefore read, but
+    only when the peer can only be our own Nginx, so a client cannot forge it by
+    sending its own header. The leftmost non-private entry is the closest thing to
+    the caller.
+
+    This is safe only while the API stays loopback-bound. If the port is ever
+    exposed, this must stop trusting the header.
+    """
+    try:
+        client = getattr(http_request, "client", None)
+        peer = client.host if client else None
+    except Exception:  # noqa: BLE001
+        return None
+    if not peer:
+        return None
+    if not _is_trusted_proxy(peer):
+        return peer
+    try:
+        forwarded = http_request.headers.get("x-forwarded-for", "") or ""
+    except Exception:  # noqa: BLE001
+        return None
+    parts = [part.strip() for part in str(forwarded).split(",") if part.strip()]
+    for candidate in parts:
+        if not _is_trusted_proxy(candidate):
+            return candidate
+    return parts[0] if parts else peer
+
+
+def _emit_usage_event(*, requested, outcomes, module_ms, request_timer, http_request,
+                      area_km2, ndvi_stats) -> None:
+    """Record what this request did, never what land it was about.
+
+    The event builder takes no geometry and the area is reduced to a band here, so
+    there is no path by which a submitted polygon could reach the log. Anything
+    unexpected is swallowed: analytics must not be able to fail a request that has
+    already succeeded.
+    """
+    try:
+        request_timer.__exit__(None, None, None)
+        sensor = None
+        if isinstance(ndvi_stats, dict):
+            sensor = (ndvi_stats.get("sensor") or {}).get("id")
+        usage.emit(usage.build_event(
+            datasets_requested=requested,
+            outcomes=outcomes,
+            duration_ms=module_ms,
+            total_ms=getattr(request_timer, "elapsed_ms", None),
+            area_km2=area_km2,
+            client_address=_client_host(http_request),
+            sensor=sensor,
+        ))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _requested_datasets(value: Optional[str]) -> set[str]:
     """Parse the existing comma-separated frontend selector safely."""
     if value is None:
@@ -1245,6 +1344,7 @@ async def _find_core_assets(
 @app.post("/generate-context", response_model=ContextResponse)
 async def generate_context(
     request: GeoJSONRequest,
+    http_request: Request = None,
     include_ndvi: bool = True,
     datasets: Optional[str] = None,
     sensor: str = "auto",
@@ -1252,6 +1352,9 @@ async def generate_context(
     window_start: Optional[str] = None,
     window_end: Optional[str] = None,
 ):
+    request_timer = usage.Timer()
+    request_timer.__enter__()
+    module_ms: dict[str, int] = {}
     try:
         requested = _requested_datasets(datasets)
         aoi = validate_aoi(request.geojson)
@@ -1287,22 +1390,31 @@ async def generate_context(
                     core_assets["landcover"],
                     geojson,
                 )
+        raster_timer = usage.Timer()
+        raster_timer.__enter__()
         try:
             raster_values = await asyncio.wait_for(
                 asyncio.gather(*raster_tasks.values()),
                 timeout=30.0,
             ) if raster_tasks else []
         except asyncio.TimeoutError:
+            raster_timer.__exit__(None, None, None)
             raise HTTPException(status_code=504, detail="Raster processing timed out; try a smaller area")
         except MemoryError:
+            raster_timer.__exit__(None, None, None)
             raise HTTPException(status_code=507, detail="Raster processing exceeded available memory")
+        raster_timer.__exit__(None, None, None)
+        if raster_timer.elapsed_ms is not None:
+            for name in raster_tasks:
+                module_ms[name] = raster_timer.elapsed_ms
         raster_results = dict(zip(raster_tasks.keys(), raster_values))
         dem = interpret_terrain(raster_results["dem"]) if "dem" in raster_results else None
         landcover = raster_results.get("landcover", landcover_over_limit)
 
         ndvi_stats = None
         if include_ndvi and "ndvi" in requested:
-            ndvi_stats = await compute_vegetation_index(
+            vegetation_timer = usage.Timer()
+            ndvi_stats = await _timed(vegetation_timer, compute_vegetation_index(
                 bbox=bbox,
                 geojson_geom=geom,
                 max_area_km2=MAX_NDVI_BBOX_KM2,
@@ -1312,7 +1424,8 @@ async def generate_context(
                 window_days=window_days,
                 start=window_start,
                 end=window_end,
-            )
+            ))
+            module_ms["ndvi"] = vegetation_timer.elapsed_ms
 
         # Rainfall is read from a precomputed cache. A single ERA5 grid cell takes
         # about 20 seconds to read, which is longer than a whole request, so the
@@ -1335,6 +1448,16 @@ async def generate_context(
             if "scene_ids" in ndvi_stats:
                 scene_ids["ndvi_composite"] = ", ".join(ndvi_stats["scene_ids"])
 
+        _emit_usage_event(
+            requested=requested,
+            outcomes={"dem": dem, "landcover": landcover,
+                      "ndvi": ndvi_stats, "rainfall": rainfall_context},
+            module_ms=module_ms,
+            request_timer=request_timer,
+            http_request=http_request,
+            area_km2=aoi["bbox_area_km2"],
+            ndvi_stats=ndvi_stats,
+        )
         return {
             "summary": {
                 "dem": dem,
@@ -1370,6 +1493,50 @@ async def health_check():
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         "version": APP_VERSION,
     }
+
+class ForgetRequest(BaseModel):
+    """Identify a study area to remove, by geometry or by cache key."""
+    geojson: Optional[Dict[str, Any]] = None
+    cache_key: Optional[str] = None
+
+
+@app.post("/admin/rainfall/forget")
+async def forget_rainfall_series(payload: ForgetRequest):
+    """Delete a cached rainfall series for one study area.
+
+    The cache is keyed by a hash of the submitted geometry and holds that area's
+    monthly series, so it is a record about a specific piece of land even though
+    the polygon itself is never stored. A request to remove an area's data cannot
+    be honoured without this.
+
+    Only exact 32-character keys are removed, and only files that look like
+    series, so a malformed or hostile key reaches nothing else. The per-read cell
+    cache is shared between areas and is deliberately left alone.
+    """
+    import rainfall
+
+    if payload.geojson:
+        geom = payload.geojson.get("geometry") if payload.geojson.get("type") == "Feature" else payload.geojson
+        if not isinstance(geom, dict) or geom.get("type") not in {"Polygon", "MultiPolygon"}:
+            raise HTTPException(status_code=422, detail="geojson must be a polygon or Feature")
+        key = rainfall.geometry_hash(geom)
+    else:
+        key = (payload.cache_key or "").strip()
+        if not key:
+            raise HTTPException(status_code=422, detail="supply geojson or cache_key")
+
+    if not re.fullmatch(r"[0-9a-f]{32}", key):
+        raise HTTPException(status_code=422, detail="cache_key must be 32 hexadecimal characters")
+
+    path = rainfall.cache_path(key)
+    if path.parent.resolve() != rainfall.cache_dir().resolve():
+        raise HTTPException(status_code=400, detail="refusing a path outside the cache")
+    removed = path.exists()
+    if removed:
+        path.unlink()
+    print(f"rainfall cache: {'removed' if removed else 'no entry for'} {key}", file=sys.stderr)
+    return {"cache_key": key, "removed": removed, "data": "rainfall series"}
+
 
 @app.get("/version")
 async def get_version():

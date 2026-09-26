@@ -68,6 +68,28 @@ Spaces credentials come from the standard AWS environment variables
 (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`). The per-read cell cache under
 `cells/` is a build accelerator and is deliberately not transferred.
 
+## Usage events
+
+Set `USAGE_EVENTS_PATH` to append one JSON line per analysis. Unset, events go to
+stdout only.
+
+```bash
+USAGE_EVENTS_PATH=/app/usage-events.jsonl
+```
+
+Each record carries the datasets requested, a per-module verdict, per-module and
+total durations, a **coarse area band**, the sensor used, and a truncated client
+prefix. It deliberately carries no submitted geometry, no raw area, no
+measurement values and no full IP address, so it cannot be used to work out who
+asked about which piece of land. `python -c "import usage, json; print(json.dumps(usage.summarise(usage.read_events()), indent=1))"`
+aggregates a batch, which is the only shape these are meant to be read in.
+
+`POST /admin/rainfall/forget` deletes a cached rainfall series for one area,
+given a geometry or a 32-character cache key. The cache is keyed by a hash of the
+submitted geometry, so it is a record about a specific place; this is how a
+removal request is honoured. The endpoint is unauthenticated because it deletes
+only recomputable derived data, and the API is loopback-bound.
+
 ## Nginx
 
 Install `deploy/nginx/geocontextualize-rate-limit.conf` under
