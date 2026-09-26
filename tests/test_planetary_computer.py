@@ -191,13 +191,28 @@ class RealLandcoverTests(unittest.TestCase):
 
 @unittest.skipUnless(AVAILABLE, "Planetary Computer is unreachable")
 class RealNdviTests(unittest.TestCase):
+    def ndvi_for(self, aoi, **kwargs):
+        """Compute NDVI, retrying once on a transient upstream timeout.
+
+        The test asserts a real result rather than tolerating "unavailable",
+        because four separate code defects surfaced as a polite "unavailable"
+        during development. But a slow CDN is not a code defect, so one timeout is
+        retried before failing, and any other failure mode still fails outright.
+        """
+        result = asyncio.run(
+            compute_median_ndvi(aoi["bbox"], aoi["feature"]["geometry"], **kwargs)
+        )
+        if result.get("status") == "unavailable" and "timed out" in result.get("warning", ""):
+            result = asyncio.run(
+                compute_median_ndvi(aoi["bbox"], aoi["feature"]["geometry"], **kwargs)
+            )
+        return result
+
     def test_returns_a_real_ndvi_result(self):
         # Not "unacceptable": a code bug in the read, reprojection or mask stages
         # used to surface as a polite "unavailable", which the suite accepted.
         aoi = _bypass_sync_cap(II_NGWESI)
-        result = asyncio.run(
-            compute_median_ndvi(aoi["bbox"], aoi["feature"]["geometry"], max_area_km2=1e9)
-        )
+        result = self.ndvi_for(aoi, max_area_km2=1e9)
         self.assertEqual(result.get("status"), "ok", result)
         for key in ("mean", "min", "max", "std", "p25", "p75"):
             self.assertTrue(math.isfinite(result[key]), f"{key} not finite: {result}")
@@ -214,9 +229,7 @@ class RealNdviTests(unittest.TestCase):
 
     def test_reports_provenance_coverage(self):
         aoi = _bypass_sync_cap(II_NGWESI)
-        result = asyncio.run(
-            compute_median_ndvi(aoi["bbox"], aoi["feature"]["geometry"], max_area_km2=1e9)
-        )
+        result = self.ndvi_for(aoi, max_area_km2=1e9)
         self.assertEqual(result.get("status"), "ok", result)
         self.assertGreater(result["valid_pixel_count"], 0)
         self.assertGreater(result["valid_pixel_fraction"], 0.0)
@@ -237,9 +250,7 @@ class RealNdviTests(unittest.TestCase):
                 [30.00, 25.00], [30.08, 25.00], [30.08, 25.08], [30.00, 25.08], [30.00, 25.00]]]},
         }
         aoi = _bypass_sync_cap(desert)
-        result = asyncio.run(
-            compute_median_ndvi(aoi["bbox"], aoi["feature"]["geometry"], max_area_km2=1e9)
-        )
+        result = self.ndvi_for(aoi, max_area_km2=1e9)
         self.assertEqual(result.get("status"), "ok", result)
         self.assertGreater(result["valid_pixel_fraction"], 0.5)
         # Desert must read as sparse vegetation, not lush growth.

@@ -8,10 +8,26 @@ services:
     environment:
       PORT: "8000"
       CORS_ORIGINS: ${CORS_ORIGINS:-https://209.38.197.161,http://localhost:3000}
+      # These defaults must track main.py. They were left at the pre-1.4.0 values
+      # while the code moved on, which silently pinned the container to a 10 km2
+      # NDVI cap and a single concurrency slot.
       MAX_SYNC_BBOX_KM2: ${MAX_SYNC_BBOX_KM2:-100}
-      MAX_NDVI_BBOX_KM2: ${MAX_NDVI_BBOX_KM2:-10}
-      MAX_CONCURRENT_ANALYSES: ${MAX_CONCURRENT_ANALYSES:-1}
+      MAX_NDVI_BBOX_KM2: ${MAX_NDVI_BBOX_KM2:-100}
+      MAX_LANDCOVER_BBOX_KM2: ${MAX_LANDCOVER_BBOX_KM2:-1000}
       MAX_PC_SCENES: ${MAX_PC_SCENES:-4}
+      MAX_SOURCE_TILES: ${MAX_SOURCE_TILES:-64}
+      MAX_CONCURRENT_ANALYSES: ${MAX_CONCURRENT_ANALYSES:-8}
+      MAX_CONCURRENT_NDVI: ${MAX_CONCURRENT_NDVI:-3}
+      ANALYSIS_ACQUIRE_SECONDS: ${ANALYSIS_ACQUIRE_SECONDS:-2}
+      NDVI_ACQUIRE_SECONDS: ${NDVI_ACQUIRE_SECONDS:-20}
+      ANALYSIS_DRAIN_SECONDS: ${ANALYSIS_DRAIN_SECONDS:-20}
+      # Rainfall portfolio. Writable, because the deploy-time --pull writes here.
+      RAINFALL_CACHE_DIR: ${RAINFALL_CACHE_DIR:-/app/.rainfall-cache}
+      RAINFALL_CACHE_S3_URI: ${RAINFALL_CACHE_S3_URI:-}
+      RAINFALL_S3_ENDPOINT: ${RAINFALL_S3_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
+      RAINFALL_S3_REGION: ${RAINFALL_S3_REGION:-nyc3}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s

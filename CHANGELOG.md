@@ -31,6 +31,57 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.7.0 — Deployment configuration aligned with the code; Spaces wired end to end
+
+### A real deployment bug, found while prefilling `.env`
+
+`docker-compose.yml` pins defaults in its `environment:` block, and that block
+**overrides** `env_file` and the compiled defaults. It had been left at the
+pre-1.4.0 values while the code moved on:
+
+```yaml
+MAX_NDVI_BBOX_KM2: ${MAX_NDVI_BBOX_KM2:-10}        # code default is 100
+MAX_CONCURRENT_ANALYSES: ${MAX_CONCURRENT_ANALYSES:-1}  # code default is 8
+```
+
+So the container would have run with a 10 km² NDVI cap and a single concurrency
+slot, and **the entire 1.4.0 concurrency work would have been dead in
+production** while `/version` reported the tuned values from the code. Nothing
+would have failed; it would simply have served 429s at the old rate.
+
+All twelve injected values are now declared and asserted equal to the code
+defaults, so the two cannot drift apart again. Also aligned: the payload cap
+against Nginx's 512k, and the cache directory against a writable non-root path.
+
+### Environment files
+
+- **`.env.example` rewritten.** It was documenting the pre-1.4.0 values and was
+  missing six variables. It now lists every knob, the shipped default, and what
+  it controls, with a note that `MAX_GEOJSON_BYTES` must not exceed Nginx's
+  `client_max_body_size`.
+- **`.env` prefilled** with the Spaces variables and the web settings, using
+  explicit `REPLACE_WITH_...` placeholders for the bucket and keys. The bucket
+  name and credentials are not guessable and were not invented.
+- **The dead `GEMINI_API_KEY` removed** from `.env`. It had no effect since 1.3.0
+  removed the narrative module.
+
+### Container entrypoint
+
+`docker-entrypoint.sh` pulls the portfolio before serving, then `exec`s the server.
+A missing or unreachable remote is **not fatal** — the service starts and rainfall
+reports "not computed" for areas it lacks. Two tests execute the script with a
+failing remote and assert the command after it still runs, rather than
+string-matching the source.
+
+### Test flake distinguished from a defect
+
+The real-data NDVI test failed once with a 75 s timeout — a slow CDN, not a code
+fault. But four separate defects surfaced during development as a polite
+"unavailable", so the test cannot simply tolerate it. It now retries **once**, and
+only for a timeout; any other failure mode still fails outright.
+
+---
+
 ## 1.6.0 — Rainfall portfolio published to an S3-compatible store
 
 The rainfall series is a **build artefact**, so it has to exist somewhere durable
