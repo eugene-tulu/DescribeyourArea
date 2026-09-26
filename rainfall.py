@@ -22,6 +22,7 @@ import datetime
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -199,25 +200,47 @@ def forget(key: str) -> dict:
     return {"local": local, "remote": remote, "remote_configured": remote_prefix() is not None}
 
 
-def fetch(key: str) -> Optional[dict]:
-    """Pull one series from the remote and cache it locally. Returns it, or None."""
+def fetch(key: str, attempts: int = 2) -> Optional[dict]:
+    """Pull one series from the remote and cache it locally. Returns it, or None.
+
+    A genuine miss and a transport failure must be told apart. Swallowing both
+    makes a momentary network blip look exactly like "this area has no series",
+    which is a wrong answer to a user rather than an absent one, so a read is
+    retried before it is believed.
+    """
     if remote_prefix() is None:
         return None
     client = _s3_client()
-    try:
-        response = client.get_object(Bucket=_bucket(), Key=_remote_key(series_object(key)))
-    except Exception:
-        # A miss must stay a miss: an unreachable remote is not an error the
-        # caller should see.
-        return None
-    try:
-        payload = json.loads(response["Body"].read())
-    except (ValueError, KeyError, OSError):
+    bucket, object_key = _bucket(), _remote_key(series_object(key))
+
+    payload = None
+    for attempt in range(max(1, attempts)):
+        try:
+            response = client.get_object(Bucket=bucket, Key=object_key)
+            payload = json.loads(response["Body"].read())
+            break
+        except Exception as exc:
+            if _is_missing(exc):
+                return None  # the object genuinely is not there
+            if attempt + 1 < attempts:
+                time.sleep(0.2 * (2 ** attempt))
+                continue
+            return None
+    if payload is None:
         return None
     if payload.get("processing_version") != RAINFALL_PROCESSING_VERSION:
         return None
     write_cache(key, payload)
     return payload
+
+
+def _is_missing(exc: Exception) -> bool:
+    """True when the store says the object does not exist, rather than failing."""
+    response = getattr(exc, "response", None) or {}
+    code = str((response.get("Error") or {}).get("Code") or "")
+    if code in {"NoSuchKey", "404", "NotFound", "NoSuchBucket"}:
+        return True
+    return type(exc).__name__ in {"NoSuchKey", "KeyError", "FileNotFoundError"}
 
 
 def geometry_hash(geojson_geom: dict) -> str:
@@ -658,6 +681,28 @@ def build_and_cache(
     if upload:
         publish(key)
     return payload
+
+
+def cached_context_by_key(key: str) -> dict:
+    """Result for a caller that already knows the key.
+
+    Keeps the same miss contract as :func:`cached_context`, without asking for a
+    polygon that can be a megabyte of coordinates.
+    """
+    payload = read_cache(key) or fetch(key)
+    if payload is None:
+        return {
+            "status": "not_computed",
+            "indicator": "monthly_precipitation",
+            "reason": "no_precomputed_series",
+            "message": (
+                "No precomputed precipitation series for that study area. Submit the "
+                "polygon to have one processed; it is computed offline because a "
+                "single ERA5 grid cell takes about 20 seconds to read."
+            ),
+            "cache_key": key,
+        }
+    return {"status": "ok", **payload}
 
 
 def cached_context(geojson_geom: dict) -> dict:

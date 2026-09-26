@@ -74,6 +74,22 @@ Spaces credentials come from the standard AWS environment variables
 the request, because boto3 puts the bucket in the hostname itself and the
 bucket-qualified form otherwise requests it twice and fails with `NoSuchKey`.
 
+### Serving the portfolio
+
+`POST /rainfall` returns a cached series and is **not** subject to the synchronous
+area or vertex caps, because it reads a cache rather than pixels. Give it a
+polygon or a `cache_key`; the key form needs no geometry at all.
+
+```bash
+curl -s -X POST localhost:8001/rainfall -H 'content-type: application/json' \
+     -d '{"cache_key":"675e97f48f735dccb2fd8707fe65bbc4"}'
+```
+
+A miss returns `not_computed` with the reason. The build path and the lookup path
+share one canonicaliser, so a published series is always derivable; a
+self-intersecting boundary is repaired on both sides and reported as
+`geometry_repaired`.
+
 `POST /admin/rainfall/forget` clears **both** stores: the local file and the
 published object. It reports `local` and `remote` separately so a partial failure
 is visible rather than assumed.

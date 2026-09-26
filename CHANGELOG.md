@@ -31,6 +31,69 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.10.0 — The portfolio is live, and reachable
+
+Built and published all 21 Northern Rangelands Trust conservancies to Spaces
+(21 objects, 603 KiB) and served **21/21 from a cold local cache in 22 s** with no
+local build. Getting there exposed four defects, three of them structural.
+
+### Rainfall was gated behind the raster admission policy
+
+Putting rainfall in `/generate-context` was my mistake. The admission policy there
+is about bounding *raster* work, but reading a cached series costs about a
+millisecond and 1 KB. Applied to rainfall it rejected the portfolio it had just
+been built for: **8 of 21 on payload size** (the largest is 1,358 KB against a
+500 KB cap) and the rest on vertex count, before a cached value was consulted.
+
+`POST /rainfall` is now separate, with its own measured limits —
+`MAX_LOOKUP_BYTES` 4,000,000 and `MAX_LOOKUP_VERTICES` 250,000 — and no area cap
+at all. It also accepts a bare `cache_key`, so a caller with the key never
+resends a polygon: a lookup for Melako answers in **7 ms with a 2-byte request**,
+against 800 KB for the polygon.
+
+The separation is tested in both directions: a 12,000 km² area is refused by
+`/generate-context` and served by `/rainfall`.
+
+### Two published conservancies could never be looked up
+
+The build path hashed the **raw** geometry while the read path canonicalised it.
+Two of the 21 — Kalama and Leparua — carry ring self-intersections in the
+published source file, so the build published series under a key the lookup could
+never derive. Two entries in the portfolio were permanently unreachable.
+
+Both now go through one shared canonicaliser, and a self-intersecting ring is
+**repaired rather than refused**: a defect in someone else's file is not a reason
+to lose a conservancy. The repair is reported as `geometry_repaired` in the
+canonical properties rather than applied silently, and it is refused when the
+area would change by more than half.
+
+A bow tie has no meaningful signed area, so the area-similarity guard is skipped
+for exactly the case it was written for. That is now deliberate and commented: the
+repair is the only way such a geometry becomes usable, and a genuine problem
+fails the `is_valid` check on the result instead.
+
+This also left **3 orphaned objects** in the bucket from the earlier build, which
+were unreachable by construction. Removed; the bucket now matches the expected set
+exactly at 21.
+
+### A network blip looked like "this area has no data"
+
+`fetch` swallowed every exception, so a transient Spaces failure was
+indistinguishable from a genuine miss — a wrong answer to a user rather than an
+absent one. It now tells them apart and retries only the former: a `NoSuchKey` is
+believed immediately, a connection reset is retried once. Verified against both a
+flaky and a missing-object stub.
+
+### Tests: 223 -> 242
+
+19 new, covering the admission split, the repair (including that both paths hash
+identically, which is the invariant that was broken), the lookup endpoint and its
+guards, and the fetch reliability split. Plus 5 fix passes on my own test bugs —
+including a bow-tie area assertion that divided by zero because a
+self-intersecting ring has no signed area.
+
+---
+
 ## 1.9.1 — Spaces round trip verified against the live bucket
 
 With credentials configured, the first end-to-end run against the real DigitalOcean

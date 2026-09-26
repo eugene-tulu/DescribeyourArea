@@ -112,6 +112,16 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 # round number.
 MAX_GEOJSON_BYTES = _env_int("MAX_GEOJSON_BYTES", 500_000)
 MAX_AOI_VERTICES = _env_int("MAX_AOI_VERTICES", 10_000)
+# Rainfall is a cache lookup, not a raster job. A study area is bounded by
+# polygon detail rather than by analysis cost, so the raster admission policy must
+# not apply to it: the 21 NRT conservancies are rejected by the 10,000-vertex
+# limit even though reading a cached series costs about a millisecond and 1 KB.
+MAX_LOOKUP_VERTICES = _env_int("MAX_LOOKUP_VERTICES", 250_000)
+# Measured on the 21 NRT conservancies: 16 KB to 1,358 KB and 720 to 61,035
+# vertices, with 8 of 21 over the 500 KB raster cap. A lookup is parsed and hashed,
+# never windowed, so it can afford a larger body; 4 MB sits well above the worst
+# real case while still bounding parse cost.
+MAX_LOOKUP_BYTES = _env_int("MAX_LOOKUP_BYTES", 4_000_000)
 MAX_SYNC_BBOX_KM2 = _env_float("MAX_SYNC_BBOX_KM2", 100.0)
 # NDVI is limited by its 75 s budget, not by memory, so it is raised to match the
 # synchronous cap: 100 km2 measures 453 MB and 32 s, 400 km2 times out.
@@ -232,7 +242,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.10.0"
 
 
 @app.middleware("http")
@@ -262,6 +272,12 @@ async def limit_analysis_concurrency(request: Request, call_next):
 # --------------------------------------------------
 class GeoJSONRequest(BaseModel):
     geojson: dict
+
+class RainfallLookupRequest(BaseModel):
+    """Identify a study area, by geometry or by the key it hashes to."""
+    geojson: Optional[Dict[str, Any]] = None
+    cache_key: Optional[str] = None
+
 
 class ContextResponse(BaseModel):
     summary: Dict[str, Any]
@@ -301,8 +317,13 @@ def _position_count(coordinates: Any) -> int:
     return sum(_position_count(value) for value in coordinates)
 
 
-def _polygon_geometry(value: Any):
-    """Return a validated Shapely Polygon/MultiPolygon or raise a client error."""
+def _polygon_geometry(value: Any) -> tuple:
+    """Return ``(geometry, repair_reason)``, or raise a client error.
+
+    ``repair_reason`` is None when the geometry was already valid. It is returned
+    rather than recorded globally so the caller can report it against this request
+    only, with no shared state to leak between them.
+    """
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail="Each GeoJSON feature must be an object")
 
@@ -320,9 +341,66 @@ def _polygon_geometry(value: Any):
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid GeoJSON geometry") from exc
 
-    if geom.is_empty or not geom.is_valid:
+    if geom.is_empty:
         raise HTTPException(status_code=400, detail="Study-area geometry is empty or invalid")
-    return geom
+    reason = None
+    if not geom.is_valid:
+        # A ring self-intersection is a defect in someone else's file, not a reason
+        # to refuse a whole conservancy. The repair is reported rather than silent.
+        repaired, reason = repair_geometry(geometry)
+        if reason is None:
+            raise HTTPException(status_code=400, detail="Study-area geometry is empty or invalid")
+        try:
+            geom = shape(repaired)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Study-area geometry is empty or invalid") from exc
+        if geom.is_empty or not geom.is_valid:
+            raise HTTPException(status_code=400, detail="Study-area geometry is empty or invalid")
+    return geom, reason
+
+
+def repair_geometry(geometry: dict) -> tuple[dict, Optional[str]]:
+    """Repair a self-intersecting polygon, reporting whether it was needed.
+
+    Real-world conservation boundaries carry ring self-intersections often enough
+    to matter: two of the 21 published NRT conservancies have them, and refusing
+    those outright loses a whole area because of a defect in someone else's file.
+    The repair is reported rather than silent, and lives in one place so the
+    precompute path and the lookup path produce the same hash.
+    """
+    from shapely.validation import make_valid
+
+    try:
+        candidate = shape(geometry)
+    except Exception:
+        return geometry, None
+    if candidate.is_valid and not candidate.is_empty:
+        return geometry, None
+    try:
+        fixed = make_valid(candidate)
+    except Exception:
+        return geometry, None
+    fixed = fixed if fixed.geom_type in {"Polygon", "MultiPolygon"} else (
+        largest_polygon(fixed) if fixed.geom_type == "GeometryCollection" else None
+    )
+    if fixed is None or fixed.is_empty or fixed.area <= 0:
+        return geometry, None
+    # A self-intersecting ring has no meaningful signed area, so the comparison
+    # below is skipped for exactly the bow-tie case it was written for. That is
+    # deliberate: the repair is the only way such a geometry becomes usable, and a
+    # genuine geometry problem will fail the is_valid check on the result instead.
+    original_area = candidate.area
+    if original_area > 0 and not 0.5 <= fixed.area / original_area <= 1.5:
+        return geometry, None  # too different to be a self-intersection artefact
+    reason = "self-intersecting rings repaired"
+    return mapping(fixed), reason
+
+
+def largest_polygon(collection):
+    polygons = [g for g in collection.geoms if g.geom_type in {"Polygon", "MultiPolygon"}]
+    if not polygons:
+        return None
+    return max(polygons, key=lambda g: g.area)
 
 
 def canonicalize_geojson(
@@ -355,10 +433,10 @@ def canonicalize_geojson(
         features = geojson.get("features")
         if not isinstance(features, list) or not features:
             raise HTTPException(status_code=400, detail="FeatureCollection must contain polygons")
-        geometries = [_polygon_geometry(feature) for feature in features]
+        extracted = [_polygon_geometry(feature) for feature in features]
         properties: dict[str, Any] = {}
     elif input_type in {"Feature", "Polygon", "MultiPolygon"}:
-        geometries = [_polygon_geometry(geojson)]
+        extracted = [_polygon_geometry(geojson)]
         properties = geojson.get("properties", {}) if input_type == "Feature" else {}
         if not isinstance(properties, dict):
             properties = {}
@@ -367,6 +445,9 @@ def canonicalize_geojson(
             status_code=400,
             detail="GeoJSON must be a Feature, FeatureCollection, Polygon, or MultiPolygon",
         )
+
+    geometries = [geom for geom, _reason in extracted]
+    repairs = sorted({reason for _geom, reason in extracted if reason})
 
     vertex_count = sum(_position_count(mapping(geom).get("coordinates")) for geom in geometries)
     if vertex_count > max_vertices:
@@ -379,6 +460,10 @@ def canonicalize_geojson(
     if merged.is_empty or merged.geom_type not in {"Polygon", "MultiPolygon"} or not merged.is_valid:
         raise HTTPException(status_code=400, detail="Study-area polygons cannot be combined safely")
 
+    if repairs:
+        # Reported rather than silent: a caller should know the boundary was fixed.
+        properties = {**properties, "geometry_repaired": "; ".join(repairs)}
+
     return {
         "type": "Feature",
         "properties": properties,
@@ -388,7 +473,7 @@ def canonicalize_geojson(
 
 def aoi_bbox(feature: dict) -> list[float]:
     """Derive bounds from canonical geometry; handles Polygon and MultiPolygon."""
-    geom = _polygon_geometry(feature)
+    geom, _reason = _polygon_geometry(feature)
     minx, miny, maxx, maxy = geom.bounds
     if minx < -180 or maxx > 180 or miny < -90 or maxy > 90 or minx >= maxx or miny >= maxy:
         raise HTTPException(status_code=400, detail="Study-area coordinates must be valid WGS84 longitude/latitude")
@@ -400,6 +485,24 @@ def _bbox_area_km2(bbox: list[float]) -> float:
     minx, miny, maxx, maxy = bbox
     area_m2, _ = WGS84_GEOD.geometry_area_perimeter(box(minx, miny, maxx, maxy))
     return abs(area_m2) / 1_000_000
+
+
+def validate_for_lookup(geojson: dict) -> dict:
+    """Admission for a cached lookup rather than a raster analysis.
+
+    Keeps the payload and geometry checks, drops the area cap entirely, and
+    allows a far higher vertex count, because nothing here reads pixels. Without
+    this the precomputed portfolio is unreachable for the areas it was built for:
+    the largest conservancy has a 5,510 km2 bounding box and tens of thousands of
+    vertices.
+    """
+    feature = canonicalize_geojson(
+        geojson,
+        max_bytes=MAX_LOOKUP_BYTES,
+        max_vertices=MAX_LOOKUP_VERTICES,
+    )
+    bbox = aoi_bbox(feature)
+    return {"feature": feature, "bbox": bbox, "bbox_area_km2": _bbox_area_km2(bbox)}
 
 
 def validate_aoi(
@@ -1498,6 +1601,43 @@ class ForgetRequest(BaseModel):
     """Identify a study area to remove, by geometry or by cache key."""
     geojson: Optional[Dict[str, Any]] = None
     cache_key: Optional[str] = None
+
+
+@app.post("/rainfall")
+async def rainfall_lookup(request: RainfallLookupRequest):
+    """Return the precomputed rainfall series for a study area.
+
+    Separate from ``/generate-context`` on purpose. There the admission policy is
+    about bounding raster work, but rainfall is a cache lookup: reading a series
+    costs a millisecond and about 1 KB. Applying the raster caps here made the
+    published portfolio unreachable for the very areas it was built for.
+    """
+    import rainfall
+
+    if request.cache_key:
+        # A caller that already knows the key never resends a polygon, which for a
+        # detailed conservancy is a megabyte of coordinates.
+        key = request.cache_key.strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", key):
+            raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
+        result = rainfall.cached_context_by_key(key)
+        bbox_area = None
+    else:
+        if not request.geojson:
+            raise HTTPException(status_code=422, detail="supply geojson or cache_key")
+        area = validate_for_lookup(request.geojson)
+        key = rainfall.geometry_hash(area["feature"]["geometry"])
+        result = rainfall.cached_context(area["feature"]["geometry"])
+        bbox_area = round(area["bbox_area_km2"], 2)
+    return {
+        "rainfall": result,
+        "cache_key": key,
+        "analysis": {
+            "bbox_area_km2": bbox_area,
+            "mode": "cache lookup",
+            "remote_configured": rainfall.remote_prefix() is not None,
+        },
+    }
 
 
 @app.post("/admin/rainfall/forget")
