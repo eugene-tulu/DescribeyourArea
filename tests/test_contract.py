@@ -135,3 +135,47 @@ class CaveatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WindowParameterTests(unittest.TestCase):
+    """A malformed window is a client error, not a missing result.
+
+    Left to the vegetation module it degraded to "unavailable", which tells an API
+    caller the area has no data when the truth is that the request was wrong.
+    """
+
+    def setUp(self):
+        self.client = TestClient(main.app)
+
+    def _post(self, **params):
+        query = "&".join(f"{k}={v}" for k, v in params.items())
+        return self.client.post(f"/generate-context?datasets=ndvi&{query}", json={"geojson": SMALL})
+
+    def test_a_user_defined_range_is_honoured(self):
+        response = self._post(window_start="1997-01-01", window_end="1999-12-31")
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        result = response.json()["summary"]["ndvi"]
+        self.assertEqual(result["window"], {"start": "1997-01-01", "end": "1999-12-31"})
+        # The 1997/98 El Nino is the question the range exists to answer.
+        if result.get("status") == "ok":
+            self.assertGreater(result["mean"], 0.0)
+
+    def test_an_inverted_range_is_rejected(self):
+        response = self._post(window_start="2026-06-01", window_end="2020-01-01")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("after the end", str(response.json()["detail"]))
+
+    def test_a_malformed_date_is_rejected(self):
+        response = self._post(window_start="06/01/2024", window_end="2024-06-01")
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("ISO", str(response.json()["detail"]))
+
+    def test_a_window_before_the_archive_reports_why_rather_than_emptily(self):
+        response = self._post(
+            window_start="1900-01-01", window_end="2026-01-01", sensor="landsat"
+        )
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        result = response.json()["summary"]["ndvi"]
+        self.assertEqual(result["status"], "skipped")
+        self.assertIn("begins on", result["warning"])
+        self.assertNotIn("mean", result)

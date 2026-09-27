@@ -31,6 +31,64 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.16.0 — A keyless basemap, and user-defined date ranges
+
+### The watermark was Esri gating unkeyed access
+
+The basemap was Esri World Imagery, which now requires a key; without one the
+imagery carries a burned-in notice. Checked every candidate rather than assuming,
+because the obvious answers are not what they used to be:
+
+| provider | key | type | client | commercial | verdict |
+| --- | --- | --- | --- | --- | --- |
+| **CARTO Positron** | **now required** | raster + vector | either | paid over 1M/mo | **out** — same trap |
+| **OpenTopoMap** | no | raster | Leaflet drop-in | free | adopted now |
+| **OpenFreeMap** | no | vector | MapLibre | **yes, explicitly** | recommended next |
+
+CARTO is the one people reach for when they want a light grey basemap, and as of
+2026 it requires a free API key even for non-commercial use. So it would have
+replaced one watermark with another.
+
+**Shipped: OpenTopoMap.** No key, no account, no registration, raster, so it drops
+into the existing Leaflet setup with no library change. Attribution is set to
+OpenStreetMap + SRTM + OpenTopoMap CC-BY-SA. maxZoom is 17 rather than 19,
+because the deeper zooms were Esri's.
+
+This is also better on the merits. Satellite imagery behind semitransparent land
+cover and index overlays is hard to read; a neutral base is the convention in
+serious cartography, and it is the light grey the whole design has been reaching
+for.
+
+**Recommended next: OpenFreeMap + MapLibre.** It is the only keyless option whose
+*look* matches — its Positron style is the same light grey, and it has no request
+limits, no cookies, an MIT licence, commercial use explicitly allowed, and the
+whole production setup is open source so it can be self-hosted. It is vector-only,
+so it needs `maplibre-gl` and `@mapbox/mapbox-gl-draw` in place of react-leaflet
+and leaflet-draw. That is a real migration of the core interaction, and it has
+**not** been done here because drawing cannot be click-tested in this environment
+and a blind swap of the one interaction the product depends on is not a risk worth
+taking. It should be done with someone able to draw a polygon afterwards.
+
+### User-defined date ranges
+
+The backend has accepted an explicit `window_start`/`window_end` since 1.14.0 —
+only the control was missing. There are now two date inputs beside the 1/3/10/30
+presets, a stated effective window so it is never ambiguous which is in force, and
+an invalid range blocks the request rather than producing a 422.
+
+Wiring it up exposed a real gap: **an inverted or malformed window was absorbed by
+the vegetation module and returned `unavailable`**, which tells an API caller the
+area has no data when the truth is that the request was wrong. Both are now `422`
+with a specific message. A window that predates the sensor's archive is still
+`skipped`, but it now says so and names the archive start.
+
+Verified against live Planetary Computer: 1997-01 to 1999-12 returns NDVI
+0.2396, which is the 1997/98 signal the range exists to ask for.
+
+Tests 324 -> 328.
+
+---
+
 ## 1.15.1 — The light theme was unreadable; contrast is now tested
 
 Reported as "I am struggling to see the copy". Measured, the cause was a hard

@@ -650,6 +650,9 @@ export default function Home() {
   // How far back to ask for. The API already accepts an explicit range; this is
   // the affordance that makes it reachable.
   const [windowYears, setWindowYears] = useState<1 | 3 | 10 | 30>(10);
+  // A user-defined range. Empty means "use the preset above".
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
   const [selectedSensor, setSelectedSensor] = useState('auto');
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
@@ -820,16 +823,24 @@ export default function Home() {
 
   // Send request to backend
   function windowEndISO(): string {
+    if (customStart && customEnd && customStart <= customEnd) return customEnd;
     const today = new Date();
     return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`;
   }
 
   function windowStartISO(): string {
+    // A user-defined range wins over the presets. The backend has accepted an
+    // explicit range since 1.14.0; only the control was missing.
+    if (customStart && customEnd && customStart <= customEnd) return customStart;
     const end = new Date(windowEndISO() + 'T00:00:00');
     const start = new Date(end);
     start.setFullYear(start.getFullYear() - windowYears);
     return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01`;
   }
+
+  // A range the backend would reject, caught before the request rather than as a 422.
+  const customRangeValid =
+    !customStart || !customEnd || (customStart <= customEnd && customStart <= windowEndISO());
 
   // Poll a queued area and describe what the worker is actually doing. The job
   // record already holds the timestamps, the indicator and the reason; all that
@@ -1158,6 +1169,25 @@ export default function Home() {
                             {years}y
                           </button>
                         ))}
+                        <div className="fig flex items-center gap-1 text-xs text-ink-3">
+                          <input
+                            type="date"
+                            value={customStart}
+                            max={customEnd || windowEndISO()}
+                            onChange={(e) => setCustomStart(e.target.value)}
+                            aria-label="Window start"
+                            className="border border-rule bg-white px-1 py-0.5 text-ink"
+                          />
+                          <span>to</span>
+                          <input
+                            type="date"
+                            value={customEnd}
+                            min={customStart || undefined}
+                            onChange={(e) => setCustomEnd(e.target.value)}
+                            aria-label="Window end"
+                            className="border border-rule bg-white px-1 py-0.5 text-ink"
+                          />
+                        </div>
                         <Label className="ml-2 text-sm font-medium text-ink-2">Source</Label>
                         <select
                           value={selectedSensor}
@@ -1171,6 +1201,15 @@ export default function Home() {
                           <option value="modis">MODIS</option>
                         </select>
                       </div>
+                      <p className="fig text-xs text-ink-2">
+                        {windowStartISO()} → {windowEndISO()}
+                        {customStart && customEnd ? ' (set)' : ` (${windowYears}y preset)`}
+                      </p>
+                      {!customRangeValid && (
+                        <p className="text-xs text-caution">
+                          The start date is after the end date, or in the future.
+                        </p>
+                      )}
                       <p className="text-xs text-ink-3">
                         auto picks the source whose cloud mask can be trusted, and says why.
                       </p>
@@ -1209,7 +1248,12 @@ export default function Home() {
             {/* Analyze Button */}
             <Button
               onClick={handleAnalyze}
-              disabled={(!boundingBox && !uploadedGeojson && !drawnFeatures?.features.length) || selectedDatasets.length === 0 || isLoading}
+              disabled={
+                (!boundingBox && !uploadedGeojson && !drawnFeatures?.features.length)
+                || selectedDatasets.length === 0
+                || isLoading
+                || !customRangeValid
+              }
               className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-ink py-6 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? (

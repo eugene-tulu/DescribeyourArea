@@ -218,9 +218,12 @@ export default function MapComponent({
       >
         {/* Basemap satellite */}
         <TileLayer
-          attribution="&copy; Esri & contributors"
-          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-          maxZoom={19}
+          attribution={
+            'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
+            'SRTM | &copy; <a href="https://opentopomap.org/about">OpenTopoMap</a> (CC-BY-SA)'
+          }
+          url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
+          maxZoom={17}
         />
 
         {/* Labels layer */}

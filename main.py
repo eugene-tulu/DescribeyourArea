@@ -280,7 +280,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.15.1"
+APP_VERSION = "1.16.0"
 
 
 @app.middleware("http")
@@ -1505,6 +1505,16 @@ async def generate_context(
     window_start: Optional[str] = None,
     window_end: Optional[str] = None,
 ):
+    # A malformed or inverted window is a client error, not a missing result.
+    # Left to the vegetation module it degrades to "unavailable", which tells an
+    # API caller the area has no data when the truth is the request was wrong.
+    try:
+        requested_window_start, requested_window_end = _resolve_window(
+            window_start, window_end, window_days
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     request_timer = usage.Timer()
     request_timer.__enter__()
     module_ms: dict[str, int] = {}
