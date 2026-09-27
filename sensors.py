@@ -19,6 +19,7 @@ both the cheapest and the most defensible source at country scale.
 from __future__ import annotations
 
 import datetime
+import math
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -227,3 +228,56 @@ def plausible(values: np.ndarray) -> np.ndarray:
     """Drop values no land surface produces, which is how residual cloud shows up."""
     keep = np.isfinite(values) & (values >= NDVI_MIN_PLAUSIBLE) & (values <= 1.0)
     return keep
+
+
+# --------------------------------------------------------------------------
+# Resolution policy
+# --------------------------------------------------------------------------
+# The area caps in main.py are a guard on the *request* budget, not a claim about
+# what the data can do. What actually costs is pixels, and pixels are set by
+# resolution. Measured on 2026-09-26:
+#
+#   worldcover 10 m, 5,500 km2   216M px  176 s   1,205 MB
+#   worldcover 60 m, 5,500 km2   6.0M px  6.0 s
+#   worldcover 100 m, 5,500 km2  2.2M px  1.3 s
+#
+# and a 2,462 km2 landscape already returns a vegetation index in 10.7 s from
+# MODIS and 56.9 s from Landsat, both of which work today behind the cap.
+#
+# So the policy targets a pixel budget rather than an area budget, and a large
+# study area is answered at a coarser resolution rather than refused. The
+# resolution is reported with every result, because a 100 m land-cover
+# composition is a different kind of claim from a 10 m one.
+RESOLUTION_STEPS = (
+    # (max bounding-box km2, metres, why)
+    (100.0, 20, "native for the composite; a small area can afford the finest grid"),
+    (1_000.0, 60, "100 km2 at 60 m is about 0.4M pixels, comfortably inside a request"),
+    (10_000.0, 100, "10,000 km2 at 100 m is about 1M pixels; finer buys nothing a reader can see"),
+)
+COARSEST_RESOLUTION_M = 250
+PIXEL_BUDGET = 3_000_000
+
+
+def resolution_for_area(bbox_area_km2: float, *, native_m: int = 10) -> tuple[int, str]:
+    """Metres per pixel for a study area of this size, and why.
+
+    Returns the resolution to *request*, not the native one, so a caller can see
+    what was actually analysed.
+    """
+    for limit, metres, reason in RESOLUTION_STEPS:
+        if bbox_area_km2 <= limit:
+            # Never ask for finer than the source publishes: a 250 m MODIS product
+            # read at 20 m would be upsampling, which invents detail.
+            chosen = max(metres, native_m)
+            if chosen != metres:
+                return chosen, (
+                    f"the source's own resolution is {native_m} m, so no finer grid "
+                    "is requested"
+                )
+            return metres, reason
+    side_km = math.sqrt(bbox_area_km2)
+    return COARSEST_RESOLUTION_M, (
+        f"{bbox_area_km2:,.0f} km2 is beyond the synchronous budget, so it is read at "
+        f"{COARSEST_RESOLUTION_M} m, about {side_km / (COARSEST_RESOLUTION_M / 1000):,.0f} "
+        "pixels across"
+    )

@@ -13,6 +13,24 @@ import unittest
 import jobs
 import rainfall
 
+
+def _no_read():
+    """A read source that never touches the network.
+
+    ``source`` is the seam for the ERA5 read, so it must be callable: the
+    rainfall path hands it straight to ``compute_series``, which calls it.
+    """
+    import numpy as np
+
+    def read(grid, start, end):
+        return (["2000-01"], np.zeros((1, 1, 1), dtype="float32"), {
+            "expected_hours": 0, "valid_hours": 0,
+            "months_kept": 1, "months_dropped": [], "min_coverage": 1.0,
+        })
+
+    return read
+
+
 GEOM = {"type": "Polygon",
         "coordinates": [[[35.10, -1.55], [35.17, -1.55], [35.17, -1.48],
                          [35.10, -1.48], [35.10, -1.55]]]}
@@ -61,6 +79,12 @@ class JobQueueTests(unittest.TestCase):
         os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
         self.addCleanup(self._restore)
         self.addCleanup(self.tmp.cleanup)
+
+    def _run(self, **kwargs):
+        """Drive the now-async runner, with the ERA5 read stubbed out."""
+        import asyncio
+
+        return asyncio.run(jobs.run_pending(limit=5, source=_no_read(), **kwargs))
 
     def _restore(self):
         if self.previous is None:
@@ -124,8 +148,10 @@ class JobQueueTests(unittest.TestCase):
     def test_a_runner_completes_a_queued_area_and_drops_the_polygon(self):
         jobs.submit(GEOM, label="test")
         with _FakeCompute() as runner:
-            outcome = jobs.run_pending(limit=5, source=object())
-        self.assertEqual(outcome, {"processed": 1, "ready": 1, "failed": 0, "skipped": 0})
+            outcome = self._run()
+        self.assertEqual(outcome["ready"], 1)
+        self.assertEqual(outcome["failed"], 0)
+        self.assertEqual(outcome["processed"], 1)
         self.assertEqual(len(runner.calls), 1)
         key = rainfall.geometry_hash(GEOM)
         self.assertEqual(jobs.status_for(key)["state"], jobs.READY)
@@ -138,7 +164,7 @@ class JobQueueTests(unittest.TestCase):
             36.10, -1.55], [36.11, -1.55], [36.11, -1.54], [36.10, -1.54], [36.10, -1.55]]]}
         jobs.submit(bad)
         with _FakeCompute(fail_keys={rainfall.geometry_hash(bad)}):
-            outcome = jobs.run_pending(limit=5, source=object())
+            outcome = self._run()
         self.assertEqual(outcome["ready"], 1)
         self.assertEqual(outcome["failed"], 1)
         failed = jobs.read_job(rainfall.geometry_hash(bad))
@@ -147,14 +173,14 @@ class JobQueueTests(unittest.TestCase):
 
     def test_the_runner_is_idempotent(self):
         jobs.submit(GEOM)
-        jobs.run_pending(limit=5, source=object())
-        again = jobs.run_pending(limit=5, source=object())
+        self._run()
+        again = self._run()
         self.assertEqual(again["processed"], 0, "completed work must not be redone")
 
     def test_the_runner_passes_the_requested_window_through(self):
         jobs.submit(GEOM, start="1997-01-01")
         with _FakeCompute() as runner:
-            jobs.run_pending(limit=5, source=object())
+            self._run()
         _key, kwargs = runner.calls[0]
         self.assertEqual(kwargs["start"], "1997-01-01")
 
@@ -175,8 +201,8 @@ class JobQueueTests(unittest.TestCase):
 
     def test_a_job_record_without_a_geometry_fails_clearly(self):
         key = rainfall.geometry_hash(GEOM)
-        jobs.write_job({"cache_key": key, "state": jobs.PENDING})
-        outcome = jobs.run_pending(limit=5, source=object())
+        jobs.write_job({"cache_key": key, "state": jobs.PENDING, "indicator": "rainfall"})
+        outcome = self._run()
         self.assertEqual(outcome["failed"], 1)
         self.assertIn("no geometry", jobs.read_job(key)["reason"])
 
@@ -213,6 +239,12 @@ class PublishResilienceTests(unittest.TestCase):
         for key in ("RAINFALL_CACHE_DIR", rainfall.REMOTE_URI_ENV):
             if os.environ.get(key) is None:
                 os.environ.pop(key, None)
+
+    def _run(self, **kwargs):
+        """Drive the async runner with the read and the store stubbed out."""
+        import asyncio
+
+        return asyncio.run(jobs.run_pending(limit=5, source=_no_read(), **kwargs))
 
     def test_publish_reports_failure_instead_of_raising(self):
         import unittest.mock
@@ -261,7 +293,7 @@ class PublishResilienceTests(unittest.TestCase):
         self.addCleanup(compute.stop); self.addCleanup(client.stop)
 
         jobs.submit(geom)
-        outcome = jobs.run_pending(limit=5, source=object(), publish=True)
+        outcome = self._run(publish=True)
         self.assertEqual(outcome["ready"], 1, "a store outage must not fail a completed job")
         self.assertEqual(outcome["failed"], 0)
         key = rainfall.geometry_hash(geom)

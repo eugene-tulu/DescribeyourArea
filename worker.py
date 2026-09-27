@@ -17,6 +17,7 @@ job; only an environment-level failure escapes and trips the restart.
 
 from __future__ import annotations
 
+import asyncio
 import fcntl
 import json
 import os
@@ -64,7 +65,7 @@ def worker_lock(blocking: bool = False):
             handle.close()
 
 
-def sweep(
+async def sweep(
     *,
     limit: int = 5,
     publish: bool = True,
@@ -76,7 +77,7 @@ def sweep(
     Alerts are evaluated after the queue drains so a freshly computed series is
     checked immediately rather than waiting for the next sweep.
     """
-    outcome = jobs.run_pending(limit=limit, publish=publish, progress=progress)
+    outcome = await jobs.run_pending(limit=limit, publish=publish, progress=progress)
     outcome["alerts"] = 0
     if on_alert is not None:
         sent = on_alert(ready_keys_since())
@@ -126,7 +127,10 @@ def run_forever(
 
         while True:
             try:
-                outcome = sweep(limit=limit, publish=publish, on_alert=on_alert, progress=progress)
+                # sweep is async because computing a raster indicator is; run_forever
+                # stays sync so its lock and sleep remain ordinary blocking calls.
+                outcome = asyncio.run(sweep(limit=limit, publish=publish,
+                                            on_alert=on_alert, progress=progress))
                 idle_failures = 0
                 for key in ("processed", "ready", "failed", "alerts", "skipped"):
                     totals[key] += outcome.get(key, 0)
@@ -144,6 +148,7 @@ def run_forever(
 
 if __name__ == "__main__":  # pragma: no cover - exercised by the container
     import argparse
+    import asyncio
     import sys
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -152,17 +157,30 @@ if __name__ == "__main__":  # pragma: no cover - exercised by the container
     parser.add_argument("--limit", type=int, default=5, help="areas per sweep")
     parser.add_argument("--no-publish", action="store_true",
                         help="do not upload results to the object store")
+    parser.add_argument("--once", action="store_true",
+                        help="run a single sweep and exit, rather than polling")
     args = parser.parse_args()
 
     import alerts
+
+    def on_alert(keys):
+        return alerts.evaluate_and_notify(keys)
+
+    def report(message):
+        print(message, flush=True)
+
+    if args.once:
+        print(f"done: {asyncio.run(sweep(limit=args.limit, publish=not args.no_publish, on_alert=on_alert, progress=report))}",
+              flush=True)
+        sys.exit(0)
 
     try:
         run_forever(
             interval=args.interval,
             limit=args.limit,
             publish=not args.no_publish,
-            on_alert=lambda keys: alerts.evaluate_and_notify(keys),
-            progress=lambda message: print(message, flush=True),
+            on_alert=on_alert,
+            progress=report,
         )
     except KeyboardInterrupt:
         sys.exit(0)

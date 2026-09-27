@@ -37,6 +37,16 @@ LANDCOVER_CAP_KM2 = 1000.0
 
 EVENT_VERSION = 1
 
+# Analytics are opt-out rather than opt-in. The people using this are community
+# organisations and their staff, not a marketing funnel, and recording the shape of
+# the land someone asked about is a different kind of ask than reading a web page.
+# The event carries no geometry, but the choice of which polygon to send is theirs.
+#
+# Set ANALYTICS_DISABLED=1 to stop recording entirely, or have a caller send
+# Analytics-Do-Not-Track: true, which takes effect for that request only.
+ENV_DISABLED = "ANALYTICS_DISABLED"
+HEADER_DNT = "analytics-do-not-track"
+
 
 def area_band(area_km2: Optional[float]) -> str:
     """Bucket a study-area size. The raw number is never carried onward."""
@@ -86,6 +96,19 @@ def band_outcome(result: Any) -> str:
         if status:
             return str(status)
     return "ok"
+
+
+def analytics_enabled(request=None) -> bool:
+    """Whether this request may be recorded, honouring the per-request opt-out."""
+    if os.getenv(ENV_DISABLED, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return False
+    if request is not None:
+        try:
+            if str(request.headers.get(HEADER_DNT, "")).strip().lower() in {"1", "true", "yes"}:
+                return False
+        except Exception:  # noqa: BLE001
+            return True
+    return True
 
 
 def build_event(

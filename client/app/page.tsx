@@ -73,7 +73,27 @@ const LANDCOVER_LABELS: Record<string, string> = {
   "100": "Moss & lichen",
 };
 
+// These mirror the declared contract in contract.py. Generate them from
+// /openapi.json rather than keeping a hand-written copy: a duplicated literal
+// that drifted once already and shipped a stale limit to production.
+type EvidenceStatus = 'observed' | 'derived' | 'modelled' | 'unconfirmed';
+type ModuleStatus =
+  | 'ok' | 'not_requested' | 'not_computed' | 'area_exceeded'
+  | 'no_valid_pixels' | 'unavailable' | 'skipped' | 'error' | 'busy';
+
+interface ModuleEvidence {
+  status: EvidenceStatus;
+  source?: string | null;
+  method?: string | null;
+  note?: string | null;
+  doi?: string | null;
+  license?: string | null;
+  retrieved?: string | null;
+}
+
 interface DemStats {
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
   mean?: number;
   min?: number;
   max?: number;
@@ -97,6 +117,8 @@ interface SensorProvenance {
 }
 
 interface NdviStats {
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
   mean?: number;
   min?: number;
   max?: number;
@@ -106,7 +128,6 @@ interface NdviStats {
   scene_count?: number;
   resolution_m?: number;
   method?: string;
-  status?: string;
   warning?: string;
   source?: string;
   valid_pixel_count?: number;
@@ -120,6 +141,8 @@ interface NdviStats {
 }
 
 interface LandcoverStats {
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
   classes?: Record<string, number>;
   dominant_class?: string;
   dominant_percentage?: number;
@@ -141,7 +164,8 @@ interface RainfallSummary {
 }
 
 interface RainfallResult {
-  status: 'ok' | 'not_computed';
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
   indicator?: string;
   source?: string;
   doi?: string;
@@ -163,6 +187,7 @@ interface AnalysisMetadata {
   bbox_area_km2?: number;
   datasets?: string[];
   mode?: string;
+  applied_resolution_m?: Record<string, number>;
 }
 
 interface Summary {
@@ -172,6 +197,7 @@ interface Summary {
   rainfall?: RainfallResult | null;
   country?: string | null;
   analysis?: AnalysisMetadata;
+  caveats?: string[];
 }
 
 function isDatasetId(value: string): value is DatasetId {
@@ -195,6 +221,43 @@ function landcoverEntries(landcover: LandcoverStats): Array<[string, number]> {
   return Object.entries(classes)
     .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
     .sort(([, first], [, second]) => second - first);
+}
+
+// Least-squares slope of the series per year. A mean tells you where a place is;
+// a trend tells you which way it is going, and that is the question a manager
+// actually asks.
+function trendPerYear(series: Array<{ month: string; precip_mm: number }>): number | null {
+  if (series.length < 24) return null;
+  const first = Date.parse(series[0].month + '-01T00:00:00Z');
+  if (Number.isNaN(first)) return null;
+  const xs = series.map((r) => (Date.parse(r.month + '-01T00:00:00Z') - first) / (365.25 * 86400000));
+  const ys = series.map((r) => r.precip_mm);
+  const n = xs.length;
+  const meanX = xs.reduce((a, b) => a + b, 0) / n;
+  const meanY = ys.reduce((a, b) => a + b, 0) / n;
+  let num = 0; let den = 0;
+  for (let i = 0; i < n; i += 1) {
+    num += (xs[i] - meanX) * (ys[i] - meanY);
+    den += (xs[i] - meanX) ** 2;
+  }
+  return den === 0 ? null : num / den;
+}
+
+function EvidenceLine({ evidence }: { evidence?: ModuleEvidence }) {
+  if (!evidence) return null;
+  const tone: Record<string, string> = {
+    observed: 'text-slate-400',
+    derived: 'text-slate-400',
+    modelled: 'text-amber-300/90',
+    unconfirmed: 'text-amber-300/90',
+  };
+  return (
+    <p className={`mt-2 text-xs ${tone[evidence.status] || 'text-slate-400'}`}>
+      <span className="font-medium">{evidence.status}</span>
+      {evidence.source ? ` · ${evidence.source}` : ''}
+      {evidence.note ? ` — ${evidence.note}` : ''}
+    </p>
+  );
 }
 
 function ResultCard({
@@ -293,6 +356,7 @@ function DatasetResultCard({
             </div>
           ))}
         </dl>
+        <EvidenceLine evidence={landcover.evidence} />
       </ResultCard>
     );
   }
@@ -342,7 +406,16 @@ function DatasetResultCard({
           />
           <Metric label="Annual normal" value={rain.climatology?.annual_mean_mm == null ? '—' : `${formatNumber(rain.climatology.annual_mean_mm, 0)} mm`} />
           <Metric label="Driest month" value={s.driest_month ? `${s.driest_month.month} · ${formatNumber(s.driest_month.precip_mm, 0)} mm` : '—'} />
+          <Metric
+            label="Trend per year"
+            value={(() => {
+              const trend = trendPerYear(rain.series || []);
+              if (trend === null) return '—';
+              return `${trend > 0 ? '+' : ''}${formatNumber(trend, 1)} mm`;
+            })()}
+          />
         </dl>
+        <EvidenceLine evidence={rain.evidence} />
         {s.suspect_months && s.suspect_months.length > 0 && (
           <p className="mt-3 text-xs text-amber-300">
             {s.suspect_months.length} month(s) reported near-zero totals and are worth review.
@@ -389,6 +462,10 @@ export default function Home() {
    const [isSearching, setIsSearching] = useState(false);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
+  // How far back to ask for. The API already accepts an explicit range; this is
+  // the affordance that makes it reachable.
+  const [windowYears, setWindowYears] = useState<1 | 3 | 10 | 30>(10);
+  const [selectedSensor, setSelectedSensor] = useState('auto');
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
@@ -551,6 +628,38 @@ export default function Home() {
 
 
   // Send request to backend
+  function windowEndISO(): string {
+    const today = new Date();
+    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`;
+  }
+
+  function windowStartISO(): string {
+    const end = new Date(windowEndISO() + 'T00:00:00');
+    const start = new Date(end);
+    start.setFullYear(start.getFullYear() - windowYears);
+    return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01`;
+  }
+
+  // A link that reproduces this exact analysis, so a result can be sent to a
+  // colleague instead of described. The area has to travel somehow; encoding the
+  // drawn geometry is smaller than uploading a file.
+  const shareLink = (() => {
+    const geojson = currentGeojson();
+    if (!geojson || !uploadedGeojson) return '';
+    try {
+      const encoded = encodeURIComponent(JSON.stringify(uploadedGeojson));
+      const q = new URLSearchParams({
+        area: encoded,
+        datasets: selectedDatasets.join(','),
+        sensor: selectedSensor,
+        years: String(windowYears),
+      });
+      return `${window.location.origin}${window.location.pathname}?${q.toString()}`;
+    } catch {
+      return '';
+    }
+  })();
+
   // Preserve the source geometry whenever one was supplied. A bounding box is
   // only a fallback for selections created by older map interactions.
   function currentGeojson(): GeoJsonObject | undefined {
@@ -633,6 +742,9 @@ export default function Home() {
       const params = new URLSearchParams({
         include_ndvi: String(selectedDatasets.includes('ndvi')),
         datasets: selectedDatasets.join(','),
+        sensor: selectedSensor,
+        window_start: windowStartISO(),
+        window_end: windowEndISO(),
       });
       const response = await fetch(`${backendUrl}/generate-context?${params.toString()}`, {
         method: 'POST',
@@ -795,6 +907,40 @@ export default function Home() {
               <CardContent>
                 <div className="space-y-4">
                   <div className="space-y-2">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Label className="text-sm font-medium text-slate-300">Window</Label>
+                        {([1, 3, 10, 30] as const).map((years) => (
+                          <button
+                            key={years}
+                            type="button"
+                            onClick={() => setWindowYears(years)}
+                            className={`rounded px-2 py-1 text-xs ${
+                              windowYears === years
+                                ? 'bg-sky-600 text-white'
+                                : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                            }`}
+                          >
+                            {years}y
+                          </button>
+                        ))}
+                        <Label className="ml-2 text-sm font-medium text-slate-300">Source</Label>
+                        <select
+                          value={selectedSensor}
+                          onChange={(event) => setSelectedSensor(event.target.value)}
+                          aria-label="Vegetation source"
+                          className="rounded border border-white/20 bg-white/10 px-2 py-1 text-xs text-white"
+                        >
+                          <option value="auto">auto</option>
+                          <option value="sentinel-2">Sentinel-2</option>
+                          <option value="landsat">Landsat</option>
+                          <option value="modis">MODIS</option>
+                        </select>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        auto picks the source whose cloud mask can be trusted, and says why.
+                      </p>
+                    </div>
                     <Label className="text-sm font-medium text-slate-300">Datasets to Analyze</Label>
                     <div className="space-y-2">
                       {DATASET_OPTIONS.map((dataset) => (
@@ -896,6 +1042,21 @@ export default function Home() {
                 {summaryText && <CopySummary summaryText={summaryText} />}
               </CardHeader>
               <CardContent>
+                {shareLink && (
+                  <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                    <span>Share this analysis:</span>
+                    <code className="max-w-sm truncate rounded bg-white/10 px-2 py-1 text-slate-300">
+                      {shareLink}
+                    </code>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => navigator.clipboard?.writeText(shareLink)}
+                    >
+                      Copy link
+                    </Button>
+                  </div>
+                )}
                 {analysisWarnings.map((warning) => (
                   <Alert key={warning.message} className="mb-4 border-amber-300 bg-amber-50">
                     <Satellite className="h-4 w-4 text-amber-700" />
@@ -935,6 +1096,18 @@ export default function Home() {
                               <span>Bounding box: {formatNumber(analysisSummary.analysis.bbox_area_km2, 2)} km²</span>
                             )}
                           </div>
+                          {analysisSummary.caveats && analysisSummary.caveats.length > 0 && (
+                            <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+                              <p className="text-xs font-medium text-amber-200">
+                                Before relying on these numbers
+                              </p>
+                              <ul className="mt-1 list-disc pl-4 text-xs text-amber-100/80">
+                                {analysisSummary.caveats.map((caveat, i) => (
+                                  <li key={i}>{caveat}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
                           <div className="grid gap-4 md:grid-cols-2">
                             {(analysisSummary.analysis?.datasets || selectedDatasets)
                               .filter(isDatasetId)

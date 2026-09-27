@@ -132,7 +132,9 @@ class WorkerLoopTests(unittest.TestCase):
             35.10, -1.55], [35.11, -1.55], [35.11, -1.54], [35.10, -1.54], [35.10, -1.55]]]}
         jobs.submit(geom)
         sent = []
-        outcome = worker.sweep(on_alert=lambda keys: sent.extend(keys) or [])
+        import asyncio
+
+        outcome = asyncio.run(worker.sweep(on_alert=lambda keys: sent.extend(keys) or []))
         self.assertEqual(outcome["ready"], 1)
         self.assertEqual(len(sent), 1, "a freshly computed area is checked for alerts")
 
@@ -140,7 +142,7 @@ class WorkerLoopTests(unittest.TestCase):
         """A worker that cannot do its job must exit, not spin quietly."""
         import unittest.mock
 
-        def boom(**_kwargs):
+        async def boom(**_kwargs):
             raise RuntimeError("object store unreachable")
 
         slept = []
@@ -155,7 +157,7 @@ class WorkerLoopTests(unittest.TestCase):
 
         calls = {"n": 0}
 
-        def flaky(**_kwargs):
+        async def flaky(**_kwargs):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("one blip")

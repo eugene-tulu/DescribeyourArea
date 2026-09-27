@@ -31,6 +31,101 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.14.0 — A declared contract, a resolution policy, and analytics you can refuse
+
+The consolidated list. Four capabilities, all verified against live data.
+
+### The response contract is declared, and every figure says what kind it is
+
+The endpoint declared `summary: Dict[str, Any]`, so `/openapi.json` documented
+nothing and the frontend carried twelve hand-written TypeScript interfaces with
+nothing asserting they matched. That is how a duplicated literal drifted and
+shipped a stale limit to production — found by writing a test after the fact,
+which is the wrong order.
+
+`contract.py` now declares the summary, and the response validates against it
+before it leaves, so a producer that changes shape fails the request rather than
+shipping. It caught a design slip on its first live request: the status enum
+omitted `"ok"`, which is the only value a successful response ever has.
+
+Each figure carries an **epistemic status**, borrowed from a Japanese data map
+that marks every value 実測 or 推計:
+
+| module | status | why |
+| --- | --- | --- |
+| elevation, land cover | `observed` | a measurement of the surface |
+| vegetation index | `derived` | computed from a reflectance product |
+| rainfall | **`modelled`** | ERA5 is a reanalysis, not a gauge reading |
+
+That last one is the distinction most worth stating and easiest to lose. An
+absent module is `unconfirmed` rather than silently missing, and a `caveats` list
+names every skipped module, a repaired boundary, suspicious months, and where the
+rainfall series stops.
+
+### A resolution policy, so a large area is answered rather than refused
+
+The 100 km² cap is a guard on the *request* budget, not a claim about what the
+data can do. It was standing in for a resolution policy recommended in review and
+never implemented.
+
+| bounding box | resolution | pixels |
+| --- | --- | --- |
+| ≤ 100 km² | 20 m | 0.25 M |
+| ≤ 1,000 km² | 60 m | 0.28 M |
+| ≤ 10,000 km² | 100 m | 1.0 M |
+| beyond | 250 m | — |
+
+A **2,462 km² landscape** — the "Laikipia, not a conservancy" unit from the
+webinar — is now computed end to end: DEM, land cover and vegetation, all three
+at 100 m over 246,176 pixels, through the worker. A coarser source is never
+upsampled, and when the chosen source publishes a coarser product than requested
+the artefact records both the target and what was actually read, with the reason.
+
+### Jobs handle one indicator each, and the queue grew an indicator dimension
+
+`jobs` was wired to rainfall alone, keyed by geometry — so submitting dem and
+ndvi for one area collapsed into a single record and the second silently replaced
+the first. Now `(area, indicator)` is the job identity, artefacts live in separate
+directories, and a runtime indicator skips the request budget entirely, because
+answering what the request path refused is the worker's whole purpose.
+
+### Analytics you can refuse
+
+We recorded usage events with no opt-out, for an audience of community
+organisations. `GET /analytics` now states plainly what is recorded; a caller can
+send `Analytics-Do-Not-Track: true` for one request, or an operator can set
+`ANALYTICS_DISABLED=1`.
+
+### Frontend
+
+A 1/3/10/30-year window selector and a source picker that defaults to `auto`, a
+least-squares **trend per year** beside the mean, an evidence line under every
+card, the caveats rendered where they will be read, and a share link that
+reproduces the analysis.
+
+### Cleaned payload
+
+`response_model_exclude_none` removed the nulls FastAPI was re-adding to every
+declared field: a 2,282-byte response instead of one padded with empties, and a
+module that was not requested is absent rather than a field of nulls.
+
+### Bugs found while building this
+
+- The autorun handed a coroutine to `asyncio.to_thread`, which never awaited it,
+  so submissions sat pending forever. It now spawns the same worker process the
+  container runs, which also avoids sharing the server's event loop with a
+  vegetation path that takes a loop-bound semaphore.
+- `complete()` inferred the indicator from the payload instead of being told, and
+  wrote the job record to a different directory than the reader looked in.
+- The resolution policy's comparison was inverted, so it returned native
+  resolution at every size.
+- A bare `NameError` on the DEM path was invisible because a failing job records
+  a one-line reason. `RAINFALL_JOB_DEBUG=1` now re-raises with the traceback.
+
+Tests 291 -> 316.
+
+---
+
 ## 1.13.0 — A visitor can submit an area; launch-readiness audit
 
 ### The headline feature was unreachable from the UI

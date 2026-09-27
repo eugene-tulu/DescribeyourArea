@@ -32,6 +32,7 @@ from shapely.ops import unary_union
 from affine import Affine
 from pyproj import CRS, Geod, Transformer
 
+from contract import ContextResponse  # noqa: F401
 from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
     DEFAULT_SENSOR,
     cloud_mask,
@@ -279,7 +280,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.14.0"
 
 
 @app.middleware("http")
@@ -314,10 +315,17 @@ class RainfallLookupRequest(BaseModel):
     """Identify a study area, by geometry or by the key it hashes to."""
     geojson: Optional[Dict[str, Any]] = None
     cache_key: Optional[str] = None
+    indicator: str = "rainfall"
 
 
-class ContextResponse(BaseModel):
-    summary: Dict[str, Any]
+class SubmitRequest(RainfallLookupRequest):
+    """A submission may name which indicator it wants computed."""
+    indicator: str = "rainfall"
+
+
+# The published response contract lives in contract.py. It used to be
+# Dict[str, Any], which made /openapi.json say nothing useful and left the
+# frontend's hand-written interfaces with nothing keeping them in step.
 
 # --------------------------------------------------
 # LANDCOVER LOOKUP
@@ -1401,6 +1409,8 @@ def _emit_usage_event(*, requested, outcomes, module_ms, request_timer, http_req
     already succeeded.
     """
     try:
+        if not usage.analytics_enabled(http_request):
+            return
         request_timer.__exit__(None, None, None)
         sensor = None
         if isinstance(ndvi_stats, dict):
@@ -1484,7 +1494,7 @@ async def _find_core_assets(
         raise HTTPException(status_code=502, detail="A required raster asset was unavailable") from exc
 
 
-@app.post("/generate-context", response_model=ContextResponse)
+@app.post("/generate-context", response_model=ContextResponse, response_model_exclude_none=True)
 async def generate_context(
     request: GeoJSONRequest,
     http_request: Request = None,
@@ -1601,22 +1611,26 @@ async def generate_context(
             area_km2=aoi["bbox_area_km2"],
             ndvi_stats=ndvi_stats,
         )
-        return {
-            "summary": {
-                "dem": dem,
-                "ndvi": ndvi_stats,
-                "landcover": landcover,
-                "rainfall": rainfall_context,
-                "country": country,
-                "scene_dates": scene_dates,
-                "scene_ids": scene_ids,
-                "analysis": {
-                    "bbox_area_km2": round(aoi["bbox_area_km2"], 2),
-                    "datasets": sorted(requested),
-                    "mode": "synchronous",
-                },
-            }
+        summary = {
+            "dem": _with_dem_evidence(dem),
+            "ndvi": _with_vegetation_evidence(ndvi_stats),
+            "landcover": _with_landcover_evidence(landcover),
+            "rainfall": _with_rainfall_evidence(rainfall_context),
+            "country": country,
+            "scene_dates": scene_dates,
+            "scene_ids": scene_ids,
+            "analysis": {
+                "bbox_area_km2": round(aoi["bbox_area_km2"], 2),
+                "datasets": sorted(requested),
+                "mode": "synchronous",
+            },
+            "caveats": _caveats(aoi, dem, landcover, ndvi_stats, rainfall_context),
         }
+        # Validating here means a change to a producer that breaks the contract
+        # fails the request loudly, rather than shipping a shape nobody declared.
+        # exclude_none, so a module that was not requested is absent rather than a
+        # field of nulls the caller has to read past.
+        return ContextResponse(summary=summary).model_dump(exclude_none=True, exclude_defaults=False)
 
     except HTTPException:
         raise
@@ -1624,6 +1638,102 @@ async def generate_context(
         # Never echo the raw exception: it routinely carries signed asset URLs.
         print(f"CRITICAL ERROR in /generate-context: {type(e).__name__} - {str(e)[:200]}", file=sys.stderr)
         raise HTTPException(status_code=500, detail="Processing failed; please retry shortly")
+
+# --------------------------------------------------
+# EVIDENCE AND CAVEATS
+# --------------------------------------------------
+# A number without a stated kind is an assertion pretending to be a measurement.
+# The distinction that matters most here is rainfall: ERA5 is a reanalysis, a model
+# output that assimilates observations, and not a gauge reading even though it
+# arrives looking like any other number.
+
+def _evidence(status, source, method, note=None, **extra):
+    return {"status": status, "source": source, "method": method, "note": note, **extra}
+
+
+def _with_dem_evidence(dem):
+    if dem is None:
+        return None
+    if dem.get("error"):
+        return {**dem, "status": "error", "evidence": _evidence(
+            "unconfirmed", "NASADEM", "30 m elevation product", note=dem["error"])}
+    return {**dem, "status": "ok", "evidence": _evidence(
+        "observed", "NASADEM", "area mean of 30 m surface elevation",
+        note="An observed product, not a field measurement of this polygon.")}
+
+
+def _with_landcover_evidence(landcover):
+    if landcover is None:
+        return None
+    if landcover.get("error"):
+        return {**landcover, "status": "error", "evidence": _evidence(
+            "unconfirmed", "ESA WorldCover", "10 m land-cover classification",
+            note=landcover["error"])}
+    return {**landcover, "status": "ok", "evidence": _evidence(
+        "observed", "ESA WorldCover", "area share of 10 m land-cover classes",
+        note="A single-date classification, so it reflects the scene, not a year.")}
+
+
+def _with_vegetation_evidence(result):
+    if result is None:
+        return None
+    if result.get("status") == "ok":
+        sensor = (result.get("sensor") or {}).get("label") or "a satellite source"
+        return {**result, "evidence": _evidence(
+            "derived", sensor, result.get("method") or "median NDVI composite",
+            note="An index derived from a surface-reflectance product, not a direct "
+                 "measurement of vegetation.")}
+    return {**result, "evidence": _evidence(
+        "unconfirmed", None, None, note=result.get("warning") or result.get("error"))}
+
+
+def _with_rainfall_evidence(result):
+    if result is None:
+        return None
+    if result.get("status") == "ok":
+        return {**result, "evidence": _evidence(
+            "modelled", result.get("source"),
+            "monthly totals against the 1991-2020 normal",
+            note="A reanalysis: modelled output that assimilates observations, not a "
+                 "gauge reading. Treat a value near a threshold as uncertain.",
+            doi=result.get("doi"), license=result.get("license"),
+            retrieved=result.get("retrieved"))}
+    return {**result, "evidence": _evidence(
+        "unconfirmed", None, None,
+        note=result.get("message") or result.get("reason") or "not computed")}
+
+
+def _caveats(aoi, dem, landcover, ndvi, rain):
+    """Everything a reader should know before relying on the numbers above.
+
+    The habit borrowed from a source worth copying: say where the data stops and
+    what was left out, rather than letting a gap look like an absence.
+    """
+    notes = []
+    repaired = (aoi.get("feature", {}).get("properties") or {}).get("geometry_repaired")
+    if repaired:
+        notes.append(f"Study-area boundary was modified: {repaired}.")
+    for name, module in (("Elevation", dem), ("Land cover", landcover),
+                         ("Vegetation", ndvi), ("Rainfall", rain)):
+        if not isinstance(module, dict):
+            continue
+        reason = module.get("error") or module.get("reason")
+        if reason:
+            notes.append(f"{name}: unavailable ({reason}).")
+        warning = module.get("warning")
+        if warning:
+            notes.append(f"{name}: {warning}")
+        if module.get("suspect_months"):
+            notes.append(
+                f"Rainfall: {len(module['suspect_months'])} month(s) reported near-zero "
+                "totals and are worth review."
+            )
+    if isinstance(rain, dict) and rain.get("status") == "ok":
+        window = rain.get("window") or {}
+        if window.get("end"):
+            notes.append(f"Rainfall series ends {window['end']}.")
+    return notes
+
 
 # --------------------------------------------------
 # HEALTH CHECK
@@ -1652,6 +1762,7 @@ async def rainfall_lookup(request: RainfallLookupRequest):
     costs a millisecond and about 1 KB. Applying the raster caps here made the
     published portfolio unreachable for the very areas it was built for.
     """
+    import jobs
     import rainfall
 
     if request.cache_key:
@@ -1660,7 +1771,16 @@ async def rainfall_lookup(request: RainfallLookupRequest):
         key = request.cache_key.strip()
         if not re.fullmatch(r"[0-9a-f]{32}", key):
             raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
-        result = rainfall.cached_context_by_key(key)
+        indicator = (request.indicator or "rainfall").strip().lower()
+        if indicator in jobs.RUNTIME_INDICATORS:
+            result = jobs.read_artefact(key, indicator) or {
+                "status": "not_computed",
+                "reason": "no_computed_artefact",
+                "message": f"No {indicator} has been computed for this area yet.",
+                "cache_key": key,
+            }
+        else:
+            result = rainfall.cached_context_by_key(key)
         bbox_area = None
     else:
         if not request.geojson:
@@ -1682,7 +1802,7 @@ async def rainfall_lookup(request: RainfallLookupRequest):
 
 @app.post("/rainfall/submit")
 async def submit_rainfall(
-    payload: RainfallLookupRequest,
+    payload: SubmitRequest,
     http_request: Request = None,
 ):
     """Queue a study area for precomputation, and return immediately.
@@ -1698,18 +1818,40 @@ async def submit_rainfall(
         raise HTTPException(status_code=422, detail="supply geojson to submit an area")
     area = validate_for_lookup(payload.geojson)
     key = rainfall_hash(area["feature"]["geometry"])
+    indicator = (payload.indicator or "rainfall").strip().lower()
+    if indicator not in jobs.INDICATORS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown indicator {indicator!r}; choose from {list(jobs.INDICATORS)}",
+        )
 
     state = jobs.submit(
         area["feature"]["geometry"],
+        indicator=indicator,
         label=(area["feature"].get("properties") or {}).get("NAME"),
         submitted_by=_client_host(http_request),
     )
 
     if state.get("state") == jobs.PENDING and RAINFALL_AUTORUN:
-        _autorun_rainfall_jobs()
+        _autorun_jobs()
+    # Say up front what the worker will do with the area, because a large area is
+    # answered at a coarser resolution rather than refused, and the caller should
+    # know which they are getting.
+    planned = None
+    if indicator != "rainfall":
+        import indicators
+
+        resolution, reason = indicators.resolution_for(area["bbox_area_km2"], indicator)
+        planned = {
+            "resolution_m": resolution,
+            "reason": reason,
+            "pixels_analysed": indicators.pixels_for(area["bbox_area_km2"], resolution),
+        }
     return {
         "submission": state,
         "cache_key": key,
+        "indicator": indicator,
+        "planned": planned,
         "analysis": {
             "bbox_area_km2": round(area["bbox_area_km2"], 2),
             "compute_seconds_typical": 60,
@@ -1717,26 +1859,34 @@ async def submit_rainfall(
     }
 
 
-def _autorun_rainfall_jobs() -> None:
-    """Process one queued area in the background, best effort.
+def _autorun_jobs() -> None:
+    """Run one worker sweep in its own process, best effort.
 
-    The job record is what makes a submission durable, so losing this task to a
-    restart costs nothing but a delay: the runner picks the job up.
+    A subprocess rather than a thread, for two reasons. The runner is async, and
+    a coroutine handed to ``to_thread`` is never awaited; and the vegetation path
+    takes a semaphore bound to the server's event loop, which cannot be used from
+    another loop. Either way the same code path the container runs is the right
+    one to run.
+
+    The job record is what makes a submission durable, so losing this to a restart
+    costs nothing but a delay: the supervised worker picks the job up.
     """
-    import asyncio as _asyncio
+    import asyncio
+    import sys
 
-    import jobs
-
-    async def worker():
+    async def spawn():
         try:
-            await _asyncio.to_thread(jobs.run_pending, limit=1, publish=True)
-        except Exception:  # noqa: BLE001
+            await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "worker", "--once",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+        except Exception:  # noqa: BLE001 - best effort by definition
             pass
         finally:
-            _RAINFALL_TASKS.discard(worker)
+            _RAINFALL_TASKS.discard(spawn)
 
     try:
-        task = _asyncio.get_running_loop().create_task(worker())
+        task = asyncio.get_running_loop().create_task(spawn())
         _RAINFALL_TASKS.add(task)
     except RuntimeError:
         pass
@@ -1808,6 +1958,21 @@ async def forget_rainfall_series(payload: ForgetRequest):
     return {"cache_key": key, "removed": bool(outcome["local"] or outcome["remote"]),
             "local": outcome["local"], "remote": outcome["remote"],
             "job_record_dropped": job_dropped, "data": "rainfall series"}
+
+
+@app.get("/analytics")
+async def analytics_state():
+    """Whether this deployment records usage, so a caller can be told plainly."""
+    enabled = usage.analytics_enabled()
+    return {
+        "analytics_enabled": enabled,
+        "records": (
+            None if not enabled
+            else "dataset outcomes, durations, a coarse area band and a truncated "
+                 "client prefix. No submitted geometry, no raw area, no full address."
+        ),
+        "opt_out": "Set ANALYTICS_DISABLED=1, or send Analytics-Do-Not-Track: true.",
+    }
 
 
 @app.get("/version")
