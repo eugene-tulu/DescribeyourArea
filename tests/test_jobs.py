@@ -124,7 +124,7 @@ class JobQueueTests(unittest.TestCase):
     def test_a_runner_completes_a_queued_area_and_drops_the_polygon(self):
         jobs.submit(GEOM, label="test")
         with _FakeCompute() as runner:
-            outcome = jobs.run_pending(limit=5)
+            outcome = jobs.run_pending(limit=5, source=object())
         self.assertEqual(outcome, {"processed": 1, "ready": 1, "failed": 0, "skipped": 0})
         self.assertEqual(len(runner.calls), 1)
         key = rainfall.geometry_hash(GEOM)
@@ -138,7 +138,7 @@ class JobQueueTests(unittest.TestCase):
             36.10, -1.55], [36.11, -1.55], [36.11, -1.54], [36.10, -1.54], [36.10, -1.55]]]}
         jobs.submit(bad)
         with _FakeCompute(fail_keys={rainfall.geometry_hash(bad)}):
-            outcome = jobs.run_pending(limit=5)
+            outcome = jobs.run_pending(limit=5, source=object())
         self.assertEqual(outcome["ready"], 1)
         self.assertEqual(outcome["failed"], 1)
         failed = jobs.read_job(rainfall.geometry_hash(bad))
@@ -147,14 +147,14 @@ class JobQueueTests(unittest.TestCase):
 
     def test_the_runner_is_idempotent(self):
         jobs.submit(GEOM)
-        jobs.run_pending(limit=5)
-        again = jobs.run_pending(limit=5)
+        jobs.run_pending(limit=5, source=object())
+        again = jobs.run_pending(limit=5, source=object())
         self.assertEqual(again["processed"], 0, "completed work must not be redone")
 
     def test_the_runner_passes_the_requested_window_through(self):
         jobs.submit(GEOM, start="1997-01-01")
         with _FakeCompute() as runner:
-            jobs.run_pending(limit=5)
+            jobs.run_pending(limit=5, source=object())
         _key, kwargs = runner.calls[0]
         self.assertEqual(kwargs["start"], "1997-01-01")
 
@@ -176,7 +176,7 @@ class JobQueueTests(unittest.TestCase):
     def test_a_job_record_without_a_geometry_fails_clearly(self):
         key = rainfall.geometry_hash(GEOM)
         jobs.write_job({"cache_key": key, "state": jobs.PENDING})
-        outcome = jobs.run_pending(limit=5)
+        outcome = jobs.run_pending(limit=5, source=object())
         self.assertEqual(outcome["failed"], 1)
         self.assertIn("no geometry", jobs.read_job(key)["reason"])
 
@@ -197,3 +197,73 @@ class JobQueueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PublishResilienceTests(unittest.TestCase):
+    """A store outage must not fail work that already succeeded."""
+
+    def setUp(self):
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        for key in ("RAINFALL_CACHE_DIR", rainfall.REMOTE_URI_ENV):
+            if os.environ.get(key) is None:
+                os.environ.pop(key, None)
+
+    def test_publish_reports_failure_instead_of_raising(self):
+        import unittest.mock
+
+        os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/prefix"
+
+        class Broken:
+            def upload_file(self, *_a, **_kw):
+                raise OSError("object store unreachable")
+
+        patcher = unittest.mock.patch.object(rainfall, "_s3_client", lambda: Broken())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        rainfall.write_cache("a" * 32, {"processing_version": rainfall.RAINFALL_PROCESSING_VERSION})
+        self.assertFalse(rainfall.publish("a" * 32), "an upload failure must be reported, not raised")
+
+    def test_publish_is_false_when_no_remote_is_configured(self):
+        os.environ.pop(rainfall.REMOTE_URI_ENV, None)
+        rainfall.write_cache("b" * 32, {"processing_version": rainfall.RAINFALL_PROCESSING_VERSION})
+        self.assertFalse(rainfall.publish("b" * 32))
+
+    def test_a_job_stays_ready_when_only_the_upload_fails(self):
+        import unittest.mock
+
+        import rainfall as _r
+        from tests.test_rainfall import _StubClient  # noqa: F401  (import check)
+
+        os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/prefix"
+        geom = {"type": "Polygon", "coordinates": [[[
+            35.10, -1.55], [35.11, -1.55], [35.11, -1.54], [35.10, -1.54], [35.10, -1.55]]]}
+
+        class Broken:
+            def upload_file(self, *_a, **_kw):
+                raise OSError("object store unreachable")
+
+        def fake(geometry, **kwargs):
+            return {
+                "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+                "indicator": "monthly_precipitation",
+                "series": [{"month": "2020-01", "precip_mm": 2.0}],
+            }
+
+        compute = unittest.mock.patch.object(rainfall, "compute_series", fake)
+        client = unittest.mock.patch.object(rainfall, "_s3_client", lambda: Broken())
+        compute.start(); client.start()
+        self.addCleanup(compute.stop); self.addCleanup(client.stop)
+
+        jobs.submit(geom)
+        outcome = jobs.run_pending(limit=5, source=object(), publish=True)
+        self.assertEqual(outcome["ready"], 1, "a store outage must not fail a completed job")
+        self.assertEqual(outcome["failed"], 0)
+        key = rainfall.geometry_hash(geom)
+        self.assertIsNotNone(rainfall.read_cache(key), "the series is still usable locally")
+        self.assertFalse(jobs.read_job(key)["published"], "and the job records that it was not uploaded")

@@ -344,7 +344,9 @@ class RemoteCacheTests(unittest.TestCase):
 
     def test_unconfigured_remote_is_a_noop(self):
         self.assertIsNone(rainfall.remote_prefix())
-        self.assertIsNone(rainfall.publish("anything"))
+        # publish reports a boolean, so "nothing was sent" and "there is no store"
+        # are both False rather than indistinguishable.
+        self.assertFalse(rainfall.publish("anything"))
         self.assertIsNone(rainfall.fetch("anything"))
 
     def test_prefix_is_parsed_from_the_uri(self):
@@ -365,8 +367,8 @@ class RemoteCacheTests(unittest.TestCase):
         self._configure()
         key = "deadbeef"
         rainfall.write_cache(key, self._payload())
-        name = rainfall.publish(key)
-        self.assertEqual(name, f"series/{key}.json")
+        self.assertTrue(rainfall.publish(key))
+        self.assertEqual(rainfall.series_object(key), f"series/{key}.json")
         self.assertEqual(
             self.client.uploads[-1],
             ("my-bucket", "geocontextualize/rainfall/series/deadbeef.json"),
@@ -374,7 +376,7 @@ class RemoteCacheTests(unittest.TestCase):
 
     def test_publish_is_a_noop_without_a_local_file(self):
         self._configure()
-        self.assertIsNone(rainfall.publish("missing"))
+        self.assertFalse(rainfall.publish("missing"))
 
     def test_fetch_caches_locally_on_a_miss(self):
         self._configure()

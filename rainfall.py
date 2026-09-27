@@ -164,16 +164,24 @@ def series_object(key: str) -> str:
     return f"series/{key}.json"
 
 
-def publish(key: str) -> Optional[str]:
-    """Upload one cached series. Returns the object key, or None if local-only."""
+def publish(key: str) -> bool:
+    """Upload one cached series. Reports whether it reached the store.
+
+    Never raises. The series is already written locally by the time this runs, so
+    a store outage must not turn a completed computation into a failed one; the
+    caller records that the upload did not happen and the next deploy's pull
+    reconciles it.
+    """
     if remote_prefix() is None:
-        return None
+        return False
     path = cache_path(key)
     if not path.exists():
-        return None
-    name = series_object(key)
-    _s3_client().upload_file(str(path), _bucket(), _remote_key(name))
-    return name
+        return False
+    try:
+        _s3_client().upload_file(str(path), _bucket(), _remote_key(series_object(key)))
+    except Exception:  # noqa: BLE001 - an upload failure is not a compute failure
+        return False
+    return True
 
 
 def forget(key: str) -> dict:

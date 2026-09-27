@@ -279,7 +279,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.12.1"
 
 
 @app.middleware("http")

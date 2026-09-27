@@ -31,6 +31,73 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.12.1 — Credential rotated, and the repository trimmed
+
+### Credential rotated
+
+The Spaces secret was exposed in plaintext by `docker compose config` during
+1.12.0 and has been rotated. Recorded here because the exposure is a fact about
+this repository's history, and because the lesson generalises: `docker compose
+config` resolves `env_file` values, so it is not a safe way to inspect a rendered
+configuration on a machine holding live credentials. Verify mounts from the
+compose file, or from output with the credential lines filtered.
+
+### A store outage could fail work that had already succeeded
+
+Found by the full suite, not by reading the code: `publish()` had no error
+handling, so when the object store was unreachable the upload raised inside
+`run_pending`, which caught it and marked the job **failed** — even though the
+series had been computed and written to the local cache, and was fully usable.
+A transient Spaces fault was discarding a successful ERA5 computation.
+
+`publish()` now returns a boolean and never raises. The job is recorded `ready`
+with `published: false`, which is the truth: the series exists locally, the upload
+did not happen, and the next deploy's pull reconciles it. The same principle the
+alert webhook already followed — a side effect that can fail must not destroy the
+result of the work that succeeded.
+
+It also turned out the queue tests had been reaching ERA5, because `run_pending`
+builds a real `UnionReader` before the compute is stubbed. They now pass a source,
+so the queue is testable without a network.
+
+### Files removed
+
+Everything below was tracked but not part of the product, and the first three were
+actively misleading.
+
+- **`__pycache__/main.cpython-312.pyc`** — a compiled bytecode artefact, tracked,
+  and for Python 3.12 while the environment runs 3.13. It is in `.gitignore` now
+  but had been committed before that, so ignoring it did nothing.
+- **`benchmark_final.json`, `benchmark_results.json`** — a loading micro-benchmark
+  of an EOPF/Zarr path removed in 1.5.0. They measured code that no longer exists
+  and their numbers were being cited as if current.
+- **`Procfile`** — a Heroku `web:` declaration, from a deployment model this project
+  does not use. It deploys by Docker Compose to a droplet, and its presence
+  implied otherwise.
+- **`.kilocode/`, `.vscode/`** — editor and agent configuration, already listed in
+  `.gitignore` but committed before it.
+- **`client/README.md`** — the Next.js scaffold readme, pointing at
+  `describeyourarea-production.up.railway.app`, a Railway deployment that is not
+  the one in use. Stale infrastructure information in a tracked file is worse than
+  no file. The root README documents the client configuration.
+- **35 unused `client/components/ui/` components** — the shadcn/ui library was
+  scaffolded in full and six were ever used (`alert`, `button`, `card`, `input`,
+  `label`, `toast`). The rest are dead weight in the image.
+- **Five scaffold SVGs** in `client/public/` — `file`, `globe`, `next`, `vercel`,
+  `window`. Nothing referenced them; `icon8.png` is used by `layout.tsx` and stays.
+
+`NEXT_FEATURE.md` is **kept** and given a status header. Its *Guardrails* and *Not
+in the first release* sections are the record of what was deliberately left
+unbuilt, which is worth more than a clean tree, and it links two GitHub issues.
+
+One follow-up not taken: the dropped components leave their `@radix-ui/*` packages
+in `package.json`. Pruning them is worth doing, but it is a dependency change with
+a real blast radius and no user-visible benefit, so it is noted rather than rushed.
+
+Tests 288 -> 291; `tsc`, `eslint` and `next build` clean after the removals.
+
+---
+
 ## 1.12.0 — Worker supervision and alerting
 
 ### Supervision
@@ -101,12 +168,13 @@ as `INVALID` — twenty-one identical lines that read like a data problem. It no
 catches `HTTPException` separately, reports an unexpected exception with its type
 as `ERROR`, and uses the current single payload cap with the vertex check waived.
 
-### Also removed by a test
+### A credential was exposed in a terminal transcript, and rotated
 
-The `docker compose config` output used while verifying the volume **printed the
-Spaces access key and secret in plaintext**. It is in the scrollback of that shell.
-Rotating it is cheap; leaving a live key in a terminal transcript is not something
-to wave through.
+While verifying the volume I ran `docker compose config`, which **prints resolved
+secrets in plaintext** — the Spaces access key and secret went into that shell's
+scrollback. The secret has been rotated. Worth knowing for next time: render
+compose config with the credentials stripped, or verify the volume mount from the
+file rather than the resolved output.
 
 ### Tests: 263 -> 288
 

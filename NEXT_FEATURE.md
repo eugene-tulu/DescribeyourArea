@@ -1,5 +1,17 @@
 # Next feature: Portfolio Monitoring Packs
 
+> **Status: delivered.** Everything in *First release* below shipped between 1.9.0
+> and 1.12.0: precomputed versioned series, a lookup path that serves them, a
+> supervised worker, self-service submission, and alerting. One deliberate change
+> from the plan below: the portfolio is **not** administrator-gated. Areas are
+> submitted by their own users, because the loudest question in the conservancy
+> webinar was "how do we share our polygons", asked five times by four people.
+> The live `generate-context` endpoint remains the path for arbitrary small areas.
+>
+> The *Guardrails* and *Not in the first release* sections are still the reason
+> several things were deliberately left unbuilt, so they are kept. The current
+> forward plan lives in [CHANGELOG.md](CHANGELOG.md#next).
+
 Tracked in GitHub as [DescribeyourArea #3](https://github.com/eugene-tulu/DescribeyourArea/issues/3)
 and [geocontextualize #1](https://github.com/kiprutoYG/geocontextualize/issues/1).
 

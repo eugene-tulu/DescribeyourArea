@@ -252,7 +252,16 @@ def run_pending(
                 upload=publish,
                 label=job.get("label"),
             )
-            complete(key, payload)
+            uploaded = publish and rainfall.remote_prefix() is not None
+            record = complete(key, payload)
+            # A series computed but not uploaded is still ready locally; saying so
+            # keeps a store outage from failing work that succeeded.
+            if uploaded:
+                record["published"] = rainfall.publish(key)
+                write_job(record)
+            else:
+                record["published"] = False
+                write_job(record)
             ready += 1
         except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
             fail(key, f"{type(exc).__name__}: {exc}")
