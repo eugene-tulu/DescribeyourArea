@@ -20,7 +20,7 @@ const MapComponent = dynamic(() => import('@/components/MapComponent'), {
     <div className="h-[600px] bg-slate-100 rounded-lg flex items-center justify-center">
       <div className="flex items-center space-x-2">
         <Globe className="w-6 h-6 animate-spin text-blue-600" />
-        <span className="text-slate-600">Loading satellite map...</span>
+        <span className="text-ink-3">Loading satellite map…</span>
       </div>
     </div>
   )
@@ -1020,12 +1020,12 @@ export default function Home() {
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center mb-4">
-            <Globe className="w-12 h-12 text-blue-400 mr-3" />
-            <h1 className="text-4xl font-bold text-white tracking-tight">
-              Geo<span className="text-blue-400">Contextualize</span>
+            <Globe className="w-12 h-12 text-accent mr-3" />
+            <h1 className="text-4xl font-bold text-ink tracking-tight">
+              Geo<span className="text-accent">Contextualize</span>
             </h1>
           </div>
-          <p className="text-slate-300 text-lg max-w-2xl mx-auto">
+          <p className="text-ink-2 text-lg max-w-2xl mx-auto">
             Discover geographical context and insights by selecting any area on Earth.
             Search, draw, and analyze with advanced geospatial tools.
           </p>
@@ -1043,9 +1043,9 @@ export default function Home() {
           {/* Left Panel - Search and Controls */}
           <div className="lg:col-span-1 space-y-6">
             {/* Search Section */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader>
-                <CardTitle className="text-white flex items-center">
+                <CardTitle className="text-ink flex items-center">
                   <Search className="w-5 h-5 mr-2" />
                   Location Search
                 </CardTitle>
@@ -1053,17 +1053,17 @@ export default function Home() {
               <CardContent>
                 <div className="relative">
                   <div className="relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-4 h-4" />
+                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-ink-3 w-4 h-4" />
                     <Input
                       type="text"
                       placeholder="Search for places..."
                       value={searchQuery}
                       onChange={(e) => handleSearchChange(e.target.value)}
-                      className="pl-10 bg-white/20 border-white/30 text-white placeholder:text-slate-300"
+                      className="pl-10 bg-white border-rule text-ink placeholder:text-ink-2"
                       onFocus={() => searchResults.length > 0 && setShowResults(true)}
                     />
                     {isSearching && (
-                      <Loader2 className="absolute right-3 top-1/2 transform -translate-y-1/2 text-slate-400 w-4 h-4 animate-spin" />
+                      <Loader2 className="absolute right-3 top-1/2 transform -translate-y-1/2 text-ink-3 w-4 h-4 animate-spin" />
                     )}
                   </div>
                   
@@ -1091,59 +1091,59 @@ export default function Home() {
             </Card>
 
             {/* Instructions */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader>
-                <CardTitle className="text-white">How to Use</CardTitle>
+                <CardTitle className="text-ink">How to Use</CardTitle>
               </CardHeader>
-              <CardContent className="text-slate-300 space-y-3">
+              <CardContent className="text-ink-2 space-y-3">
                 <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">1</div>
+                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">1</div>
                   <p className="text-sm">Search and select a location to zoom to</p>
                 </div>
                 <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">2</div>
+                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">2</div>
                   <p className="text-sm">Upload a GeoJSON file, or draw the area yourself</p>
                 </div>
                 <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">3</div>
+                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">3</div>
                   <p className="text-sm">Draw a polygon or rectangle to define the area to analyze</p>
                 </div>
                 <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">4</div>
+                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">4</div>
                   <p className="text-sm">Click &quot;Analyze Area&quot; to get geographical context</p>
                 </div>
               </CardContent>
             </Card>
             {/* GeoJSON Upload */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader>
-                <CardTitle className="text-white">Upload GeoJSON</CardTitle>
+                <CardTitle className="text-ink">Upload GeoJSON</CardTitle>
               </CardHeader>
               <CardContent>
                 <input
                   type="file"
                   accept=".geojson,application/geo+json,application/json"
                   onChange={handleGeojsonUpload}
-                  className="block w-full text-sm text-slate-200 file:mr-4 file:py-2 file:px-4
+                  className="block w-full text-sm text-ink-2 file:mr-4 file:py-2 file:px-4
                             file:rounded-md file:border-0 file:text-sm file:font-semibold
                             file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                 />
-                <p className="text-xs text-slate-400 mt-2">
+                <p className="text-xs text-ink-3 mt-2">
                   Upload a <code>.geojson</code> file to define your study area.
                 </p>
               </CardContent>
             </Card>
             {/* Options */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader>
-                <CardTitle className="text-white">Options</CardTitle>
+                <CardTitle className="text-ink">Options</CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="space-y-4">
                   <div className="space-y-2">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Label className="text-sm font-medium text-slate-300">Window</Label>
+                        <Label className="text-sm font-medium text-ink-2">Window</Label>
                         {([1, 3, 10, 30] as const).map((years) => (
                           <button
                             key={years}
@@ -1151,19 +1151,19 @@ export default function Home() {
                             onClick={() => setWindowYears(years)}
                             className={`rounded px-2 py-1 text-xs ${
                               windowYears === years
-                                ? 'bg-sky-600 text-white'
-                                : 'bg-white/10 text-slate-300 hover:bg-white/20'
+                                ? 'bg-sky-600 text-ink'
+                                : 'bg-white text-ink-2 hover:bg-paper'
                             }`}
                           >
                             {years}y
                           </button>
                         ))}
-                        <Label className="ml-2 text-sm font-medium text-slate-300">Source</Label>
+                        <Label className="ml-2 text-sm font-medium text-ink-2">Source</Label>
                         <select
                           value={selectedSensor}
                           onChange={(event) => setSelectedSensor(event.target.value)}
                           aria-label="Vegetation source"
-                          className="rounded border border-white/20 bg-white/10 px-2 py-1 text-xs text-white"
+                          className="rounded border border-rule bg-white px-2 py-1 text-xs text-ink"
                         >
                           <option value="auto">auto</option>
                           <option value="sentinel-2">Sentinel-2</option>
@@ -1171,14 +1171,14 @@ export default function Home() {
                           <option value="modis">MODIS</option>
                         </select>
                       </div>
-                      <p className="text-xs text-slate-400">
+                      <p className="text-xs text-ink-3">
                         auto picks the source whose cloud mask can be trusted, and says why.
                       </p>
                     </div>
-                    <Label className="text-sm font-medium text-slate-300">Datasets to Analyze</Label>
+                    <Label className="text-sm font-medium text-ink-2">Datasets to Analyze</Label>
                     <div className="space-y-2">
                       {DATASET_OPTIONS.map((dataset) => (
-                        <label key={dataset.id} htmlFor={`dataset-${dataset.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-white/5">
+                        <label key={dataset.id} htmlFor={`dataset-${dataset.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-paper">
                           <input
                             type="checkbox"
                             id={`dataset-${dataset.id}`}
@@ -1192,14 +1192,14 @@ export default function Home() {
                             className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                           />
                           <span>
-                            <span className="block text-sm text-slate-200">{dataset.label}</span>
-                            <span className="block text-xs text-slate-400">{dataset.description}</span>
+                            <span className="block text-sm text-ink-2">{dataset.label}</span>
+                            <span className="block text-xs text-ink-3">{dataset.description}</span>
                           </span>
                         </label>
                       ))}
                     </div>
                   </div>
-                  <p className="text-xs text-slate-400 mt-2">
+                  <p className="text-xs text-ink-3 mt-2">
                     All datasets are selected by default. Vegetation analysis may be skipped for larger study areas.
                   </p>
                 </div>
@@ -1210,7 +1210,7 @@ export default function Home() {
             <Button
               onClick={handleAnalyze}
               disabled={(!boundingBox && !uploadedGeojson && !drawnFeatures?.features.length) || selectedDatasets.length === 0 || isLoading}
-              className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white py-6 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-ink py-6 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {isLoading ? (
                 <div className="flex items-center">
@@ -1229,9 +1229,9 @@ export default function Home() {
           {/* Right Panel - Map and Results */}
           <div className="lg:col-span-2 space-y-6">
             {/* Map */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader>
-                <CardTitle className="text-white flex items-center">
+                <CardTitle className="text-ink flex items-center">
                   <Globe className="w-5 h-5 mr-2" />
                   Satellite Map
                 </CardTitle>
@@ -1256,7 +1256,7 @@ export default function Home() {
                           downloadAnchorNode.click();
                           downloadAnchorNode.remove();
                         }}
-                        className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-white px-3 py-2 rounded-md text-sm z-[1000]"
+                        className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-ink px-3 py-2 rounded-md text-sm z-[1000]"
                       >
                         Download GeoJSON
                       </button>
@@ -1267,9 +1267,9 @@ export default function Home() {
             </Card>
 
             {/* Results */}
-            <Card className="bg-white/10 backdrop-blur border-white/20">
+            <Card className="bg-white backdrop-blur border-rule">
               <CardHeader className="flex flex-row items-center justify-between">
-                <CardTitle className="text-white flex items-center">
+                <CardTitle className="text-ink flex items-center">
                   <MapPin className="w-5 h-5 mr-2" />
                   Analysis Results
                 </CardTitle>
@@ -1277,9 +1277,9 @@ export default function Home() {
               </CardHeader>
               <CardContent>
                 {shareLink && (
-                  <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                  <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-ink-3">
                     <span>Share this analysis:</span>
-                    <code className="max-w-sm truncate rounded bg-white/10 px-2 py-1 text-slate-300">
+                    <code className="max-w-sm truncate rounded bg-white px-2 py-1 text-ink-2">
                       {shareLink}
                     </code>
                     <Button
@@ -1299,23 +1299,23 @@ export default function Home() {
                     </AlertDescription>
                   </Alert>
                 ))}
-                <div className="bg-black/20 rounded-lg p-4 min-h-[200px]">
+                <div className="bg-white rounded-lg p-4 min-h-[200px]">
                   {isLoading ? (
                     <div className="flex items-center justify-center h-48">
                       <div className="text-center">
                         <div className="relative">
-                          <Globe className="w-16 h-16 text-blue-400 mx-auto animate-pulse" />
+                          <Globe className="w-16 h-16 text-accent mx-auto animate-pulse" />
                           <div className="absolute inset-0 flex items-center justify-center">
                             <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
                           </div>
                         </div>
-                        <p className="text-slate-300 mt-4">Collecting selected geographic context...</p>
-                        <p className="text-slate-400 text-xs mt-2">Remote data sources can take a moment to respond.</p>
+                        <p className="text-ink-2 mt-4">Collecting selected geographic context...</p>
+                        <p className="text-ink-3 text-xs mt-2">Remote data sources can take a moment to respond.</p>
                       </div>
                     </div>
                   ) : response ? (
                     <>
-                      <div className="text-slate-200 whitespace-pre-wrap break-words text-base leading-relaxed">
+                      <div className="text-ink-2 whitespace-pre-wrap break-words text-base leading-relaxed">
                         {response.split('\n').map((paragraph, index) => (
                           <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
                         ))}
@@ -1323,8 +1323,8 @@ export default function Home() {
 
                       {analysisSummary && (
                         <div className="mt-6 border-t border-white/10 pt-5">
-                          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-slate-300">
-                            <h3 className="font-semibold text-white">Selected data details</h3>
+                          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-2">
+                            <h3 className="font-semibold text-ink">Selected data details</h3>
                             {analysisSummary.country && <span>Country: {analysisSummary.country}</span>}
                             {analysisSummary.analysis?.bbox_area_km2 != null && (
                               <span>Bounding box: {formatNumber(analysisSummary.analysis.bbox_area_km2, 2)} km²</span>
@@ -1366,7 +1366,7 @@ export default function Home() {
                       )}
                     </>
                   ) : (
-                    <div className="flex items-center justify-center h-48 text-slate-400">
+                    <div className="flex items-center justify-center h-48 text-ink-3">
                       <div className="text-center">
                         <Satellite className="w-12 h-12 mx-auto mb-3 opacity-50" />
                         <p>Select an area on the map and click &quot;Analyze Area&quot; to see results</p>

@@ -31,6 +31,56 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.15.1 — The light theme was unreadable; contrast is now tested
+
+Reported as "I am struggling to see the copy". Measured, the cause was a hard
+failure, not a matter of taste:
+
+| class | on the new paper ground | |
+| --- | --- | --- |
+| `text-white` (17 occurrences, left from the dark theme) | **1.08:1** | invisible |
+| `text-slate-200` | 1.14:1 | fails badly |
+| `text-slate-300` (10) | 1.37:1 | fails badly |
+| `text-slate-400` (9) | 2.37:1 | fails badly |
+| `--ink-3` (my own label grey) | 2.63:1 | fails at 11px uppercase |
+
+I changed the ground from a dark gradient to paper and did not change the ink.
+Tailwind made that possible, which is the actual lesson: a utility like
+`text-slate-300` is an **absolute** colour, so moving `--paper` moved the
+background and not one piece of text. The same commit also shipped a label grey
+that failed at the size it is used.
+
+### Fixed by measurement, not by eye
+
+- `--ink-2` and `--ink-3` darkened until every text token clears its floor on both
+  the paper and a white card. `--ink` 16.8:1, `--ink-2` 7.2:1, `--ink-3` 5.5:1,
+  `--accent` 7.4:1, `--caution` 6.6:1, the modelled-data chip 6.4:1.
+- All 65 dark-theme class occurrences replaced with the token utilities. No
+  `text-white`, `text-slate-*`, `bg-slate-9*` or `bg-white/10` remains.
+
+### The durable answer to "what about Tailwind"
+
+We already use it — v4, CSS-first, with `@theme inline` surfacing `:root` tokens
+as `--color-*`. It is the right tool and it stays.
+
+What changes is the rule: **tokens are the only way colour is expressed.** That is
+what makes `text-ink-2` a semantic utility rather than a hex, and it is why a
+future theme change moves ink and ground together.
+
+### Now tested rather than trusted
+
+`tests/test_theme_contrast.py` resolves each token through the `@theme` mapping and
+asserts it clears its contrast floor on both surfaces, that the ink hierarchy is
+ordered, that `--paper` is actually light, and that the dark theme's ink classes
+appear nowhere in the markup. Sixteen assertions that fail the moment this
+regresses, which is the response to having shipped an unreadable page and called
+it verified.
+
+Tests 316 -> 324. Two failures on the first run were transient live-data reads
+against Planetary Computer; they pass on rerun.
+
+---
+
 ## 1.15.0 — The interface rebuilt as a document rather than a dashboard
 
 A design change with a rule behind it: the page should read like a survey

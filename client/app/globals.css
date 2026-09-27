@@ -18,13 +18,13 @@
   /* One light, two greys, one accent. Nothing else earns colour. */
   --paper: #f7f6f2;
   --ink: #14161a;
-  --ink-2: #5c6167;
-  --ink-3: #949aa1;
+  --ink-2: #4d5359;   /* 7.2:1 on paper */
+  --ink-3: #5f656c;   /* 5.5:1 on paper: the 11px uppercase label is the worst case */
   --rule: #d6d4cd;
   --rule-strong: #14161a;
   --accent: #0b4f9c;
   /* Modelled data is not a measurement, and it never looks like one. */
-  --caution: #8a5a00;
+  --caution: #7a4f00; /* 6.6:1 on paper */
   --caution-wash: #fbf1dc;
 
   --measure: 68ch;
