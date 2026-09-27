@@ -31,6 +31,49 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.13.0 — A visitor can submit an area; launch-readiness audit
+
+### The headline feature was unreachable from the UI
+
+A pre-launch walkthrough of exactly what a first-time visitor does — draw a box,
+press Analyse — found that `POST /rainfall/submit` had **zero references in the
+frontend**. The backend could queue an area and the API could report its state,
+and a user could do neither. The question the conservancy webinar asked five times
+had an endpoint and no button.
+
+The rainfall card now offers **"Process precipitation for this area"** on a
+missing series, shows a queued or queue-full state, and the submission is keyed by
+the cache key the backend already returned, so switching areas does not show
+another area's progress. The active geometry is now one `currentGeojson()` helper
+shared by analysis and submission, replacing a block of duplicated logic.
+
+Verified end to end against live ERA5 and the live bucket: analysis returns
+`not_computed` with a key, the button queues it, the worker has it `ready` in
+under a second, and a re-analysis returns `ok` with 195 months and a 628.8 mm
+annual normal.
+
+The not-computed card also stopped explaining a dead end. It said why no series
+existed and offered nothing to do about it; it now says no series has been
+processed for this boundary yet, and offers the action.
+
+### What else the audit found, and what is still open
+
+- **A modest draw can be refused.** A 0.1° × 0.1° box is a 123 km² bounding box
+  against a 100 km² synchronous cap, and gets `413` with a clear reason. Correct,
+  but the UI does not route the visitor to the uncapped rainfall path, which would
+  have served it. Left as a follow-up; the cap is measured, and raising it is a
+  deployment decision rather than a UI fix.
+- **Alerting is inert until a webhook is set.** Rules evaluate and episodes are
+  recorded, but nothing is delivered. One environment variable.
+- **`@radix-ui/*` packages are unused** after the component trim, still in
+  `package.json`.
+
+Not blockers, but worth knowing before a post drives traffic: an area over the
+cap is refused rather than partially served, and NDVI defaults to Landsat rather
+than Sentinel-2 because its cloud mask is the one that can be trusted.
+
+---
+
 ## 1.12.1 — Credential rotated, and the repository trimmed
 
 ### Credential rotated

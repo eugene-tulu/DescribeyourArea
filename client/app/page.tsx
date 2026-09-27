@@ -230,7 +230,23 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
-function DatasetResultCard({ dataset, summary }: { dataset: DatasetId; summary: Summary }) {
+interface SubmissionState {
+  state: string;
+  reason?: string | null;
+  cacheKey?: string;
+}
+
+function DatasetResultCard({
+  dataset,
+  summary,
+  submission,
+  onSubmit,
+}: {
+  dataset: DatasetId;
+  summary: Summary;
+  submission?: SubmissionState;
+  onSubmit?: () => void;
+}) {
   const option = DATASET_OPTIONS.find((item) => item.id === dataset);
   if (!option) return null;
 
@@ -284,12 +300,34 @@ function DatasetResultCard({ dataset, summary }: { dataset: DatasetId; summary: 
   if (dataset === 'rainfall') {
     const rain = summary.rainfall;
     if (!rain || rain.status === 'not_computed') {
+      // A missing series is the expected state for an area nobody has submitted
+      // yet, so it gets an action rather than an explanation alone.
+      const state = submission?.state;
+      const pending = state === 'pending' || state === 'running';
+      const rejected = state === 'rejected';
       return (
         <ResultCard
           title={option.label}
           description={option.description}
-          unavailable={rain?.message || 'No precomputed rainfall series for this exact study area.'}
-        />
+          unavailable={
+            pending
+              ? 'Queued. Precipitation is processed offline, usually within a few minutes.'
+              : rejected
+                ? submission?.reason || 'The submission queue is full. Try again shortly.'
+                : 'No series has been processed for this exact boundary yet.'
+          }
+        >
+          {!pending && onSubmit && (
+            <Button size="sm" variant="outline" onClick={onSubmit} className="mt-3">
+              {rejected ? 'Try again' : 'Process precipitation for this area'}
+            </Button>
+          )}
+          {pending && (
+            <p className="mt-3 text-xs text-slate-400">
+              Processing in the background. Reload the analysis to see the result.
+            </p>
+          )}
+        </ResultCard>
       );
     }
     const s = rain.summary || {};
@@ -351,7 +389,13 @@ export default function Home() {
    const [isSearching, setIsSearching] = useState(false);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
+  // The cache key the backend reported for this analysis, so a submission state
+  // can be matched to the area that produced it.
+  const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
    const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
+  // State of a request to have an area's precipitation processed. Keyed by the
+  // area, so switching areas does not show another area's progress.
+  const [submission, setSubmission] = useState<Record<string, SubmissionState>>({});
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
 
@@ -507,6 +551,62 @@ export default function Home() {
 
 
   // Send request to backend
+  // Preserve the source geometry whenever one was supplied. A bounding box is
+  // only a fallback for selections created by older map interactions.
+  function currentGeojson(): GeoJsonObject | undefined {
+    if (uploadedGeojson) return uploadedGeojson;
+    if (drawnFeatures?.features.length) return drawnFeatures;
+    if (!boundingBox) return undefined;
+    return {
+      type: "Feature",
+      geometry: {
+        type: "Polygon",
+        coordinates: [[
+          [boundingBox.west, boundingBox.south],
+          [boundingBox.east, boundingBox.south],
+          [boundingBox.east, boundingBox.north],
+          [boundingBox.west, boundingBox.north],
+          [boundingBox.west, boundingBox.south]
+        ]]
+      },
+      properties: {}
+    } as GeoJsonObject;
+  }
+
+  // Queue a precomputation for the current area. This is the path that makes
+  // "bring your own polygon" real: a drawn or uploaded boundary with no series
+  // can be queued without leaving the page.
+  async function submitForPreprocessing() {
+    const geojson = currentGeojson();
+    if (!geojson) return;
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    setIsLoading(true);
+    try {
+      const response = await fetch(`${backendUrl}/rainfall/submit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geojson }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.detail || 'Submission failed');
+      }
+      setSubmission((previous) => ({
+        ...previous,
+        [data.cache_key]: {
+          state: data.submission?.state || 'pending',
+          reason: data.submission?.reason,
+          cacheKey: data.cache_key,
+        },
+      }));
+    } catch (error) {
+      setResponse(error instanceof Error ? error.message : 'Submission failed');
+      setShowResults(true);
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   const handleAnalyze = async () => {
     if (!uploadedGeojson && !drawnFeatures?.features.length && !boundingBox) return;
     if (selectedDatasets.length === 0) {
@@ -527,29 +627,7 @@ export default function Home() {
       // Same-origin requests work through the reverse proxy in production and
       // through the Next.js rewrite in local Docker development.
       const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
-      let geojson: GeoJsonObject | undefined;
-      // Preserve the source geometry whenever one was supplied. A bounding box
-      // is only a fallback for selections created by older map interactions.
-      if (uploadedGeojson) {
-        geojson = uploadedGeojson;
-      } else if (drawnFeatures?.features.length) {
-        geojson = drawnFeatures;
-      } else if (boundingBox) {
-        geojson = {
-          type: "Feature",
-          geometry: {
-            type: "Polygon",
-            coordinates: [[
-              [boundingBox.west, boundingBox.south],
-              [boundingBox.east, boundingBox.south],
-              [boundingBox.east, boundingBox.north],
-              [boundingBox.west, boundingBox.north],
-              [boundingBox.west, boundingBox.south] // close polygon
-            ]]
-          },
-          properties: {}
-        } as GeoJsonObject;
-      }
+      const geojson = currentGeojson();
       if (!geojson) return;
 
       const params = new URLSearchParams({
@@ -570,6 +648,9 @@ export default function Home() {
       }
 
       const data = await response.json() as { summary?: Summary };
+      setActiveCacheKey(
+        (data.summary?.rainfall as { cache_key?: string } | undefined)?.cache_key ?? null
+      );
       const summary = data.summary || {};
       const result = summarizeData(summary);
       const ndviWarning = summary.ndvi?.warning;
@@ -858,7 +939,13 @@ export default function Home() {
                             {(analysisSummary.analysis?.datasets || selectedDatasets)
                               .filter(isDatasetId)
                               .map((dataset) => (
-                                <DatasetResultCard key={dataset} dataset={dataset} summary={analysisSummary} />
+                                <DatasetResultCard
+                                  key={dataset}
+                                  dataset={dataset}
+                                  summary={analysisSummary}
+                                  submission={activeCacheKey ? submission[activeCacheKey] : undefined}
+                                  onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
+                                />
                               ))}
                           </div>
                         </div>
