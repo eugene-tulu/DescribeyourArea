@@ -31,6 +31,80 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.15.0 — The interface rebuilt as a document rather than a dashboard
+
+A design change with a rule behind it: the page should read like a survey
+document, because that is what it is.
+
+### The basis
+
+**International Typographic Style, as a system.** Müller-Brockmann and Ruder built
+the visual language of Swiss cartography and scientific information out of a grid
+and a type hierarchy with no ornament. That is not decoration for this product; it
+is the honest form for measured values with stated uncertainty, arranged so a
+reader can check them.
+
+**Crouwel is the constraint behind it.** Two greys, one accent, one prose face, one
+figure face, one grid, written down once and applied without discussion. The
+invention appears in what you do with the constraint, and the page becomes
+coherent without anyone needing taste.
+
+**Ruder: hierarchy through position and rule weight, never through containers.**
+
+**Vignelli, against originality.** "A system, not a style." Do not redesign; make
+one system and apply it. Unfashionable, and correct for a small product.
+
+**Sutherland, taken literally.** Everyone claims to be excellent, so the claim is
+worthless. What we can claim, and can be checked, is narrower: *we tell you what
+kind of number this is, and we tell you when we do not know.* That is now the most
+distinctive thing on the page rather than a grey footnote.
+
+### What changed
+
+- **`globals.css` rewritten** around the system: paper, ink, two greys, one accent,
+  a caution colour reserved for modelled or unconfirmed figures, a 68-character
+  measure, and rules instead of boxes.
+- **Every figure is monospaced and tabular, everywhere, without exception.** The
+  single highest-value rule in the set: aligned digits cannot be misread
+  column-wise, and it reads as instrumentation rather than marketing.
+- **The card grid is gone.** One column divided by rules. A card grid reads as a
+  dashboard; this reads as a document.
+- **The evidence panel.** Each module states what kind of number it is, its source,
+  and its method, in the same monospace as the figure, so provenance reads as part
+  of the measurement instead of a disclaimer underneath it.
+- **"Working", disclosed.** Grid cells, pixels, scenes examined, valid-pixel
+  fraction, the resolution actually read against the one requested, the window,
+  the DOI. All of it was already computed and thrown away.
+- **The wait is described rather than decorated.** A submitted area shows its real
+  stages, timestamps and planned resolution and pixel count. Every one of those
+  fields existed; none was rendered. This is the same move as the evidence panel
+  applied to time.
+- **A 1/3/10/30-year window and a source picker** that says why `auto` chose what
+  it chose, plus a least-squares trend per year beside the mean.
+- The `ResultCard` and `Metric` components are deleted, along with the dark
+  gradient surface.
+
+### A stale limit, found by looking
+
+The help text still advertised a 10 km² vegetation limit, raised to 100 km² in
+1.11.0. It survived a release and a review because nothing rendered the page.
+It is now correct.
+
+### Honest limits of this verification
+
+`tsc`, `eslint` and a production build are clean, and the new components are
+confirmed present in the client bundle. **The results layout has not been seen in a
+browser** — there is no headless browser available in this environment, and the
+results branch only mounts after an analysis. The shell, the controls and the
+caveats were fetched and inspected; the module sections, the evidence line and the
+Working panel were verified by type-check, build and bundle inspection only. They
+should be looked at before anyone else is.
+
+Tests unchanged at 316; this was a frontend change with no backend behaviour
+touched.
+
+---
+
 ## 1.14.0 — A declared contract, a resolution policy, and analytics you can refuse
 
 The consolidated list. Four capabilities, all verified against live data.

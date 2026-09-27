@@ -46,6 +46,23 @@ interface AnalysisWarning {
   status?: string;
 }
 
+interface SubmissionState {
+  state: string;
+  reason?: string | null;
+  cacheKey?: string;
+}
+
+interface JobProgress {
+  state: string;
+  indicator: string;
+  submittedAt?: string | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  attempts?: number;
+  reason?: string | null;
+  months?: number | null;
+}
+
 type DatasetId = 'dem' | 'landcover' | 'ndvi' | 'rainfall';
 
 const DATASET_OPTIONS: Array<{
@@ -94,6 +111,8 @@ interface ModuleEvidence {
 interface DemStats {
   status: ModuleStatus;
   evidence?: ModuleEvidence;
+  valid_pixel_count?: number;
+  valid_pixel_fraction?: number;
   mean?: number;
   min?: number;
   max?: number;
@@ -146,6 +165,10 @@ interface LandcoverStats {
   classes?: Record<string, number>;
   dominant_class?: string;
   dominant_percentage?: number;
+  valid_pixel_count?: number;
+  // Declared explicitly: the index signature below would otherwise make this
+  // `unknown`, and the arithmetic in the working panel would not type-check.
+  valid_pixel_fraction?: number;
   error?: string;
   [key: string]: unknown;
 }
@@ -163,24 +186,33 @@ interface RainfallSummary {
   suspect_months?: string[];
 }
 
+interface RainfallClimatology {
+  standard?: string | null;
+  start?: string | null;
+  end?: string | null;
+  annual_mean_mm?: number | null;
+  monthly_mean_mm?: Record<string, number>;
+}
+
 interface RainfallResult {
   status: ModuleStatus;
   evidence?: ModuleEvidence;
-  indicator?: string;
-  source?: string;
-  doi?: string;
-  license?: string;
-  retrieved?: string;
-  resolution_km?: number;
-  grid_cells?: number;
-  processing_version?: string;
-  climatology?: {
-    standard: string;
-    annual_mean_mm: number | null;
-  };
+  label?: string | null;
+  indicator?: string | null;
+  source?: string | null;
+  doi?: string | null;
+  license?: string | null;
+  retrieved?: string | null;
+  resolution_km?: number | null;
+  grid_cells?: number | null;
+  processing_version?: string | null;
+  window?: { start?: string; end?: string } | null;
+  climatology?: RainfallClimatology | null;
+  suspect_months?: string[];
   series?: Array<{ month: string; precip_mm: number; normal_mm: number; anomaly_pct: number | null }>;
   summary?: RainfallSummary;
   message?: string;
+  reason?: string;
 }
 
 interface AnalysisMetadata {
@@ -243,60 +275,151 @@ function trendPerYear(series: Array<{ month: string; precip_mm: number }>): numb
   return den === 0 ? null : num / den;
 }
 
-function EvidenceLine({ evidence }: { evidence?: ModuleEvidence }) {
-  if (!evidence) return null;
-  const tone: Record<string, string> = {
-    observed: 'text-slate-400',
-    derived: 'text-slate-400',
-    modelled: 'text-amber-300/90',
-    unconfirmed: 'text-amber-300/90',
-  };
+function EvidenceLine({
+  evidence,
+  status,
+}: {
+  evidence?: ModuleEvidence;
+  status: ModuleStatus;
+}) {
+  if (!evidence && status === 'ok') return null;
+  const kind = evidence?.status;
   return (
-    <p className={`mt-2 text-xs ${tone[evidence.status] || 'text-slate-400'}`}>
-      <span className="font-medium">{evidence.status}</span>
-      {evidence.source ? ` · ${evidence.source}` : ''}
-      {evidence.note ? ` — ${evidence.note}` : ''}
+    <p className="fig mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
+      {kind && <span className={`status status-${kind}`}>{kind}</span>}
+      {evidence?.source && <span className="text-ink-2">{evidence.source}</span>}
+      {evidence?.note && <span className="text-ink-2">{evidence.note}</span>}
+      {status !== 'ok' && <span className="text-ink-3">{STATUS_COPY[status]}</span>}
     </p>
   );
 }
 
-function ResultCard({
-  title,
-  description,
-  children,
-  unavailable,
+const STATUS_COPY: Record<ModuleStatus, string> = {
+  ok: 'reported',
+  not_requested: 'not requested',
+  not_computed: 'not computed',
+  area_exceeded: 'area too large',
+  no_valid_pixels: 'no valid pixels',
+  unavailable: 'unavailable',
+  skipped: 'skipped',
+  error: 'error',
+  busy: 'busy',
+};
+
+function stamp(value?: string | null): string | null {
+  return value ? value.replace('T', ' ').slice(0, 19) : null;
+}
+
+/* Show your working, one section at a time. Everything here was already computed
+   and discarded: grid cells, pixels, scenes examined, valid-pixel fraction, and
+   the resolution actually read against the one requested. */
+function Working({
+  rows,
 }: {
-  title: string;
-  description: string;
-  children?: ReactNode;
-  unavailable?: string;
+  rows?: Array<[string, string | number | null | undefined]>;
 }) {
+  const present = (rows || []).filter(
+    ([, value]) => value !== null && value !== undefined && value !== '',
+  );
+  if (!present.length) return null;
   return (
-    <section className="rounded-lg border border-white/15 bg-slate-950/30 p-4" aria-label={title}>
-      <div className="mb-3">
-        <h3 className="font-semibold text-white">{title}</h3>
-        <p className="text-xs text-slate-400">{description}</p>
-      </div>
-      {unavailable ? (
-        <p className="text-sm text-slate-300">{unavailable}</p>
-      ) : children}
-    </section>
+    <details className="working">
+      <summary>Working</summary>
+      <dl className="working-grid">
+        {present.map(([term, value]) => (
+          <div key={term} style={{ display: 'contents' }}>
+            <dt>{term}</dt>
+            <dd>{value}</dd>
+          </div>
+        ))}
+      </dl>
+    </details>
   );
 }
 
-function Metric({ label, value }: { label: string; value: string }) {
+/* A wait, described. The stages the worker actually goes through, and the
+   conditions it will run under, instead of a spinner over a pending. */
+function JobProgressLine({
+  progress,
+  planned,
+  onDismiss,
+}: {
+  progress: JobProgress;
+  planned?: { resolution_m?: number; reason?: string; pixels_analysed?: number } | null;
+  onDismiss: () => void;
+}) {
+  const stage: Record<string, string> = {
+    pending: 'Queued, waiting for a worker.',
+    running: 'Being computed now.',
+    ready: 'Done.',
+    failed: 'Could not be computed.',
+  };
+  const active = progress.state === 'pending' || progress.state === 'running';
   return (
-    <div className="rounded-md bg-white/5 px-3 py-2">
-      <dt className="text-xs text-slate-400">{label}</dt>
-      <dd className="mt-0.5 text-sm font-medium text-slate-100">{value}</dd>
+    <div className="rule-t mt-4 pt-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <p className="fig text-sm">
+          <span className={`status ${active ? 'status-modelled' : 'status-observed'}`}>
+            {progress.state}
+          </span>{' '}
+          <span className="text-ink">{stage[progress.state] || progress.state}</span>{' '}
+          <span className="text-ink-2">{progress.indicator}</span>
+        </p>
+        {!active && (
+          <button type="button" onClick={onDismiss} className="label hover:text-ink">
+            dismiss
+          </button>
+        )}
+      </div>
+      {planned?.reason && <p className="fig mt-1 text-xs text-ink-2">{planned.reason}</p>}
+      <Working
+        rows={[
+          ['resolution', planned?.resolution_m ? `${planned.resolution_m} m` : null],
+          ['pixels', planned?.pixels_analysed?.toLocaleString() ?? null],
+          ['submitted', stamp(progress.submittedAt)],
+          ['started', stamp(progress.startedAt)],
+          ['finished', stamp(progress.finishedAt)],
+          ['attempts', progress.attempts ?? null],
+          ['months', progress.months ?? null],
+          ['reason', progress.reason],
+        ]}
+      />
     </div>
   );
 }
 
-interface SubmissionState {
-  state: string;
-  reason?: string | null;
-  cacheKey?: string;
+
+
+/* One module, one section. Divided by a rule rather than enclosed in a card,
+   because a card grid reads as a dashboard and this is a survey document. */
+function ModuleBlock({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
+  return (
+    <section className="rule-t py-4">
+      <div className="flex items-baseline justify-between gap-4">
+        <h3 className="headline">{title}</h3>
+        <p className="label">{description}</p>
+      </div>
+      <div className="mt-3">{children}</div>
+    </section>
+  );
+}
+
+function Headline({ value, caption }: { value: string; caption: string }) {
+  return (
+    <p className="fig mb-3">
+      <span className="text-2xl leading-none">{value}</span>{' '}
+      <span className="label">{caption}</span>
+    </p>
+  );
+}
+
+function Figure({ term, value }: { term: string; value: string }) {
+  return (
+    <div className="flex items-baseline justify-between gap-4 py-1">
+      <dt className="text-sm text-ink-2">{term}</dt>
+      <dd className="fig text-sm">{value}</dd>
+    </div>
+  );
 }
 
 function DatasetResultCard({
@@ -315,136 +438,198 @@ function DatasetResultCard({
 
   if (dataset === 'dem') {
     const dem = summary.dem;
-    if (!dem || dem.error) {
-      return <ResultCard title={option.label} description={option.description} unavailable={dem?.error || 'No elevation data was returned for this area.'} />;
+    if (!dem || dem.status !== 'ok') {
+      return (
+        <ModuleBlock title={option.label} description={option.description}>
+          <EvidenceLine evidence={dem?.evidence} status={dem?.status || 'not_requested'} />
+        </ModuleBlock>
+      );
     }
+    const demCoverage: number | null = dem.valid_pixel_fraction ?? null;
     return (
-      <ResultCard title={option.label} description={option.description}>
-        <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Mean elevation" value={`${formatNumber(dem.mean, 0)} m`} />
-          <Metric label="Elevation range" value={`${formatNumber(dem.elevation_range_m, 0)} m`} />
-          <Metric label="Lowest point" value={`${formatNumber(dem.min, 0)} m`} />
-          <Metric label="Highest point" value={`${formatNumber(dem.max, 0)} m`} />
+      <ModuleBlock title={option.label} description={option.description}>
+        <Headline value={`${formatNumber(dem.elevation_range_m ?? 0, 0)} m`} caption="elevation range" />
+        <dl className="rows">
+          <Figure term="mean elevation" value={`${formatNumber(dem.mean, 0)} m`} />
+          <Figure term="lowest" value={dem.min == null ? '—' : `${formatNumber(dem.min, 0)} m`} />
+          <Figure term="highest" value={dem.max == null ? '—' : `${formatNumber(dem.max, 0)} m`} />
+          <Figure term="variation" value={dem.std == null ? '—' : `σ ${formatNumber(dem.std, 0)} m`} />
+          <Figure term="terrain" value={dem.terrain_type || '—'} />
         </dl>
-        {dem.terrain_type && <p className="mt-3 text-sm text-slate-300">Terrain: {dem.terrain_type}</p>}
-      </ResultCard>
+        <EvidenceLine evidence={dem.evidence} status={dem.status} />
+        <Working
+          rows={[
+            ['valid pixels', dem.valid_pixel_count?.toLocaleString()],
+            ['coverage', demCoverage == null ? null : `${formatNumber(demCoverage * 100, 1)}%`],
+            ['source product', 'NASADEM 30 m'],
+          ]}
+        />
+      </ModuleBlock>
     );
   }
 
   if (dataset === 'landcover') {
     const landcover = summary.landcover;
-    if (!landcover || landcover.error) {
-      return <ResultCard title={option.label} description={option.description} unavailable={landcover?.error || 'No land-cover data was returned for this area.'} />;
+    const entries: Array<[string, number]> = landcover
+      ? (Object.entries(landcover.classes || {}) as Array<[string, number]>)
+      : [];
+    if (!landcover || landcover.status !== 'ok' || entries.length === 0) {
+      return (
+        <ModuleBlock title={option.label} description={option.description}>
+          <EvidenceLine evidence={landcover?.evidence} status={landcover?.status || 'not_requested'} />
+        </ModuleBlock>
+      );
     }
-    const entries = landcoverEntries(landcover);
-    if (entries.length === 0) {
-      return <ResultCard title={option.label} description={option.description} unavailable="No land-cover classes were returned for this area." />;
-    }
+    const coverage: number | null = landcover.valid_pixel_fraction ?? null;
+    const dominant = entries.reduce((a, b) => (a[1] >= b[1] ? a : b)) as [string, number];
     return (
-      <ResultCard title={option.label} description={option.description}>
-        {landcover.dominant_class && (
-          <p className="mb-3 text-sm text-slate-200">
-            Dominant: <span className="font-medium">{landcover.dominant_class}</span>
-            {typeof landcover.dominant_percentage === 'number' && ` (${formatNumber(landcover.dominant_percentage, 1)}%)`}
-          </p>
-        )}
-        <dl className="space-y-2">
+      <ModuleBlock title={option.label} description={option.description}>
+        <Headline
+          value={`${formatNumber(dominant[1], 1)}%`}
+          caption={LANDCOVER_LABELS[dominant[0]] || dominant[0]}
+        />
+        <dl className="rows">
           {entries.map(([code, percentage]) => (
-            <div key={code} className="flex items-center justify-between gap-3 text-sm">
-              <dt className="text-slate-300">{LANDCOVER_LABELS[code] || code}</dt>
-              <dd className="font-medium text-slate-100">{formatNumber(percentage, 1)}%</dd>
-            </div>
+            <Figure key={code} term={LANDCOVER_LABELS[code] || code} value={`${formatNumber(percentage, 1)}%`} />
           ))}
         </dl>
-        <EvidenceLine evidence={landcover.evidence} />
-      </ResultCard>
+        <EvidenceLine evidence={landcover.evidence} status={landcover.status} />
+        <Working
+          rows={[
+            ['classes', entries.length],
+            ['valid pixels', landcover.valid_pixel_count?.toLocaleString()],
+            ['coverage', coverage == null ? null : `${formatNumber(coverage * 100, 1)}%`],
+            ['source product', 'ESA WorldCover 10 m'],
+          ]}
+        />
+      </ModuleBlock>
     );
   }
 
   if (dataset === 'rainfall') {
     const rain = summary.rainfall;
-    if (!rain || rain.status === 'not_computed') {
-      // A missing series is the expected state for an area nobody has submitted
-      // yet, so it gets an action rather than an explanation alone.
+    if (!rain || rain.status !== 'ok') {
       const state = submission?.state;
       const pending = state === 'pending' || state === 'running';
       const rejected = state === 'rejected';
       return (
-        <ResultCard
-          title={option.label}
-          description={option.description}
-          unavailable={
-            pending
+        <ModuleBlock title={option.label} description={option.description}>
+          <p className="fig text-sm text-ink-2">
+            {pending
               ? 'Queued. Precipitation is processed offline, usually within a few minutes.'
               : rejected
                 ? submission?.reason || 'The submission queue is full. Try again shortly.'
-                : 'No series has been processed for this exact boundary yet.'
-          }
-        >
+                : 'No series has been processed for this exact boundary yet.'}
+          </p>
           {!pending && onSubmit && (
-            <Button size="sm" variant="outline" onClick={onSubmit} className="mt-3">
+            <button
+              type="button"
+              onClick={onSubmit}
+              className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper"
+            >
               {rejected ? 'Try again' : 'Process precipitation for this area'}
-            </Button>
+            </button>
           )}
-          {pending && (
-            <p className="mt-3 text-xs text-slate-400">
-              Processing in the background. Reload the analysis to see the result.
-            </p>
-          )}
-        </ResultCard>
+          <EvidenceLine evidence={rain?.evidence} status={rain?.status || 'not_computed'} />
+        </ModuleBlock>
       );
     }
     const s = rain.summary || {};
     const t = s.trailing_12m;
+    const trend = trendPerYear(rain.series || []);
+    const suspect = rain.suspect_months || [];
     return (
-      <ResultCard title={option.label} description={option.description}>
-        <dl className="grid grid-cols-2 gap-2">
-          <Metric label="Last 12 months" value={t ? `${formatNumber(t.precip_mm, 0)} mm` : '—'} />
-          <Metric
-            label="vs 1991–2020 normal"
-            value={t?.anomaly_pct == null ? '—' : `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}%`}
+      <ModuleBlock title={option.label} description={option.description}>
+        <Headline
+          value={
+            t?.anomaly_pct == null
+              ? '—'
+              : `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}%`
+          }
+          caption="last 12 months vs 1991–2020 normal"
+        />
+        <dl className="rows">
+          <Figure term="last 12 months" value={t ? `${formatNumber(t.precip_mm, 0)} mm` : '—'} />
+          <Figure
+            term="annual normal"
+            value={
+              rain.climatology?.annual_mean_mm == null
+                ? '—'
+                : `${formatNumber(rain.climatology.annual_mean_mm, 0)} mm`
+            }
           />
-          <Metric label="Annual normal" value={rain.climatology?.annual_mean_mm == null ? '—' : `${formatNumber(rain.climatology.annual_mean_mm, 0)} mm`} />
-          <Metric label="Driest month" value={s.driest_month ? `${s.driest_month.month} · ${formatNumber(s.driest_month.precip_mm, 0)} mm` : '—'} />
-          <Metric
-            label="Trend per year"
-            value={(() => {
-              const trend = trendPerYear(rain.series || []);
-              if (trend === null) return '—';
-              return `${trend > 0 ? '+' : ''}${formatNumber(trend, 1)} mm`;
-            })()}
+          <Figure
+            term="trend per year"
+            value={trend == null ? '—' : `${trend > 0 ? '+' : ''}${formatNumber(trend, 1)} mm`}
+          />
+          <Figure
+            term="driest month"
+            value={s.driest_month ? `${s.driest_month.month} · ${formatNumber(s.driest_month.precip_mm, 0)} mm` : '—'}
+          />
+          <Figure
+            term="wettest month"
+            value={s.wettest_month ? `${s.wettest_month.month} · ${formatNumber(s.wettest_month.precip_mm, 0)} mm` : '—'}
           />
         </dl>
-        <EvidenceLine evidence={rain.evidence} />
-        {s.suspect_months && s.suspect_months.length > 0 && (
-          <p className="mt-3 text-xs text-amber-300">
-            {s.suspect_months.length} month(s) reported near-zero totals and are worth review.
+        {suspect.length > 0 && (
+          <p className="fig mt-2 text-xs text-caution">
+            {suspect.length} month{suspect.length === 1 ? '' : 's'} reported near-zero totals
+            and are worth review: {suspect.slice(0, 3).join(', ')}
+            {suspect.length > 3 ? ' …' : ''}
           </p>
         )}
-        <p className="mt-3 text-xs text-slate-400">
-          {rain.source} · {rain.resolution_km} km grid · {rain.grid_cells} cell{rain.grid_cells === 1 ? '' : 's'} ·{' '}
-          retrieved {rain.retrieved}
-        </p>
-      </ResultCard>
+        <EvidenceLine evidence={rain.evidence} status={rain.status} />
+        <Working
+          rows={[
+            ['area', rain.label],
+            ['grid', rain.resolution_km == null ? null : `${rain.resolution_km} km`],
+            ['grid cells', rain.grid_cells],
+            ['months', (rain.series || []).length],
+            ['climatology', rain.climatology?.standard],
+            ['doi', rain.evidence?.doi],
+            ['licence', rain.evidence?.license],
+            ['retrieved', rain.evidence?.retrieved],
+            ['series ends', rain.window?.end],
+          ]}
+        />
+      </ModuleBlock>
     );
   }
 
   const ndvi = summary.ndvi;
-  if (!ndvi || ndvi.status === 'skipped' || ndvi.status === 'unavailable') {
-    return <ResultCard title={option.label} description={option.description} unavailable={ndvi?.warning || 'No recent NDVI result was returned for this area.'} />;
+  if (!ndvi || ndvi.status !== 'ok') {
+    return (
+      <ModuleBlock title={option.label} description={option.description}>
+        <EvidenceLine evidence={ndvi?.evidence} status={ndvi?.status || 'not_requested'} />
+        {ndvi?.warning && <p className="fig mt-2 text-xs text-ink-2">{ndvi.warning}</p>}
+      </ModuleBlock>
+    );
   }
+  const ndviCoverage: number | null = ndvi.valid_pixel_fraction ?? null;
   return (
-    <ResultCard title={option.label} description={option.description}>
-      <dl className="grid grid-cols-2 gap-2">
-        <Metric label="Median composite mean" value={formatNumber(ndvi.mean, 2)} />
-        <Metric label="Middle 50%" value={`${formatNumber(ndvi.p25, 2)}–${formatNumber(ndvi.p75, 2)}`} />
-        <Metric label="Value range" value={`${formatNumber(ndvi.min, 2)}–${formatNumber(ndvi.max, 2)}`} />
-        <Metric label="Scenes used" value={formatNumber(ndvi.scene_count, 0)} />
+    <ModuleBlock title={option.label} description={option.description}>
+      <Headline value={formatNumber(ndvi.mean ?? 0, 3)} caption="median composite NDVI" />
+      <dl className="rows">
+        <Figure term="middle 50%" value={`${formatNumber(ndvi.p25 ?? 0, 3)} – ${formatNumber(ndvi.p75 ?? 0, 3)}`} />
+        <Figure term="range" value={`${formatNumber(ndvi.min ?? 0, 3)} – ${formatNumber(ndvi.max ?? 0, 3)}`} />
+        <Figure term="scenes" value={ndvi.scene_count == null ? '—' : `${ndvi.scene_count}`} />
+        <Figure term="grid" value={ndvi.resolution_m == null ? '—' : `${ndvi.resolution_m} m`} />
       </dl>
-      <p className="mt-3 text-xs text-slate-400">
-        {ndvi.source || 'Sentinel-2'}{ndvi.resolution_m ? ` · ${ndvi.resolution_m} m` : ''}
-      </p>
-    </ResultCard>
+      <EvidenceLine evidence={ndvi.evidence} status={ndvi.status} />
+      <Working
+        rows={[
+          ['source', ndvi.sensor?.label],
+          ['collection', ndvi.sensor?.collection],
+          ['cloud mask', ndvi.sensor?.cloud_mask],
+          ['why this source', ndvi.sensor_reason],
+          ['valid pixels', ndvi.valid_pixel_count?.toLocaleString()],
+          ['coverage', ndviCoverage == null ? null : `${formatNumber(ndviCoverage * 100, 1)}%`],
+          ['scenes examined', ndvi.scenes_examined],
+          ['window', ndvi.window?.start && ndvi.window?.end ? `${ndvi.window.start} to ${ndvi.window.end}` : null],
+          ['scene dates', (ndvi.scene_dates || []).slice(0, 2).join(', ')],
+        ]}
+      />
+    </ModuleBlock>
   );
 }
 
@@ -473,6 +658,12 @@ export default function Home() {
   // State of a request to have an area's precipitation processed. Keyed by the
   // area, so switching areas does not show another area's progress.
   const [submission, setSubmission] = useState<Record<string, SubmissionState>>({});
+  // Progress for a queued area. A spinner is a decorated wait; this shows the
+  // conditions the work happens under, which we already compute and discard.
+  const [progress, setProgress] = useState<JobProgress | null>(null);
+  const [planned, setPlanned] = useState<
+    { resolution_m?: number; reason?: string; pixels_analysed?: number } | null
+  >(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
 
@@ -640,6 +831,43 @@ export default function Home() {
     return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01`;
   }
 
+  // Poll a queued area and describe what the worker is actually doing. The job
+  // record already holds the timestamps, the indicator and the reason; all that
+  // was missing was showing it.
+  async function pollSubmission(cacheKey: string, indicator: string) {
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      let data: { submission?: Record<string, unknown> } = {};
+      try {
+        const response = await fetch(
+          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}`,
+        );
+        if (response.ok) data = await response.json();
+      } catch {
+        /* tolerate a transient failure rather than abandoning the job */
+      }
+      const submission = (data.submission || {}) as Record<string, unknown>;
+      const state = String(submission.state || 'pending');
+      setProgress({
+        state,
+        indicator,
+        submittedAt: (submission.submitted_at as string) ?? null,
+        startedAt: (submission.started_at as string) ?? null,
+        finishedAt: (submission.finished_at as string) ?? null,
+        attempts: (submission.attempts as number) ?? 0,
+        reason: (submission.reason as string) ?? null,
+        months: (submission.months as number) ?? null,
+      });
+      if (state === 'ready' || state === 'failed' || state === 'not_submitted') {
+        if (state === 'ready') {
+          setSubmission((previous) => ({ ...previous, [cacheKey]: { state, cacheKey } }));
+        }
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+
   // A link that reproduces this exact analysis, so a result can be sent to a
   // colleague instead of described. The area has to travel somehow; encoding the
   // drawn geometry is smaller than uploading a file.
@@ -700,6 +928,7 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data?.detail || 'Submission failed');
       }
+      setPlanned(data.planned || null);
       setSubmission((previous) => ({
         ...previous,
         [data.cache_key]: {
@@ -708,6 +937,11 @@ export default function Home() {
           cacheKey: data.cache_key,
         },
       }));
+      if (data.submission?.state === 'ready') {
+        setProgress(null);
+      } else {
+        void pollSubmission(data.cache_key, data.indicator || 'rainfall');
+      }
     } catch (error) {
       setResponse(error instanceof Error ? error.message : 'Submission failed');
       setShowResults(true);
@@ -781,7 +1015,7 @@ export default function Home() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-blue-900 to-slate-800">
+    <div className="min-h-screen bg-paper text-ink">
       <div className="container mx-auto px-4 py-8">
         {/* Header */}
         <div className="text-center mb-8">
@@ -801,7 +1035,7 @@ export default function Home() {
         <Alert className="mb-6 bg-amber-50 border-amber-200 max-w-4xl mx-auto">
           <Satellite className="h-4 w-4 text-amber-600" />
           <AlertDescription className="text-amber-800">
-            <strong>Analysis limits:</strong> Keep the study-area bounding box within 100 km². Recent vegetation analysis is available for bounding boxes up to 10 km².
+            <strong>Analysis limits:</strong> Keep the study-area bounding box within 100 km². Larger areas can be processed offline; the worker reads them at a coarser resolution and says which.
           </AlertDescription>
         </Alert>
 
@@ -868,7 +1102,7 @@ export default function Home() {
                 </div>
                 <div className="flex items-start">
                   <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">2</div>
-                  <p className="text-sm">Upload a GeoJSON file to define your study area or if none available, use the drawing tool</p>
+                  <p className="text-sm">Upload a GeoJSON file, or draw the area yourself</p>
                 </div>
                 <div className="flex items-start">
                   <div className="w-6 h-6 rounded-full bg-blue-500 text-white text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">3</div>
@@ -1108,7 +1342,14 @@ export default function Home() {
                               </ul>
                             </div>
                           )}
-                          <div className="grid gap-4 md:grid-cols-2">
+                          <div className="measure">
+                            {progress && (
+                              <JobProgressLine
+                                progress={progress}
+                                planned={planned}
+                                onDismiss={() => setProgress(null)}
+                              />
+                            )}
                             {(analysisSummary.analysis?.datasets || selectedDatasets)
                               .filter(isDatasetId)
                               .map((dataset) => (

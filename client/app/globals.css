@@ -1,31 +1,171 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Design basis: International Typographic Style, as a system rather than a skin.
+
+   Müller-Brockmann and Ruder built the visual language of Swiss cartography and
+   scientific information out of a grid and a type hierarchy, with no ornament. That
+   is not a decorative choice for this product: it is the honest form for measured
+   values with stated uncertainty, arranged so a reader can check them.
+
+   Crouwel is the constraint behind it. Constrain the means — two greys, one
+   accent, one prose face, one figure face — and the invention appears in what you
+   do with the constraint. Everything below is deliberately non-negotiable so the
+   layout is a consequence of the rules rather than a series of decisions.
+   --------------------------------------------------------------------------- */
+
 :root {
-  --foreground-rgb: 0, 0, 0;
-  --background-start-rgb: 214, 219, 220;
-  --background-end-rgb: 255, 255, 255;
-  --font-geist-sans: Arial, Helvetica, sans-serif;
-  --font-geist-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  --font-inter: 'Inter', sans-serif;
-  --font-mono: 'JetBrains Mono', monospace;
+  /* One light, two greys, one accent. Nothing else earns colour. */
+  --paper: #f7f6f2;
+  --ink: #14161a;
+  --ink-2: #5c6167;
+  --ink-3: #949aa1;
+  --rule: #d6d4cd;
+  --rule-strong: #14161a;
+  --accent: #0b4f9c;
+  /* Modelled data is not a measurement, and it never looks like one. */
+  --caution: #8a5a00;
+  --caution-wash: #fbf1dc;
+
+  --measure: 68ch;
+  --gap: 1.5rem;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-rule: var(--rule);
+  --color-accent: var(--accent);
+  --color-caution: var(--caution);
+  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  border-color: var(--rule);
+}
+
+html {
+  background: var(--paper);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+
+/* Every figure is monospaced and tabular, everywhere, without exception.
+   Vertically aligned digits cannot be misread column-wise, and it reads as
+   instrumentation rather than marketing. This is the single highest-value rule
+   in the whole system. */
+.fig,
+.fig * {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1, "zero" 1;
+  letter-spacing: -0.01em;
+}
+
+/* The measure: a column wide enough to read and narrow enough to scan. */
+.measure {
+  max-width: var(--measure);
+}
+
+/* Section division is a rule, never a container. */
+.rule-t {
+  border-top: 1px solid var(--rule);
+}
+.rule-b {
+  border-bottom: 1px solid var(--rule);
+}
+.rule-strong-t {
+  border-top: 2px solid var(--rule-strong);
+}
+
+/* Labels do the work that badges and pills would otherwise do. */
+.label {
+  font-size: 0.6875rem;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  font-family: var(--font-sans);
+  font-weight: 500;
+}
+
+.headline {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* The distinct bit: what kind of number this is, set in the same face as the
+   number so the source reads as part of the measurement, not as a disclaimer. */
+.status {
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+  border: 1px solid currentColor;
+  padding: 0 0.3em;
+  white-space: nowrap;
+}
+.status-observed { color: var(--ink-2); }
+.status-derived { color: var(--ink-2); }
+.status-modelled { color: var(--caution); background: var(--caution-wash); }
+.status-unconfirmed { color: var(--caution); background: var(--caution-wash); }
+
+/* Progressive disclosure for the working, opened one section at a time. */
+details.working > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+  padding: 0.4rem 0;
+  border-top: 1px solid var(--rule);
+  user-select: none;
+}
+details.working > summary::-webkit-details-marker { display: none; }
+details.working > summary::before {
+  content: "+";
+  display: inline-block;
+  width: 1.1em;
+  font-family: var(--font-mono);
+  color: var(--ink-3);
+}
+details.working[open] > summary::before { content: "\2212"; }
+details.working > summary:hover { color: var(--ink); }
+details.working > *:not(summary) { padding-top: 0.5rem; }
+
+.working-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.3rem 1.25rem;
+  font-size: 0.75rem;
+  align-items: baseline;
+}
+.working-grid dt { color: var(--ink-3); }
+.working-grid dd { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* Hairlines between table-like rows instead of boxes around them. */
+.rows > * + * {
+  border-top: 1px solid var(--rule);
+}
+
+.link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-thickness: 1px;
+}
+.link:hover { text-decoration-thickness: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
