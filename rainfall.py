@@ -530,6 +530,7 @@ def describe(rows: list[dict[str, Any]]) -> dict[str, Any]:
     dry = min(rows, key=lambda r: r["precip_mm"])
     return {
         "suspect_months": [r["month"] for r in rows if r.get("suspect")],
+        "recent_3m": rows[-3:],
         "latest_month": latest["month"],
         "latest_precip_mm": latest["precip_mm"],
         "latest_anomaly_pct": latest["anomaly_pct"],
@@ -595,6 +596,7 @@ def compute_series(
     start: str = "2015-01-01",
     end: Optional[str] = None,
     source=None,
+    label: Optional[str] = None,
 ) -> dict:
     """Compute the monthly series, climatology and anomaly for a study area.
 
@@ -635,6 +637,9 @@ def compute_series(
     return {
         "processing_version": RAINFALL_PROCESSING_VERSION,
         "indicator": "monthly_precipitation",
+        # A notification has to be able to name the area it is about, and the
+        # geometry is deliberately not stored, so the label travels with the series.
+        "label": label,
         "source": ERA5_SOURCE,
         "doi": ERA5_DOI,
         "citation": ERA5_CITATION,
@@ -664,6 +669,7 @@ def build_and_cache(
     start: str = "2015-01-01",
     source=None,
     upload: bool = False,
+    label: Optional[str] = None,
     **kwargs,
 ) -> dict:
     """Compute and store a series, returning the cached payload.
@@ -676,7 +682,7 @@ def build_and_cache(
     bool, which only fails on the upload path.
     """
     key = geometry_hash(geojson_geom)
-    payload = compute_series(geojson_geom, start=start, source=source, **kwargs)
+    payload = compute_series(geojson_geom, start=start, source=source, label=label, **kwargs)
     write_cache(key, payload)
     if upload:
         publish(key)

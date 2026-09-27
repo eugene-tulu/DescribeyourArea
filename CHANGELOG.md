@@ -31,6 +31,94 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.12.0 — Worker supervision and alerting
+
+### Supervision
+
+A `worker` service runs `python -m worker`, a supervised loop around the existing
+queue: it drains pending jobs, sleeps, and sweeps alerts. Three things make it
+more than a `while True`:
+
+- **An `flock` on the shared volume**, so a second worker exits rather than
+  duplicating ERA5 reads. `flock` rather than a lock file, because the kernel
+  releases it when the process dies and a container restart cannot leave a stale
+  lock wedging the queue.
+- **Exit after three consecutive sweep failures**, so a worker that cannot do its
+  job is restarted rather than spinning quietly. A queue that looks healthy while
+  nothing is computed is worse than a visible crash. A single failure, or a bad
+  area, does not trip it.
+- **A shared volume.** The cache lived in the image filesystem, so a separate
+  worker would have written series the backend never sees. `rainfall-cache` is now
+  a named volume mounted into both. The frontend does not mount it, and the worker
+  does not run the portfolio pull, which the backend owns.
+
+### Alerting
+
+`alerts.py` re-checks the precomputed series on every sweep and notifies on a
+threshold crossing. Three shipped rules against each calendar month's 1991-2020
+normal, so a percentage means the same thing in a wet and a dry month: a
+12-month anomaly at or beyond −40% (severe drought), −20% (drought watch), and
++40% (flood watch).
+
+Two properties matter more than the thresholds:
+
+- **Once per episode.** State is keyed by area and rule, so a dry season produces
+  one message rather than one an hour for months. **Recoveries are announced too**,
+  because a notification that only ever says "bad" teaches people to ignore it.
+- **Self-describing.** Every message carries the value, the threshold, the window,
+  the source and its DOI, because the recipient has to defend the number to
+  somebody.
+
+`evaluate_and_notify` returns what was **delivered**, not what was attempted, so
+"what was sent" is a fact rather than a claim. Episodes are persisted even when
+nothing was delivered, so configuring a webhook later does not re-announce every
+open alert. A webhook that is down prints a line and does not stop the sweep.
+Delivery is one generic POST, which covers Slack, Discord and anything else.
+
+Series now carry a `label` and a `recent_3m` window, so a notification can name
+its area and the three-month metric works.
+
+Verified against the live portfolio: **4 of 21 conservancies currently in drought
+watch** — Melako −37.7%, Biliqo Bulesa −34.7%, Sera −24.8%, Kalepo −24.0% — with
+4 episodes recorded and nothing delivered, because no webhook is configured.
+
+### Two things I got wrong, both from testing against reality
+
+**I published a test polygon to the live bucket.** Verifying the submit loop
+earlier, the autorun computed a throwaway area and uploaded it. I dropped the
+local job record and never deleted the object, so a test artefact sat in
+production storage until the alert sweep counted 22 series where 21 were
+expected. Removed.
+
+Because that had already happened once with orphaned pre-repair objects, the sync
+tool gained `--prune`, which reconciles the bucket against the areas a GeoJSON
+accounts for. It lists by default and only deletes with `--yes`. The bucket now
+matches the expected 21 exactly.
+
+**A broad `except` hid a code fault as bad data.** `load_areas` still referenced
+the two constants removed in 1.11.0, so every area raised `NameError` and printed
+as `INVALID` — twenty-one identical lines that read like a data problem. It now
+catches `HTTPException` separately, reports an unexpected exception with its type
+as `ERROR`, and uses the current single payload cap with the vertex check waived.
+
+### Also removed by a test
+
+The `docker compose config` output used while verifying the volume **printed the
+Spaces access key and secret in plaintext**. It is in the scrollback of that shell.
+Rotating it is cheap; leaving a live key in a terminal transcript is not something
+to wave through.
+
+### Tests: 263 -> 288
+
+25 new: lock exclusivity and release, a worker that stops on repeated failure and
+survives one blip, sweeps draining the queue, rule evaluation with evidence
+attached, a breach announced once, recovery announced, a second episode announced
+again, state surviving a process boundary and a corrupt file, an unconfigured
+webhook recording the episode without announcing, a delivery failure losing
+neither the sweep nor the state, and the webhook payload carrying its evidence.
+
+---
+
 ## 1.11.0 — Self-service submission, and the cap consolidation
 
 ### Self-service submission

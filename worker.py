@@ -1,0 +1,168 @@
+"""A supervised loop around :func:`jobs.run_pending`.
+
+Supervision here means three small things rather than a process manager:
+
+- **A lock**, so a second worker waits instead of duplicating ERA5 reads. Taken
+  with ``flock`` on a shared volume, so a crashed holder releases it and a
+  container restart cannot leave a stale lock wedging the queue.
+- **A poll loop** that drains the queue, then sleeps, so a submission made
+  between sweeps is picked up without anything having to notice it.
+- **An exit on repeated failure**, so a worker that cannot do its job restarts
+  rather than spinning quietly forever. A queue that appears healthy while
+  nothing is computed is worse than a visible crash.
+
+``RainfallJobError`` is raised for a per-area failure, which is recorded on the
+job; only an environment-level failure escapes and trips the restart.
+"""
+
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import time
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Callable, Optional
+
+import jobs
+import rainfall
+
+
+def lock_path() -> Path:
+    return rainfall.cache_dir() / "worker.lock"
+
+
+@contextmanager
+def worker_lock(blocking: bool = False):
+    """Hold an exclusive lock on the worker.
+
+    ``flock`` rather than an O_EXCL lock file, because the kernel releases it when
+    the process dies. A lock file left behind by a crash would need a janitor, and
+    a queue nobody can process is the one failure mode worth engineering against.
+    """
+    path = lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "w")
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        except BlockingIOError:
+            handle.close()
+            yield False
+            return
+        handle.seek(0)
+        handle.truncate()
+        handle.write(json.dumps({"pid": os.getpid(), "since": time.time()}))
+        handle.flush()
+        try:
+            yield True
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        if not handle.closed:
+            handle.close()
+
+
+def sweep(
+    *,
+    limit: int = 5,
+    publish: bool = True,
+    on_alert: Optional[Callable[[list], None]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """One pass: compute whatever is pending, then check for alerts.
+
+    Alerts are evaluated after the queue drains so a freshly computed series is
+    checked immediately rather than waiting for the next sweep.
+    """
+    outcome = jobs.run_pending(limit=limit, publish=publish, progress=progress)
+    outcome["alerts"] = 0
+    if on_alert is not None:
+        sent = on_alert(ready_keys_since())
+        outcome["alerts"] = len(sent)
+    return outcome
+
+
+def ready_keys_since() -> list[str]:
+    """Areas that have a series, newest first."""
+    keys = []
+    directory = rainfall.cache_dir()
+    if not directory.exists():
+        return keys
+    for path in directory.glob("*.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if payload.get("indicator") == "monthly_precipitation":
+            keys.append(path.stem)
+    return keys
+
+
+def run_forever(
+    *,
+    interval: float = 60.0,
+    limit: int = 5,
+    publish: bool = True,
+    max_consecutive_idle_failures: int = 3,
+    on_alert: Optional[Callable[[list], None]] = None,
+    progress: Optional[Callable[[str], None]] = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict:
+    """Poll until stopped. Returns a summary of what it did.
+
+    ``max_consecutive_idle_failures`` is about the environment rather than an
+    area: a run that raises repeatedly means the worker itself cannot work, so it
+    exits and lets the restart policy act. One bad area is recorded on its job and
+    does not stop the loop.
+    """
+    totals = {"sweeps": 0, "processed": 0, "ready": 0, "failed": 0, "alerts": 0, "skipped": 0}
+    idle_failures = 0
+
+    with worker_lock() as acquired:
+        if not acquired:
+            raise RuntimeError("another worker holds the lock; exiting so the supervisor restarts one")
+
+        while True:
+            try:
+                outcome = sweep(limit=limit, publish=publish, on_alert=on_alert, progress=progress)
+                idle_failures = 0
+                for key in ("processed", "ready", "failed", "alerts", "skipped"):
+                    totals[key] += outcome.get(key, 0)
+            except Exception as exc:  # noqa: BLE001 - an environment failure
+                idle_failures += 1
+                if progress:
+                    progress(f"worker sweep failed ({idle_failures}/"
+                             f"{max_consecutive_idle_failures}): {type(exc).__name__}: {exc}")
+                if idle_failures >= max_consecutive_idle_failures:
+                    raise
+            totals["sweeps"] += 1
+            sleep(interval)
+    return totals
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by the container
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--interval", type=float, default=60.0,
+                        help="seconds between sweeps")
+    parser.add_argument("--limit", type=int, default=5, help="areas per sweep")
+    parser.add_argument("--no-publish", action="store_true",
+                        help="do not upload results to the object store")
+    args = parser.parse_args()
+
+    import alerts
+
+    try:
+        run_forever(
+            interval=args.interval,
+            limit=args.limit,
+            publish=not args.no_publish,
+            on_alert=lambda keys: alerts.evaluate_and_notify(keys),
+            progress=lambda message: print(message, flush=True),
+        )
+    except KeyboardInterrupt:
+        sys.exit(0)

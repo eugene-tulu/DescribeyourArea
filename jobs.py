@@ -250,6 +250,7 @@ def run_pending(
                 start=job.get("start", "2010-01-01"),
                 source=union_source,
                 upload=publish,
+                label=job.get("label"),
             )
             complete(key, payload)
             ready += 1

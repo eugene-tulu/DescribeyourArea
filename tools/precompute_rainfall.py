@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 import rainfall
+from fastapi import HTTPException
 
 
 def load_areas(path: Path) -> list[tuple[str, dict, dict]]:
@@ -58,11 +59,16 @@ def load_areas(path: Path) -> list[tuple[str, dict, dict]]:
         try:
             canonical = main.canonicalize_geojson(
                 feature,
-                max_bytes=main.MAX_LOOKUP_BYTES,
-                max_vertices=main.MAX_LOOKUP_VERTICES,
+                max_bytes=main.MAX_GEOJSON_BYTES,
+                max_vertices=None,  # a build hashes the geometry, it never windowed it
             )
-        except Exception as exc:  # noqa: BLE001 - a bad area must not stop the run
-            print(f"  {name:24s} INVALID  {getattr(exc, 'detail', exc)}")
+        except HTTPException as exc:
+            # A geometry the lookup path would refuse: publishing it would create
+            # a series nothing can ever retrieve.
+            print(f"  {name:24s} INVALID  {exc.detail}")
+            continue
+        except Exception as exc:  # noqa: BLE001 - a code fault must be visible, not "invalid"
+            print(f"  {name:24s} ERROR    {type(exc).__name__}: {exc}")
             continue
         out.append((name, canonical, canonical.get("properties") or {}))
     return out
@@ -133,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
         start = time.perf_counter()
         try:
             payload = rainfall.build_and_cache(
-                geom, start=args.start, end=args.end, source=source, upload=args.publish)
+                geom, start=args.start, end=args.end, source=source, upload=args.publish, label=name)
         except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
             print(f"  {name:24s} FAIL    {type(exc).__name__}: {str(exc)[:90]}")
             failed += 1

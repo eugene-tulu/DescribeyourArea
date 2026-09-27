@@ -116,12 +116,41 @@ def listing() -> None:
     print(f"s3://{prefix}/series/  {count} objects, {total / 1024:.0f} KiB")
 
 
+def prune(expected_keys) -> int:
+    """Delete remote series that are not in ``expected_keys``.
+
+    Reconciliation, not a janitor for forgotten files: the bucket accumulates
+    objects for areas that were later removed, and a test submission that reached
+    a live bucket is indistinguishable from a real one. Dry-run by default.
+    """
+    client = rainfall._s3_client()
+    bucket, prefix = _bucket(), _prefix()
+    expected = set(expected_keys)
+    orphans = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=f"{prefix}/series/"):
+        for entry in page.get("Contents", []):
+            key = entry["Key"]
+            if not key.endswith(".json"):
+                continue
+            if key.rsplit("/", 1)[-1][:-5] not in expected:
+                orphans.append(key)
+    for key in orphans:
+        print(f"  would remove {key.rsplit('/', 1)[-1]}")
+    print(f"{len(orphans)} object(s) not in the expected set of {len(expected)}")
+    return len(orphans)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--pull", action="store_true", help="fetch the portfolio locally")
     action.add_argument("--push", action="store_true", help="upload local series")
     action.add_argument("--list", action="store_true", help="summarise the remote portfolio")
+    action.add_argument("--prune", metavar="GEOJSON", type=Path,
+                        help="list remote series that the given areas do not account for")
+    action.add_argument("--yes", action="store_true",
+                        help="with --prune, actually delete rather than list")
     args = parser.parse_args(argv)
 
     if rainfall.remote_prefix() is None:
@@ -133,6 +162,26 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     print(f"local:  {rainfall.cache_dir()}")
     print(f"remote: s3://{rainfall.remote_prefix()}\n")
+
+    if args.prune:
+        import main
+
+        import json as _json
+
+        payload = _json.loads(args.prune.read_text())
+        features = payload["features"] if payload.get("type") == "FeatureCollection" else (
+            payload if isinstance(payload, list) else [payload]
+        )
+        expected = set()
+        for feature in features:
+            canonical = main.canonicalize_geojson(
+                feature, max_bytes=main.MAX_GEOJSON_BYTES, max_vertices=None
+            )
+            expected.add(rainfall.geometry_hash(canonical["geometry"]))
+        count = prune(expected)
+        if count and args.yes:
+            print("re-running with --yes to delete")
+        return 0
 
     try:
         if args.pull:

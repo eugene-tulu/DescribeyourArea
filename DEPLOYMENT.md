@@ -116,6 +116,39 @@ submitted geometry, so it is a record about a specific place; this is how a
 removal request is honoured. The endpoint is unauthenticated because it deletes
 only recomputable derived data, and the API is loopback-bound.
 
+## Worker and alerts
+
+`docker compose up -d` starts a `worker` alongside the backend. It drains the
+submission queue, checks every published series against the alert rules, and sleeps
+`RAINFALL_WORKER_INTERVAL` seconds (default 300). It shares the
+`rainfall-cache` volume with the backend, so a series it writes is one the API
+serves.
+
+It holds an `flock` for the whole run, so a second worker exits instead of
+duplicating ERA5 reads, and it exits after three consecutive sweep failures so the
+restart policy can act. A single failure, or one bad area, does not trip it.
+
+To notify rather than only record, set a webhook. Anything that accepts a JSON
+POST works, including Slack and Discord:
+
+```bash
+RAINFALL_ALERT_WEBHOOK=https://hooks.slack.com/services/...
+RAINFALL_ALERT_RULES=[{"id":"severe-drought","metric":"trailing_12m_anomaly_pct","below":-40}]
+```
+
+Rules are evaluated against each calendar month's 1991-2020 normal, so a
+percentage means the same thing in a wet and a dry month. An alert fires once per
+episode, and a recovery is announced too. Episodes are recorded whether or not a
+webhook is configured, so adding one later does not re-announce alerts that are
+already open.
+
+Reconcile the bucket against the areas you expect with:
+
+```bash
+python -m tools.sync_rainfall_cache --prune areas.geojson      # lists
+python -m tools.sync_rainfall_cache --prune areas.geojson --yes
+```
+
 ## Nginx
 
 Install `deploy/nginx/geocontextualize-rate-limit.conf` under
