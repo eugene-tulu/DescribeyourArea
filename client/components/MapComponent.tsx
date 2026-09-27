@@ -216,21 +216,20 @@ export default function MapComponent({
         style={{ height: "100%", width: "100%" }}
         className="rounded-lg"
       >
-        {/* Basemap satellite */}
+        {/* Basemap: satellite imagery, no API key. */}
         <TileLayer
-          attribution={
-            'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
-            'SRTM | &copy; <a href="https://opentopomap.org/about">OpenTopoMap</a> (CC-BY-SA)'
-          }
-          url="https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png"
-          maxZoom={17}
+          attribution="Imagery &copy; Esri, Maxar, Earthstar Geographics"
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+          maxZoom={19}
         />
 
-        {/* Labels layer */}
+        {/* Labels over dark imagery. This was CARTO's light_only_labels, which
+            now stamps carto.com/basemaps/apikey across the tiles. Esri's own
+            boundary and place overlay is keyless and does the same job. */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/">OSM</a>'
-          url="https://{s}.basemaps.cartocdn.com/light_only_labels/{z}/{x}/{y}{r}.png"
-          subdomains={["a", "b", "c", "d"]}
+          attribution="Labels &copy; Esri, HERE, Garmin, OpenStreetMap contributors"
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
+          maxZoom={19}
         />
 
         <MapController
