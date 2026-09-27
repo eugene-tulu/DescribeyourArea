@@ -8,14 +8,16 @@ services:
     environment:
       PORT: "8000"
       CORS_ORIGINS: ${CORS_ORIGINS:-https://209.38.197.161,http://localhost:3000}
-      # These defaults must track main.py. They were left at the pre-1.4.0 values
-      # while the code moved on, which silently pinned the container to a 10 km2
-      # NDVI cap and a single concurrency slot.
+      # These defaults must track main.py. They were once left at the pre-1.4.0
+      # values while the code moved on, which silently pinned the container to a
+      # 10 km2 vegetation cap and a single concurrency slot. A test asserts they
+      # agree.
       MAX_SYNC_BBOX_KM2: ${MAX_SYNC_BBOX_KM2:-100}
-      MAX_NDVI_BBOX_KM2: ${MAX_NDVI_BBOX_KM2:-100}
       MAX_LANDCOVER_BBOX_KM2: ${MAX_LANDCOVER_BBOX_KM2:-1000}
       MAX_PC_SCENES: ${MAX_PC_SCENES:-4}
       MAX_SOURCE_TILES: ${MAX_SOURCE_TILES:-64}
+      MAX_GEOJSON_BYTES: ${MAX_GEOJSON_BYTES:-4000000}
+      MAX_AOI_VERTICES: ${MAX_AOI_VERTICES:-10000}
       MAX_CONCURRENT_ANALYSES: ${MAX_CONCURRENT_ANALYSES:-8}
       MAX_CONCURRENT_NDVI: ${MAX_CONCURRENT_NDVI:-3}
       ANALYSIS_ACQUIRE_SECONDS: ${ANALYSIS_ACQUIRE_SECONDS:-2}

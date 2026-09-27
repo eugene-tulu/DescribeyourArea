@@ -66,20 +66,30 @@ class LookupAdmissionTests(unittest.TestCase):
         self.assertGreater(15_000 * 4, main.MAX_AOI_VERTICES)
         self.assertIsNotNone(main.validate_for_lookup(dense))
         with self.assertRaises(Exception):
-            main.validate_aoi(dense)
+            main.validate_aoi(dense)  # a raster request still pays for vertices
 
-    def test_the_lookup_byte_cap_is_well_above_the_worst_real_case(self):
-        # Measured on the 21 NRT conservancies: the largest is 1,358 KB, and
-        # 8 of 21 exceed the 500 KB raster cap.
-        self.assertGreater(main.MAX_LOOKUP_BYTES, 1_358 * 1024)
-        self.assertGreater(main.MAX_LOOKUP_BYTES, main.MAX_GEOJSON_BYTES)
+    def test_one_payload_cap_covers_the_worst_real_case(self):
+        # Measured on the 21 NRT conservancies: the largest is 1,358 KB. There is
+        # no second lookup cap; the single one is inherited.
+        self.assertGreater(main.MAX_GEOJSON_BYTES, 1_358 * 1024)
+        self.assertFalse(hasattr(main, "MAX_LOOKUP_BYTES"))
+
+    def test_the_removed_lookup_vertex_cap_is_really_gone(self):
+        self.assertFalse(hasattr(main, "MAX_LOOKUP_VERTICES"))
+
+    def test_the_lookup_is_exempt_from_the_vertex_cap(self):
+        # It parses and hashes without iterating vertices, so a detailed boundary
+        # costs it nothing.
+        dense = polygon(box_ring(35.10, -1.55, 35.17, -1.48, steps=15_000))
+        self.assertIsNotNone(main.validate_for_lookup(dense))
+        self.assertIsNotNone(main.canonicalize_geojson(dense, max_vertices=None))
 
     def test_the_payload_cap_still_applies(self):
         blob = json.dumps(feature(HUGE, pad="x" * 4096)).encode()
         oversize = {"type": "FeatureCollection", "features": [
             feature(CLEAN, pad="x" * 4096) for _ in range(2_000)
         ]}
-        self.assertGreater(len(json.dumps(oversize).encode()), main.MAX_LOOKUP_BYTES)
+        self.assertGreater(len(json.dumps(oversize).encode()), main.MAX_GEOJSON_BYTES)
         with self.assertRaises(Exception) as raised:
             main.validate_for_lookup(oversize)
         self.assertEqual(raised.exception.status_code, 413)
@@ -134,9 +144,16 @@ class LookupEndpointTests(unittest.TestCase):
         import os
         import tempfile
 
-        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.previous = {
+            key: os.environ.get(key)
+            for key in ("RAINFALL_CACHE_DIR", rainfall.REMOTE_URI_ENV)
+        }
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        # A miss is only a miss if nothing else can answer. Clearing the remote
+        # stops a leaked configuration, or the developer's own bucket, from
+        # satisfying a request this test expects to be empty.
+        os.environ.pop(rainfall.REMOTE_URI_ENV, None)
         from fastapi.testclient import TestClient
 
         self.client = TestClient(main.app)
@@ -146,10 +163,11 @@ class LookupEndpointTests(unittest.TestCase):
     def _restore(self):
         import os
 
-        if self.previous is None:
-            os.environ.pop("RAINFALL_CACHE_DIR", None)
-        else:
-            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_a_miss_is_reported_with_the_key_and_a_reason(self):
         response = self.client.post("/rainfall", json={"geojson": CLEAN})

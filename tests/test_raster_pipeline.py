@@ -12,11 +12,12 @@ import unittest
 
 from fastapi import HTTPException
 
+import main
+
 from main import (
     MAX_LANDCOVER_BBOX_KM2,
     NDVI_MIN_PLAUSIBLE,
     SCL_REJECTED,
-    MAX_NDVI_BBOX_KM2,
     MAX_SYNC_BBOX_KM2,
     _InFlightWork,
     _requested_datasets,
@@ -117,14 +118,19 @@ class DatasetSelectionTests(unittest.TestCase):
 class CapDerivationTests(unittest.TestCase):
     """The caps are derived from measurement; assert the shipped values."""
 
-    def test_ndvi_cap_matches_its_time_budget(self):
+    def test_the_synchronous_cap_matches_its_time_budget(self):
         # Measured: 100 km2 = 453 MB / 32 s; 400 km2 exceeds the 75 s budget.
-        self.assertEqual(MAX_NDVI_BBOX_KM2, 100.0)
+        self.assertEqual(MAX_SYNC_BBOX_KM2, 100.0)
 
-    def test_landcover_gets_a_larger_budget_than_ndvi(self):
-        # WorldCover is the only module whose memory grows with area.
+    def test_landcover_gets_a_larger_budget_than_the_rest(self):
+        # WorldCover is the only module whose memory grows with area, so it is the
+        # only one that needed a budget of its own.
         self.assertGreater(MAX_LANDCOVER_BBOX_KM2, MAX_SYNC_BBOX_KM2)
-        self.assertGreater(MAX_LANDCOVER_BBOX_KM2, MAX_NDVI_BBOX_KM2)
+
+    def test_the_removed_vegetation_cap_is_really_gone(self):
+        # It duplicated the synchronous cap at the same value, so it configured
+        # nothing and only created a second number to keep in step.
+        self.assertFalse(hasattr(main, "MAX_NDVI_BBOX_KM2"))
 
     def test_sync_cap_is_the_binding_synchronous_limit(self):
         self.assertEqual(MAX_SYNC_BBOX_KM2, 100.0)
@@ -487,7 +493,6 @@ class ServiceSurfaceTests(unittest.TestCase):
 
         body = TestClient(main.app).get("/version").json()
         self.assertEqual(body["max_sync_bbox_km2"], main.MAX_SYNC_BBOX_KM2)
-        self.assertEqual(body["max_ndvi_bbox_km2"], main.MAX_NDVI_BBOX_KM2)
         self.assertEqual(body["max_landcover_bbox_km2"], main.MAX_LANDCOVER_BBOX_KM2)
         self.assertEqual(body["max_concurrent_analyses"], main.MAX_CONCURRENT_ANALYSES)
         self.assertEqual(body["max_concurrent_ndvi"], main.MAX_CONCURRENT_NDVI)

@@ -145,11 +145,23 @@ for NDVI, and 1,000 km² for land cover. The application returns an explicit
 silently; large asynchronous analyses require a separately deployed durable
 queue and worker.
 
-Every budget is overridable by environment variable — `MAX_SYNC_BBOX_KM2`,
-`MAX_NDVI_BBOX_KM2`, `MAX_LANDCOVER_BBOX_KM2`, `MAX_SOURCE_TILES`,
-`MAX_CONCURRENT_ANALYSES`, `MAX_CONCURRENT_NDVI`, `ANALYSIS_ACQUIRE_SECONDS`,
-`NDVI_ACQUIRE_SECONDS`, and `ANALYSIS_DRAIN_SECONDS`. See
-[Measured limits](README.md#measured-limits) for the measurements behind them.
+Every budget is overridable by environment variable. They fall into three groups,
+and only the first are limits on input:
+
+- **Guards**, each with a measured failure behind it: `MAX_GEOJSON_BYTES`,
+  `MAX_AOI_VERTICES`, `MAX_SYNC_BBOX_KM2`, `MAX_LANDCOVER_BBOX_KM2`,
+  `MAX_SOURCE_TILES`, `MAX_CONCURRENT_ANALYSES`, `MAX_CONCURRENT_NDVI`.
+- **Timeouts**, which bound waiting rather than input: `ANALYSIS_ACQUIRE_SECONDS`,
+  `NDVI_ACQUIRE_SECONDS`, `ANALYSIS_DRAIN_SECONDS`.
+- **Product defaults**, which are choices rather than limits: `MAX_PC_SCENES`,
+  `NDVI_TARGET_EPSG`.
+
+There is no separate vegetation cap: it duplicated the synchronous cap at the same
+value. See [Measured limits](README.md#measured-limits) for the measurements.
+
+`client_max_body_size` must be **at least** `MAX_GEOJSON_BYTES` in both Nginx
+configs. A lower proxy limit does not protect anything, it only rejects a body
+the application would have accepted, with a less explicable reason.
 
 `MAX_CONCURRENT_ANALYSES` defaults to 8 and `MAX_CONCURRENT_NDVI` to 3. The
 service is bound by read latency against Planetary Computer rather than by local

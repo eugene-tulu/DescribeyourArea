@@ -31,6 +31,83 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.11.0 — Self-service submission, and the cap consolidation
+
+### Self-service submission
+
+`POST /rainfall/submit` queues a study area and returns immediately; computing a
+series takes about 60 seconds of ERA5 reads, so the submit path never waits. The
+job record is what makes this durable rather than a promise: it lives on disk, so a
+submission survives a restart, and a runner completes whatever is still pending.
+The polygon is kept with the job so the runner needs no caller, and is dropped the
+moment the series exists.
+
+`GET /rainfall/status?cache_key=` reports `not_submitted`, `pending`, `running`,
+`ready` or `failed` without resending the polygon. The cache is authoritative
+over the record: if a series exists the area is ready whatever the record says,
+because a runner may have completed without updating it.
+
+Verified end to end against live ERA5 and the live bucket: `not_submitted` →
+`pending` → `ready` → lookup `ok`, with the polygon gone from the job record
+afterwards. An area that already has a series is reported ready and never queued;
+resubmitting a pending one returns the existing job; a queue with no worker behind
+it is bounded at 25 so it cannot grow without limit.
+
+There is no supervision. `jobs.run_pending` is the runner, and running it from
+cron or a sidecar is the difference between "usually works" and "reliably works".
+
+### The cap consolidation
+
+There were 19 operational knobs, and having four numbers where one belongs is how
+the wrong one ships — which is exactly what happened with the vegetation cap in
+`docker-compose.yml`, left at its pre-1.4.0 value while the code moved on.
+
+**Removed:**
+
+- `MAX_NDVI_BBOX_KM2` — duplicated the synchronous cap at the same value, so it
+  configured nothing and only created a second number to keep in step.
+- `MAX_LOOKUP_BYTES` and `MAX_LOOKUP_VERTICES` — added in 1.10.0 because the lookup
+  path reuses the raster canonicaliser. The correct fix was one cap with the
+  lookup exempt, not a second pair.
+- `MAX_WINDOW_DAYS` — set at 12,000, above the 29 years between 1997 and today,
+  i.e. above any request a person would make. A cap that provably cannot fire is
+  documentation pretending to be a control.
+
+**Now 14 knobs in three labelled groups:** 8 guards, each with a measured failure
+behind it; 3 timeouts, which bound waiting rather than input; 2 product defaults,
+which are choices rather than limits (`MAX_PC_SCENES`, `NDVI_TARGET_EPSG`). Data
+quality thresholds in `rainfall.py` and `sensors.py` are grouped separately so
+they stop reading as limits.
+
+### The duplication was concealing a broken deployment
+
+`client_max_body_size` was 512k in both Nginx configs while the application
+advertised 4 MB, so the 1,358 KB NRT conservancies — the largest in the published
+portfolio — **could not be submitted through the deployed service at all**. They
+only ever worked in a local test. Both configs are now 4m, matching a single
+`MAX_GEOJSON_BYTES` of 4,000,000, and a test asserts the proxy is never *below*
+the application, because a lower proxy limit only moves the rejection somewhere
+less explicable. This closes the mismatch DEPLOYMENT has flagged since 1.3.0.
+
+### A test-hygiene bug worth recording
+
+`load_dotenv()` ran at import, so a developer's own bucket and credentials entered
+**every test process**. An assertion that an area had no cached series could be
+satisfied by the live bucket — which is exactly how `test_a_miss_is_reported` came
+to fail intermittently, and why a run was mutating real storage. Tests now set
+`GEOCONTEXT_NO_DOTENV=1` before importing the app, tests that assert a miss clear
+the remote explicitly, and a stubbed object client is installed with
+`mock.patch` so it is restored rather than outliving the test.
+
+### Tests: 242 -> 263
+
+16 for the job queue, including idempotence, a failure not stopping the run, a
+bounded queue, a stale `ready` record, and the polygon being dropped. Plus tests
+that the removed caps are really gone, that the lookup is exempt from the vertex
+cap, and that the proxy and application agree on body size.
+
+---
+
 ## 1.10.0 — The portfolio is live, and reachable
 
 Built and published all 21 Northern Rangelands Trust conservancies to Spaces

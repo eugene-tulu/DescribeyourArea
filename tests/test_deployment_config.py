@@ -20,7 +20,6 @@ INJECTED = {
     "MAX_GEOJSON_BYTES": "MAX_GEOJSON_BYTES",
     "MAX_AOI_VERTICES": "MAX_AOI_VERTICES",
     "MAX_SYNC_BBOX_KM2": "MAX_SYNC_BBOX_KM2",
-    "MAX_NDVI_BBOX_KM2": "MAX_NDVI_BBOX_KM2",
     "MAX_LANDCOVER_BBOX_KM2": "MAX_LANDCOVER_BBOX_KM2",
     "MAX_PC_SCENES": "MAX_PC_SCENES",
     "MAX_SOURCE_TILES": "MAX_SOURCE_TILES",
@@ -64,10 +63,13 @@ class DeploymentConfigTests(unittest.TestCase):
             "container environment wins, so the code default is dead in production",
         )
 
+    def test_the_payload_cap_is_injected(self):
+        self.assertIn("MAX_GEOJSON_BYTES", self.env)
+        self.assertIn("MAX_AOI_VERTICES", self.env)
+
     def test_the_limits_from_1_4_0_are_reachable(self):
         # The specific regression: these two were left at their pre-1.4.0 values,
         # which silently undid the concurrency work in production.
-        self.assertEqual(float(self.env["MAX_NDVI_BBOX_KM2"]), 100.0)
         self.assertEqual(float(self.env["MAX_CONCURRENT_ANALYSES"]), 8.0)
         self.assertLess(
             float(self.env["MAX_CONCURRENT_NDVI"]),
@@ -80,10 +82,24 @@ class DeploymentConfigTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertIn(name, self.env)
 
-    def test_payload_cap_stays_under_the_nginx_limit(self):
-        # Nginx admits 512k; the application must reject no more than that or a
-        # body can pass the proxy and then be refused.
-        self.assertLessEqual(float(main.MAX_GEOJSON_BYTES), 512 * 1024)
+    def test_the_proxy_and_the_application_agree_on_body_size(self):
+        """A proxy that admits less than the application accepts only moves the
+        rejection somewhere less explicable: the 512k Nginx limit silently made the
+        1,358 KB NRT conservancies unsubmittable while the app advertised 4 MB."""
+        nginx = list((COMPOSE.parent / "deploy" / "nginx").glob("*.conf"))
+        limits = []
+        for path in nginx:
+            text = path.read_text()
+            limits += [m for m in re.findall(r"client_max_body_size\s+(\d+)([kKmM])", text)]
+        self.assertTrue(limits, "no client_max_body_size found in the Nginx configs")
+        for value, unit in limits:
+            factor = {"k": 1024, "m": 1024 * 1024}[unit.lower()]
+            self.assertGreaterEqual(
+                int(value) * factor, main.MAX_GEOJSON_BYTES,
+                f"proxy admits {int(value)}{unit}, below the application's "
+                f"{main.MAX_GEOJSON_BYTES} bytes, so a body can pass the proxy and "
+                "then be refused with no useful reason",
+            )
 
     def test_cache_dir_is_writable_for_the_app_user(self):
         # The entrypoint writes the pulled portfolio here as a non-root user.

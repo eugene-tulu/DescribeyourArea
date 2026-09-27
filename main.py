@@ -49,6 +49,7 @@ import requests
 
 import usage
 
+
 # Addresses that can be a trusted proxy in front of this service. Enumerated
 # rather than derived from ipaddress.is_private, which also reports the
 # documentation ranges (192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24) as private
@@ -75,7 +76,20 @@ def _is_trusted_proxy(address: Optional[str]) -> bool:
 # --------------------------------------------------
 # ENVIRONMENT
 # --------------------------------------------------
-load_dotenv()
+# Loading .env is right in production and wrong under test: a developer's own
+# bucket and keys would silently enter the test process, so an assertion about a
+# cache miss could be satisfied by a live remote, and a run would touch real
+# storage. The test package sets this before importing the app.
+if os.getenv("GEOCONTEXT_NO_DOTENV", "") != "1":
+    load_dotenv()
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean environment variable, treating "unset" and "false" clearly."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
@@ -110,59 +124,82 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 # therefore set at the largest area where all three modules finish comfortably
 # inside the raster (30 s) and NDVI (75 s) budgets rather than at an arbitrary
 # round number.
-MAX_GEOJSON_BYTES = _env_int("MAX_GEOJSON_BYTES", 500_000)
+# ---------------------------------------------------------------------------
+# Resource limits. Each of these guards a specific failure with a measured cost;
+# nothing here is a style preference. A limit is a claim that exceeding it is
+# worse than refusing the request.
+# ---------------------------------------------------------------------------
+
+# Payload size, on every path. This is the only limit that defends against a
+# hostile body, and the only one that bounds parse memory: the largest legitimate
+# study area measured is a 1,358 KB NRT conservancy, and 4 MB leaves headroom
+# while still being trivially cheap to parse. Nginx's client_max_body_size is set
+# to the same value, because a proxy that admits less than the application
+# accepts just moves the rejection somewhere less explicable.
+MAX_GEOJSON_BYTES = _env_int("MAX_GEOJSON_BYTES", 4_000_000)
+
+# Vertices, on paths that actually iterate them. A 61,035-vertex conservancy
+# costs real time to mask and clip per request. A cache lookup parses and hashes
+# without iterating, so it is exempt: pass max_vertices=None.
 MAX_AOI_VERTICES = _env_int("MAX_AOI_VERTICES", 10_000)
-# Rainfall is a cache lookup, not a raster job. A study area is bounded by
-# polygon detail rather than by analysis cost, so the raster admission policy must
-# not apply to it: the 21 NRT conservancies are rejected by the 10,000-vertex
-# limit even though reading a cached series costs about a millisecond and 1 KB.
-MAX_LOOKUP_VERTICES = _env_int("MAX_LOOKUP_VERTICES", 250_000)
-# Measured on the 21 NRT conservancies: 16 KB to 1,358 KB and 720 to 61,035
-# vertices, with 8 of 21 over the 500 KB raster cap. A lookup is parsed and hashed,
-# never windowed, so it can afford a larger body; 4 MB sits well above the worst
-# real case while still bounding parse cost.
-MAX_LOOKUP_BYTES = _env_int("MAX_LOOKUP_BYTES", 4_000_000)
+
+# Area budgets, in square kilometres of *bounding box* rather than polygon area,
+# so an irregular outline is penalised by its own rectangle. Derived from
+# measurement; see README "Measured limits" and the reasoning above each value.
+#
+# Only WorldCover has a genuinely area-driven memory curve, which is why it has
+# its own budget. DEM is flat to 5,500 km2 (69 MB), and the vegetation index is
+# bounded by time rather than area, so one synchronous cap covers both.
 MAX_SYNC_BBOX_KM2 = _env_float("MAX_SYNC_BBOX_KM2", 100.0)
-# NDVI is limited by its 75 s budget, not by memory, so it is raised to match the
-# synchronous cap: 100 km2 measures 453 MB and 32 s, 400 km2 times out.
-MAX_NDVI_BBOX_KM2 = _env_float("MAX_NDVI_BBOX_KM2", 100.0)
-# WorldCover is the one module whose memory grows with area, so it gets its own
-# budget. 1,000 km2 measures 235 MB; 5,500 km2 measures 1,205 MB and would starve
-# the NDVI path inside a 1.8 GB container.
-MAX_LANDCOVER_BBOX_KM2 = _env_float("MAX_LANDCOVER_BBOX_KM2", 1_000.0)
-MAX_PC_SCENES = _env_int("MAX_PC_SCENES", 4)
-# Ceiling on a requested window, not a cost limit: a request takes max_scenes
-# scenes however long the window is, so a decade costs the same as a month. The
-# bound exists to catch a mistyped year, not to ration data. It is set above the
-# 29 years that separate 1997 from today, so the historical question the
-# conservancy audience asked can be asked directly.
-MAX_WINDOW_DAYS = _env_int("MAX_WINDOW_DAYS", 12000)
+# 1,000 km2 measures 235 MB; 5,500 km2 measures 1,205 MB and would starve the
+# vegetation path inside a 1.8 GB container.
+MAX_LANDCOVER_BBOX_KM2 = _env_float("MAX_LANDCOVER_BBOX_KM2", 1000.0)
+
 # A study area can straddle many source tiles; bound the fan-out so a pathological
 # bounding box cannot issue an unbounded number of COG opens.
 MAX_SOURCE_TILES = _env_int("MAX_SOURCE_TILES", 64)
-# Concurrency limits, derived from measurement rather than from memory alone.
-#
-# Measured against Planetary Computer (2026-09-26), 1.25 vCPU, eight concurrent
-# requests through the real ASGI app:
-#
-#   marginal memory   ~25 MB per concurrent request (peak 322 MB at N=8)
-#   CPU               4-14% of one core at N=8
-#   dem+landcover     wall time flat from N=1 to N=8 (8.5 s -> 7.5 s)
-#   dem+landcover+ndvi p50 latency 27 s at N=1, 38 s at N=2, 52 s at N=4, 67 s at N=8
-#
+
+# ---------------------------------------------------------------------------
+# Timeouts. Not limits on input; they are how long a caller waits, and how long
+# the concurrency guard is held once the work is decided.
+# ---------------------------------------------------------------------------
+
 # Neither memory nor CPU is the binding constraint; remote read latency is. The
-# global guard is therefore generous, while the NDVI path gets a second, tighter
-# guard because it is the one that degrades. Aggregate throughput still improves
-# with concurrency, so this trades user-facing latency for throughput rather than
-# being free.
+# global guard is generous, while the vegetation path gets a second, tighter guard
+# because it is the only one whose latency degrades. Aggregate throughput still
+# improves with concurrency, so this trades user-facing latency for throughput
+# rather than being free.
 MAX_CONCURRENT_ANALYSES = _env_int("MAX_CONCURRENT_ANALYSES", 8)
 MAX_CONCURRENT_NDVI = _env_int("MAX_CONCURRENT_NDVI", 3)
 # A caller that cannot enter the global guard is told the service is busy. The
-# NDVI guard is proportionally slower, so waiting longer is reasonable there; on
-# exhaustion the rest of the analysis still returns with NDVI marked unavailable.
+# vegetation guard is proportionally slower, so waiting longer is reasonable
+# there; on exhaustion the rest of the analysis still returns with vegetation
+# marked unavailable.
 ANALYSIS_ACQUIRE_SECONDS = _env_float("ANALYSIS_ACQUIRE_SECONDS", 2.0, minimum=0.0)
 NDVI_ACQUIRE_SECONDS = _env_float("NDVI_ACQUIRE_SECONDS", 20.0, minimum=0.0)
+# How long a finishing request waits for a timed-out thread before releasing the
+# guard. Beyond this the guard is released regardless, because holding it
+# indefinitely would wedge the service.
 ANALYSIS_DRAIN_SECONDS = _env_float("ANALYSIS_DRAIN_SECONDS", 20.0, minimum=0.0)
+# ---------------------------------------------------------------------------
+# Product defaults. These are choices, not guards: exceeding them would not break
+# anything, it would only make the result worse. They are here rather than
+# scattered so it is clear which numbers are limits and which are knobs.
+# ---------------------------------------------------------------------------
+
+# Scenes averaged into a median composite. Four is a quality choice balancing a
+# longer window against cloud; the cost of more is latency, not failure.
+MAX_PC_SCENES = _env_int("MAX_PC_SCENES", 4)
+# Grid CRS for the vegetation composite. EPSG:6933 is equal-area in metres, so a
+# pixel is the same area everywhere. Valid to about 86 degrees latitude, so polar
+# areas fall back to a local UTM zone.
+NDVI_TARGET_EPSG = _env_int("NDVI_TARGET_EPSG", 6933)
+# Best-effort in-process execution of a submitted rainfall job. The job record is
+# durable regardless, so setting this to 0 and relying on the runner is a
+# supported deployment, not a degraded one.
+RAINFALL_AUTORUN = _env_bool("RAINFALL_AUTORUN", True)
+_RAINFALL_TASKS: set = set()
+
 ANALYSIS_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_ANALYSES)
 NDVI_SEMAPHORE = asyncio.Semaphore(MAX_CONCURRENT_NDVI)
 WGS84_GEOD = Geod(ellps="WGS84")
@@ -242,7 +279,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 
 @app.middleware("http")
@@ -407,7 +444,7 @@ def canonicalize_geojson(
     geojson: dict,
     *,
     max_bytes: int = MAX_GEOJSON_BYTES,
-    max_vertices: int = MAX_AOI_VERTICES,
+    max_vertices: Optional[int] = MAX_AOI_VERTICES,
 ) -> dict:
     """Canonicalize supported GeoJSON into one Feature for every raster call.
 
@@ -449,8 +486,11 @@ def canonicalize_geojson(
     geometries = [geom for geom, _reason in extracted]
     repairs = sorted({reason for _geom, reason in extracted if reason})
 
-    vertex_count = sum(_position_count(mapping(geom).get("coordinates")) for geom in geometries)
-    if vertex_count > max_vertices:
+    if max_vertices is not None:
+        vertex_count = sum(
+            _position_count(mapping(geom).get("coordinates")) for geom in geometries
+        )
+    if max_vertices is not None and vertex_count > max_vertices:
         raise HTTPException(
             status_code=413,
             detail=f"Study area has too many vertices (limit: {max_vertices})",
@@ -496,11 +536,10 @@ def validate_for_lookup(geojson: dict) -> dict:
     the largest conservancy has a 5,510 km2 bounding box and tens of thousands of
     vertices.
     """
-    feature = canonicalize_geojson(
-        geojson,
-        max_bytes=MAX_LOOKUP_BYTES,
-        max_vertices=MAX_LOOKUP_VERTICES,
-    )
+    # One payload cap, inherited. The vertex cap is waived because a lookup parses
+    # and hashes without ever iterating vertices, so a detailed boundary costs it
+    # nothing; a second cap pair here only created a second thing to keep in sync.
+    feature = canonicalize_geojson(geojson, max_bytes=MAX_GEOJSON_BYTES, max_vertices=None)
     bbox = aoi_bbox(feature)
     return {"feature": feature, "bbox": bbox, "bbox_area_km2": _bbox_area_km2(bbox)}
 
@@ -1098,7 +1137,7 @@ def _target_bounds(target, bbox: list[float]) -> tuple[float, float, float, floa
 async def compute_vegetation_index(
     bbox: list[float],
     geojson_geom: dict,
-    max_area_km2: float = MAX_NDVI_BBOX_KM2,
+    max_area_km2: float = MAX_SYNC_BBOX_KM2,
     max_scenes: int = MAX_PC_SCENES,
     resolution_m: int = 20,
     sensor_id: str = "auto",
@@ -1219,7 +1258,13 @@ async def compute_vegetation_index(
 
 
 def _resolve_window(start: Optional[str], end: Optional[str], window_days: int) -> tuple[str, str]:
-    """Normalise an explicit date range, or fall back to a lookback from today."""
+    """Normalise an explicit date range, or fall back to a lookback from today.
+
+    There is deliberately no upper bound on the span. A request takes at most
+    ``MAX_PC_SCENES`` scenes however long the window is, so a decade costs the
+    same as a month; a span limit set above any request a person would make was
+    documentation pretending to be a control.
+    """
     today = datetime.datetime.now(datetime.UTC).date()
     end_date = today if not end else _parse_date(end, "end")
     if start:
@@ -1228,11 +1273,6 @@ def _resolve_window(start: Optional[str], end: Optional[str], window_days: int) 
         start_date = end_date - datetime.timedelta(days=max(1, window_days))
     if start_date > end_date:
         raise ValueError("window start must not be after the end")
-    if (end_date - start_date).days > MAX_WINDOW_DAYS:
-        raise ValueError(
-            f"window spans {(end_date - start_date).days} days, beyond the "
-            f"{MAX_WINDOW_DAYS} a synchronous request will read"
-        )
     return start_date.isoformat(), end_date.isoformat()
 
 
@@ -1246,7 +1286,7 @@ def _parse_date(value: str, label: str) -> datetime.date:
 async def compute_median_ndvi(
     bbox: list[float],
     geojson_geom: dict,
-    max_area_km2: float = MAX_NDVI_BBOX_KM2,
+    max_area_km2: float = MAX_SYNC_BBOX_KM2,
     max_scenes: int = MAX_PC_SCENES,
     resolution_m: int = 20,
 ) -> dict:
@@ -1520,7 +1560,7 @@ async def generate_context(
             ndvi_stats = await _timed(vegetation_timer, compute_vegetation_index(
                 bbox=bbox,
                 geojson_geom=geom,
-                max_area_km2=MAX_NDVI_BBOX_KM2,
+                max_area_km2=MAX_SYNC_BBOX_KM2,
                 max_scenes=MAX_PC_SCENES,
                 resolution_m=20,
                 sensor_id=sensor,
@@ -1640,6 +1680,93 @@ async def rainfall_lookup(request: RainfallLookupRequest):
     }
 
 
+@app.post("/rainfall/submit")
+async def submit_rainfall(
+    payload: RainfallLookupRequest,
+    http_request: Request = None,
+):
+    """Queue a study area for precomputation, and return immediately.
+
+    Computing a series takes about 60 seconds of ERA5 reads, so this never waits
+    for it. The job record is durable: it survives a restart, and the runner
+    completes whatever is still pending. An area that already has a series is
+    reported ready without queueing.
+    """
+    import jobs
+
+    if not payload.geojson:
+        raise HTTPException(status_code=422, detail="supply geojson to submit an area")
+    area = validate_for_lookup(payload.geojson)
+    key = rainfall_hash(area["feature"]["geometry"])
+
+    state = jobs.submit(
+        area["feature"]["geometry"],
+        label=(area["feature"].get("properties") or {}).get("NAME"),
+        submitted_by=_client_host(http_request),
+    )
+
+    if state.get("state") == jobs.PENDING and RAINFALL_AUTORUN:
+        _autorun_rainfall_jobs()
+    return {
+        "submission": state,
+        "cache_key": key,
+        "analysis": {
+            "bbox_area_km2": round(area["bbox_area_km2"], 2),
+            "compute_seconds_typical": 60,
+        },
+    }
+
+
+def _autorun_rainfall_jobs() -> None:
+    """Process one queued area in the background, best effort.
+
+    The job record is what makes a submission durable, so losing this task to a
+    restart costs nothing but a delay: the runner picks the job up.
+    """
+    import asyncio as _asyncio
+
+    import jobs
+
+    async def worker():
+        try:
+            await _asyncio.to_thread(jobs.run_pending, limit=1, publish=True)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            _RAINFALL_TASKS.discard(worker)
+
+    try:
+        task = _asyncio.get_running_loop().create_task(worker())
+        _RAINFALL_TASKS.add(task)
+    except RuntimeError:
+        pass
+
+
+@app.get("/rainfall/status")
+async def rainfall_status(cache_key: str):
+    """State of one area's submission, without resending its polygon."""
+    if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
+        raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
+    import jobs
+
+    return {
+        "submission": jobs.status_for(cache_key),
+        "computed": rainfall_hash and rainfall_cache_present(cache_key),
+    }
+
+
+def rainfall_cache_present(key: str) -> bool:
+    import rainfall
+
+    return rainfall.read_cache(key) is not None
+
+
+def rainfall_hash(geometry: dict) -> str:
+    import rainfall
+
+    return rainfall.geometry_hash(geometry)
+
+
 @app.post("/admin/rainfall/forget")
 async def forget_rainfall_series(payload: ForgetRequest):
     """Delete a cached rainfall series for one study area.
@@ -1673,11 +1800,14 @@ async def forget_rainfall_series(payload: ForgetRequest):
     # Both stores: clearing only the local copy would leave the published artefact
     # in the bucket, which is the copy that survives a redeploy.
     outcome = rainfall.forget(key)
-    print(f"rainfall cache: local={outcome['local']} remote={outcome['remote']} for {key}",
-          file=sys.stderr)
+    import jobs
+
+    job_dropped = jobs.drop(key)
+    print(f"rainfall cache: local={outcome['local']} remote={outcome['remote']} "
+          f"job_dropped={job_dropped} for {key}", file=sys.stderr)
     return {"cache_key": key, "removed": bool(outcome["local"] or outcome["remote"]),
             "local": outcome["local"], "remote": outcome["remote"],
-            "data": "rainfall series"}
+            "job_record_dropped": job_dropped, "data": "rainfall series"}
 
 
 @app.get("/version")
@@ -1708,7 +1838,6 @@ async def get_version():
         },
         "default_sensor": "auto",
         "max_sync_bbox_km2": MAX_SYNC_BBOX_KM2,
-        "max_ndvi_bbox_km2": MAX_NDVI_BBOX_KM2,
         "max_landcover_bbox_km2": MAX_LANDCOVER_BBOX_KM2,
         "max_source_tiles": MAX_SOURCE_TILES,
         "max_pc_scenes": MAX_PC_SCENES,

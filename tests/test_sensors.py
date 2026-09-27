@@ -223,14 +223,22 @@ class WindowResolutionTests(unittest.TestCase):
             main._resolve_window("06/01/2024", None, 90)
         self.assertIn("YYYY-MM-DD", str(raised.exception))
 
-    def test_a_decade_is_allowed_and_more_is_not(self):
-        # A request takes max_scenes however long the window is, so span is not a
-        # cost; the ceiling only catches a mistyped year.
-        self.assertTrue(main._resolve_window("2015-01-01", "2024-12-31", 90))
-        self.assertTrue(main._resolve_window("1997-01-01", "1999-12-31", 90))
-        with self.assertRaises(ValueError) as raised:
-            main._resolve_window("1900-01-01", "2024-01-01", 90)
-        self.assertIn("synchronous", str(raised.exception))
+    def test_a_long_window_is_allowed_and_not_watched(self):
+        # There is no span limit, deliberately. A request takes at most
+        # MAX_PC_SCENES scenes however long the window is, so a decade costs the
+        # same as a month, and the 1997/98 question has to stay askable.
+        self.assertEqual(
+            main._resolve_window("1997-01-01", "1999-12-31", 90),
+            ("1997-01-01", "1999-12-31"),
+        )
+        self.assertEqual(
+            main._resolve_window("1970-01-01", "2024-12-31", 90),
+            ("1970-01-01", "2024-12-31"),
+        )
+        self.assertFalse(
+            [n for n in dir(main) if n.startswith("MAX_") and "WINDOW" in n],
+            "a span limit that cannot fire is documentation pretending to be a control",
+        )
 
 
 class VegetationProvenanceTests(unittest.TestCase):
@@ -240,15 +248,28 @@ class VegetationProvenanceTests(unittest.TestCase):
                                                [35.17, -1.48], [35.10, -1.48],
                                                [35.10, -1.55]]]}
 
-    def test_bad_window_is_reported_not_raised(self):
+    def test_a_malformed_window_is_reported_not_raised(self):
         import asyncio
 
         result = asyncio.run(main.compute_vegetation_index(
             [35.10, -1.55, 35.17, -1.48], self.AOI, sensor_id="auto",
-            start="1900-01-01", end="2024-01-01",
+            start="06/01/2024",
         ))
         self.assertEqual(result["status"], "unavailable")
-        self.assertIn("synchronous", result["warning"])
+        self.assertIn("YYYY-MM-DD", result["warning"])
+
+    def test_a_very_long_window_is_accepted(self):
+        """No span limit: a request takes MAX_PC_SCENES however long the window is."""
+        import asyncio
+
+        result = asyncio.run(main.compute_vegetation_index(
+            [35.10, -1.55, 35.17, -1.48], self.AOI, sensor_id="auto",
+            start="1997-01-01", end="1999-12-31",
+        ))
+        # Reaches the search, which is where a too-old window for the chosen sensor
+        # is reported rather than a span error.
+        self.assertIn(result["status"], {"ok", "unavailable", "skipped"})
+        self.assertNotIn("window spans", result.get("warning", ""))
 
     def test_unknown_sensor_is_reported_not_raised(self):
         import asyncio

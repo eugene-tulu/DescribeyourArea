@@ -267,13 +267,19 @@ class ForgetEndpointTests(unittest.TestCase):
         """A deletion that only cleared the local copy would leave the published
         artefact in the bucket, which is the copy that survives a redeploy."""
         import os as _os
-        _os.environ[__import__("rainfall").REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
-        try:
-            import rainfall
-            from tests.test_rainfall import _StubClient
+        import unittest.mock
 
-            client = _StubClient()
-            rainfall._s3_client = lambda: client
+        import rainfall
+        from tests.test_rainfall import _StubClient
+
+        _os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
+        client = _StubClient()
+        # patch.object so the real client is restored; a bare assignment outlives
+        # the test and every later test in the run.
+        patcher = unittest.mock.patch.object(rainfall, "_s3_client", lambda: client)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        try:
             rainfall.publish(self.key)
 
             response = self.client.post("/admin/rainfall/forget", json={"cache_key": self.key})
@@ -281,7 +287,7 @@ class ForgetEndpointTests(unittest.TestCase):
             self.assertTrue(response.json()["removed"])
             self.assertFalse(client.objects, "an object survived the removal")
         finally:
-            _os.environ.pop(__import__("rainfall").REMOTE_URI_ENV, None)
+            _os.environ.pop(rainfall.REMOTE_URI_ENV, None)
 
     def test_removal_is_idempotent(self):
         self.client.post("/admin/rainfall/forget", json={"cache_key": self.key})
@@ -303,13 +309,16 @@ class ForgetEndpointTests(unittest.TestCase):
 
     def test_a_valid_but_absent_key_is_a_no_op(self):
         import os as _os
+        import unittest.mock
 
-        _os.environ[__import__("rainfall").REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
+        import rainfall
+        from tests.test_rainfall import _StubClient
+
+        _os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/prefix/rainfall"
+        patcher = unittest.mock.patch.object(rainfall, "_s3_client", lambda: _StubClient())
+        patcher.start()
+        self.addCleanup(patcher.stop)
         try:
-            import rainfall
-            from tests.test_rainfall import _StubClient
-
-            rainfall._s3_client = lambda: _StubClient()  # empty store
             absent = "0" * 32
             response = self.client.post("/admin/rainfall/forget", json={"cache_key": absent})
             self.assertEqual(response.status_code, 200)
@@ -317,7 +326,7 @@ class ForgetEndpointTests(unittest.TestCase):
             self.assertFalse(response.json()["local"])
             self.assertFalse(response.json()["remote"])
         finally:
-            _os.environ.pop(__import__("rainfall").REMOTE_URI_ENV, None)
+            _os.environ.pop(rainfall.REMOTE_URI_ENV, None)
 
     def test_a_traversal_key_is_refused(self):
         for key in ("../../etc/passwd", "..", "z" * 32, "ABCDEF" + "0" * 26, "0" * 31, "",
