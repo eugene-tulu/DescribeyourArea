@@ -1,7 +1,7 @@
 # --------------------------------------------------
 # IMPORTS
 # --------------------------------------------------
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
@@ -23,6 +23,7 @@ import functools
 import ipaddress
 import math
 import re
+import secrets
 import os
 from dotenv import load_dotenv
 import sys
@@ -1764,6 +1765,26 @@ async def health_check():
         "version": APP_VERSION,
     }
 
+def require_admin_key(
+    x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
+) -> None:
+    """Gate the destructive endpoints.
+
+    Deleting a cached series is cheap to do and impossible to undo from outside, so
+    an open endpoint is a way for anyone who can reach the API to blank the
+    portfolio. The pattern is a shared secret in a header, refused outright when
+    unset rather than defaulted to open.
+    """
+    configured = (os.getenv("ADMIN_API_KEY") or "").strip()
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="this endpoint is disabled: set ADMIN_API_KEY on the server",
+        )
+    if not x_admin_key or not secrets.compare_digest(x_admin_key.strip(), configured):
+        raise HTTPException(status_code=401, detail="missing or invalid X-Admin-Key header")
+
+
 class ForgetRequest(BaseModel):
     """Identify a study area to remove, by geometry or by cache key."""
     geojson: Optional[Dict[str, Any]] = None
@@ -1980,7 +2001,10 @@ def rainfall_hash(geometry: dict) -> str:
 
 
 @app.post("/admin/rainfall/forget")
-async def forget_rainfall_series(payload: ForgetRequest):
+async def forget_rainfall_series(
+    payload: ForgetRequest,
+    x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),
+):
     """Delete a cached rainfall series for one study area.
 
     The cache is keyed by a hash of the submitted geometry and holds that area's
@@ -1991,7 +2015,11 @@ async def forget_rainfall_series(payload: ForgetRequest):
     Only exact 32-character keys are removed, and only files that look like
     series, so a malformed or hostile key reaches nothing else. The per-read cell
     cache is shared between areas and is deliberately left alone.
+
+    Requires the ``X-Admin-Key`` header. Removing a series cannot be undone from
+    outside, so an open endpoint is a way to blank the portfolio.
     """
+    require_admin_key(x_admin_key)
     import rainfall
 
     if payload.geojson:

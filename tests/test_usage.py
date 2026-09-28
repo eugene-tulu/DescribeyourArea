@@ -223,14 +223,20 @@ class ForgetEndpointTests(unittest.TestCase):
 
     def setUp(self):
         self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.previous_key = os.environ.get("ADMIN_API_KEY")
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        # Removing a series is gated; these tests carry the key in every request
+        # by giving the client a default header, so the cases below stay about
+        # the removal behaviour rather than about authentication.
+        os.environ["ADMIN_API_KEY"] = "test-admin-key"
         import main
 
         self.main = main
         from fastapi.testclient import TestClient
 
-        self.client = TestClient(main.app)
+        self.client = TestClient(main.app,
+                                    headers={"X-Admin-Key": "test-admin-key"})
         import rainfall
 
         self.rainfall = rainfall
@@ -246,6 +252,10 @@ class ForgetEndpointTests(unittest.TestCase):
             os.environ.pop("RAINFALL_CACHE_DIR", None)
         else:
             os.environ["RAINFALL_CACHE_DIR"] = self.previous
+        if self.previous_key is None:
+            os.environ.pop("ADMIN_API_KEY", None)
+        else:
+            os.environ["ADMIN_API_KEY"] = self.previous_key
         self.tmp.cleanup()
 
     def test_a_stored_series_is_removed_by_geometry(self):

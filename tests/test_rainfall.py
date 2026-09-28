@@ -766,3 +766,81 @@ class OfflinePlanTests(unittest.TestCase):
     def test_planning_needs_a_geometry(self):
         response = self.client.post("/rainfall/plan", json={"indicator": "dem"})
         self.assertEqual(response.status_code, 422)
+
+
+class AdminGateTests(unittest.TestCase):
+    """Deleting a series cannot be undone from outside.
+
+    The endpoint was open until now: anyone who could reach the API could blank the
+    portfolio. A shared secret in a header, refused outright when unset rather than
+    defaulted to open, following the pattern the other service on this host uses.
+    """
+
+    AOI = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon",
+           "coordinates": [[[35.10, -1.55], [35.17, -1.55], [35.17, -1.48],
+                            [35.10, -1.48], [35.10, -1.55]]]}}
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import main
+
+        self.previous = {
+            k: os.environ.get(k) for k in ("RAINFALL_CACHE_DIR", "ADMIN_API_KEY")
+        }
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        os.environ["ADMIN_API_KEY"] = "test-admin-key"
+        self.client = TestClient(main.app)
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_it_refuses_without_a_key(self):
+        response = self.client.post("/admin/rainfall/forget", json={"geojson": self.AOI})
+        self.assertEqual(response.status_code, 401)
+
+    def test_it_refuses_with_the_wrong_key(self):
+        response = self.client.post(
+            "/admin/rainfall/forget", json={"geojson": self.AOI},
+            headers={"X-Admin-Key": "wrong"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_it_is_disabled_rather_than_open_when_unset(self):
+        import os
+
+        os.environ.pop("ADMIN_API_KEY", None)
+        response = self.client.post(
+            "/admin/rainfall/forget", json={"geojson": self.AOI},
+            headers={"X-Admin-Key": "anything"},
+        )
+        self.assertEqual(response.status_code, 503,
+                         "an unset key must disable the endpoint, not open it")
+
+    def test_it_still_works_with_the_right_key(self):
+        import rainfall
+
+        key = rainfall.geometry_hash(self.AOI["geometry"])
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        response = self.client.post(
+            "/admin/rainfall/forget", json={"geojson": self.AOI},
+            headers={"X-Admin-Key": "test-admin-key"},
+        )
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertTrue(response.json()["removed"])
+        self.assertIsNone(rainfall.read_cache(key))
