@@ -31,6 +31,56 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.15.0 — A wait you can read, and instrumentation that gates everything else
+
+### "Ready in about 3 minutes"
+
+A vegetation series is minutes of monthly reads, not seconds, and a spinner over
+an unquantified wait is exactly what this product should not ship. So the
+estimate is computed from the measured rate and **named as an estimate** rather
+than presented as a promise:
+
+> Ready in about 3 minutes. 201 monthly reads at 232 m.
+
+It comes from `0.68 s per month measured at 4-way concurrency, plus overhead`, and
+the reason is stated too: *cost is request latency, not pixels, so it barely moves
+with area*. A 60 km² area and a 5,505 km² one both read in about 1.3 s, which is
+why the plan for a small area and a large one is the same number. A test asserts
+exactly that, so a future "optimisation" that makes the estimate area-dependent has
+to be deliberate.
+
+The estimate also corrected a blanket lie. The submit endpoint returned
+`compute_seconds_typical: 60` for every indicator, which was roughly right for
+rainfall and off by three times for a vegetation series. Planning is now per
+indicator, because the cost drivers genuinely differ: the raster modules are
+bounded by pixels at a policy resolution, a rainfall series by one annual ERA5 read,
+and a vegetation series by the number of months it has to read.
+
+The rainfall card now offers **"Build a vegetation series"** when there is none,
+states why the wait is minutes rather than seconds, and shows the estimate rather
+than a queue with no end.
+
+### Instrumentation, complete and wired
+
+One event per analysis, verified end to end: datasets requested, a per-module
+verdict, per-module and total duration, a coarse area band, the sensor chosen,
+and a truncated client prefix. No submitted geometry, no raw area, no full address
+— asserted by tests that walk the record for anything coordinate-shaped.
+
+The developer side is `GET /analytics/summary`: outcome counts by module, dataset
+request counts, area-band distribution, sensor distribution, and p50/p95 latency.
+**Aggregates only.** The per-event rows are deliberately not returned — a row
+carries a timestamp, a duration and an area band, and a long enough tail of those
+starts to describe a person even with no directly identifying field. A test
+asserts the response contains no raw area value and only the band.
+
+This is the piece that gates prioritising everything else: which modules are
+actually used, which silently degrade, and where the latency sits.
+
+Tests 346 -> 356.
+
+---
+
 ## 1.14.0 — Rainfall and vegetation on one time axis
 
 The comparison the DEA dashboard appears to offer, built on data that is actually

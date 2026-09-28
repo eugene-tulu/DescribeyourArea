@@ -120,6 +120,47 @@ async def compute_indicator(
     raise ValueError(f"unknown indicator {indicator!r}; choose from {('dem','landcover','ndvi','rainfall')}")
 
 
+def plan_indicator(
+    indicator: str,
+    bbox_area_km2: float,
+    *,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+) -> Optional[dict]:
+    """What the worker will do for this area, and how long it should take.
+
+    Cost drivers differ per indicator, so the plan differs: the raster modules are
+    bounded by pixels at a policy resolution, while a vegetation series is bounded
+    by the number of months it has to read, which barely moves with area.
+    """
+    if indicator == "rainfall":
+        # A cache read plus a known-width ERA5 aggregate; effectively instant.
+        return {
+            "indicator": "rainfall",
+            "resolution_km": 27.8,
+            "reason": "a cached series, or one ERA5 read per year",
+            "estimated_seconds": 60,
+            "estimate_basis": "one annual ERA5 read per pass; cached areas are instant",
+        }
+    if indicator == "vegetation_series":
+        import vegetation_series
+
+        return vegetation_series.plan(bbox_area_km2, start or "2010-01-01", end)
+    resolution, reason = resolution_for(bbox_area_km2, indicator)
+    pixels = pixels_for(bbox_area_km2, resolution)
+    # A raster pass is a handful of window reads; cost tracks block count, not pixel
+    # count, so this is deliberately coarse and labelled an estimate.
+    seconds = max(15, min(600, int(20 + pixels / 4000)))
+    return {
+        "indicator": indicator,
+        "resolution_m": resolution,
+        "reason": reason,
+        "pixels_analysed": pixels,
+        "estimated_seconds": seconds,
+        "estimate_basis": "measured raster pass; cost tracks window reads, not pixels",
+    }
+
+
 def pixels_for(area_km2: float, resolution_m: int) -> int:
     """Pixels an area costs at a resolution, for reporting and for the budget."""
     return int(area_km2 * 1_000_000 / (resolution_m * resolution_m))

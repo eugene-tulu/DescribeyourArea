@@ -54,6 +54,17 @@ interface SubmissionState {
   cacheKey?: string;
 }
 
+interface WorkPlan {
+  indicator?: string;
+  resolution_m?: number;
+  resolution_km?: number;
+  reason?: string;
+  months?: number;
+  pixels_analysed?: number;
+  estimated_seconds?: number;
+  estimate_basis?: string;
+}
+
 interface ClimateVegSeries {
   status: string;
   source?: string | null;
@@ -355,13 +366,19 @@ function Working({
 
 /* A wait, described. The stages the worker actually goes through, and the
    conditions it will run under, instead of a spinner over a pending. */
+function minutes(seconds?: number | null): string {
+  if (seconds == null) return 'under a minute';
+  if (seconds < 90) return `about ${Math.round(seconds / 15) * 15} seconds`;
+  return `about ${Math.round(seconds / 60)} minutes`;
+}
+
 function JobProgressLine({
   progress,
   planned,
   onDismiss,
 }: {
   progress: JobProgress;
-  planned?: { resolution_m?: number; reason?: string; pixels_analysed?: number } | null;
+  planned?: WorkPlan | null;
   onDismiss: () => void;
 }) {
   const stage: Record<string, string> = {
@@ -387,6 +404,14 @@ function JobProgressLine({
           </button>
         )}
       </div>
+      {planned?.estimated_seconds != null && (
+        <p className="fig mt-1 text-sm text-ink">
+          Ready in {minutes(planned.estimated_seconds)}.
+          {planned.months ? ` ${planned.months} monthly reads` : null}
+          {planned.resolution_m ? ` at ${planned.resolution_m} m` : null}
+          {planned.resolution_km ? ` on a ${planned.resolution_km} km grid` : null}.
+        </p>
+      )}
       {planned?.reason && <p className="fig mt-1 text-xs text-ink-2">{planned.reason}</p>}
       <Working
         rows={[
@@ -444,12 +469,18 @@ function DatasetResultCard({
   submission,
   onSubmit,
   vegetationSeries,
+  onSubmitSeries,
+  pendingIndicator,
+  progress,
 }: {
   dataset: DatasetId;
   summary: Summary;
   submission?: SubmissionState;
   onSubmit?: () => void;
   vegetationSeries?: ClimateVegSeries | null;
+  onSubmitSeries?: () => void;
+  pendingIndicator?: string | null;
+  progress?: { state: string; indicator: string } | null;
 }) {
   const option = DATASET_OPTIONS.find((item) => item.id === dataset);
   if (!option) return null;
@@ -597,6 +628,28 @@ function DatasetResultCard({
           </p>
         )}
         <EvidenceLine evidence={rain.evidence} status={rain.status} />
+        {!(vegetationSeries?.series?.length ?? 0) && (
+          <div className="mt-3 rule-t pt-3">
+            <p className="text-sm text-ink-2">
+              No vegetation series for this boundary yet.
+            </p>
+            <p className="fig mt-1 text-xs text-ink-3">
+              A monthly NDVI series is computed offline from MODIS. It reads once
+              per month, so the wait is minutes rather than seconds, and it does not
+              grow with the size of the area.
+            </p>
+            {!progress && (
+              <button
+                type="button"
+                onClick={() => onSubmitSeries && onSubmitSeries()}
+                disabled={pendingIndicator === 'vegetation_series'}
+                className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper disabled:opacity-50"
+              >
+                {pendingIndicator === 'vegetation_series' ? 'Queueing…' : 'Build a vegetation series'}
+              </button>
+            )}
+          </div>
+        )}
         {(vegetationSeries?.series?.length ?? 0) > 0 ? (
           <ClimateChart
             rain={rain.series || []}
@@ -705,9 +758,8 @@ export default function Home() {
   const [progress, setProgress] = useState<JobProgress | null>(null);
   // The per-area monthly vegetation series, fetched alongside the summary.
   const [vegetationSeries, setVegetationSeries] = useState<ClimateVegSeries | null>(null);
-  const [planned, setPlanned] = useState<
-    { resolution_m?: number; reason?: string; pixels_analysed?: number } | null
-  >(null);
+  const [plan, setPlan] = useState<WorkPlan | null>(null);
+  const [pendingIndicator, setPendingIndicator] = useState<string | null>(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
 
@@ -883,6 +935,52 @@ export default function Home() {
   const customRangeValid =
     !customStart || !customEnd || (customStart <= customEnd && customStart <= windowEndISO());
 
+  // Queue any indicator for this area and report when it will be ready.
+  //
+  // The wait is stated rather than implied: a vegetation series is a few minutes
+  // of monthly reads, and a spinner over an unquantified wait is the thing this
+  // replaces. The estimate is the backend's measured rate, and it is labelled an
+  // estimate everywhere it appears.
+  async function submitIndicator(indicator: string) {
+    const geojson = currentGeojson();
+    if (!geojson) return;
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    setPendingIndicator(indicator);
+    try {
+      const query = new URLSearchParams({
+        window_start: windowStartISO(),
+        window_end: windowEndISO(),
+      });
+      const response = await fetch(`${backendUrl}/rainfall/submit?${query.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geojson, indicator }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.detail || 'Submission failed');
+      }
+      setPlan(data.planned || null);
+      setProgress({
+        state: data.submission?.state || 'pending',
+        indicator,
+        attempts: 0,
+        reason: data.submission?.reason ?? null,
+      });
+      if (data.submission?.state !== 'ready') {
+        void pollSubmission(data.cache_key, indicator);
+      } else {
+        void loadVegetationSeries(data.cache_key);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Submission failed';
+      setResponse(message);
+      setSummaryText(message);
+    } finally {
+      setPendingIndicator(null);
+    }
+  }
+
   // The monthly vegetation series lives in its own artefact, keyed by area, so it
   // is fetched after the summary rather than returned inside it.
   async function loadVegetationSeries(cacheKey: string) {
@@ -893,7 +991,12 @@ export default function Home() {
       );
       if (!response.ok) return;
       const body = await response.json();
-      setVegetationSeries((body.rainfall as ClimateVegSeries) ?? null);
+      const loaded = (body.rainfall as ClimateVegSeries) ?? null;
+      setVegetationSeries(loaded);
+      if (loaded?.status === 'ok') {
+        setProgress(null);
+        setPlan(null);
+      }
     } catch {
       /* the chart falls back to rainfall alone */
     }
@@ -996,7 +1099,7 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data?.detail || 'Submission failed');
       }
-      setPlanned(data.planned || null);
+      setPlan(data.planned || null);
       setSubmission((previous) => ({
         ...previous,
         [data.cache_key]: {
@@ -1450,7 +1553,7 @@ export default function Home() {
                             {progress && (
                               <JobProgressLine
                                 progress={progress}
-                                planned={planned}
+                                planned={plan}
                                 onDismiss={() => setProgress(null)}
                               />
                             )}
@@ -1464,6 +1567,9 @@ export default function Home() {
                                   submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                                   onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
                                   vegetationSeries={vegetationSeries}
+                                  onSubmitSeries={dataset === 'rainfall' ? () => submitIndicator('vegetation_series') : undefined}
+                                  pendingIndicator={pendingIndicator}
+                                  progress={progress}
                                 />
                               ))}
                           </div>

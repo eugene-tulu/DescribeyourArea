@@ -280,7 +280,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.14.0"
+APP_VERSION = "1.15.0"
 
 
 @app.middleware("http")
@@ -1821,6 +1821,8 @@ async def rainfall_lookup(request: RainfallLookupRequest):
 async def submit_rainfall(
     payload: SubmitRequest,
     http_request: Request = None,
+    window_start: str = "",
+    window_end: str = "",
 ):
     """Queue a study area for precomputation, and return immediately.
 
@@ -1854,16 +1856,14 @@ async def submit_rainfall(
     # Say up front what the worker will do with the area, because a large area is
     # answered at a coarser resolution rather than refused, and the caller should
     # know which they are getting.
-    planned = None
-    if indicator != "rainfall":
-        import indicators
+    import indicators
 
-        resolution, reason = indicators.resolution_for(area["bbox_area_km2"], indicator)
-        planned = {
-            "resolution_m": resolution,
-            "reason": reason,
-            "pixels_analysed": indicators.pixels_for(area["bbox_area_km2"], resolution),
-        }
+    planned = indicators.plan_indicator(
+        indicator,
+        area["bbox_area_km2"],
+        start=window_start or None,
+        end=window_end or None,
+    )
     return {
         "submission": state,
         "cache_key": key,
@@ -1871,7 +1871,7 @@ async def submit_rainfall(
         "planned": planned,
         "analysis": {
             "bbox_area_km2": round(area["bbox_area_km2"], 2),
-            "compute_seconds_typical": 60,
+            "compute_seconds_typical": (planned or {}).get("estimated_seconds"),
         },
     }
 
@@ -1975,6 +1975,42 @@ async def forget_rainfall_series(payload: ForgetRequest):
     return {"cache_key": key, "removed": bool(outcome["local"] or outcome["remote"]),
             "local": outcome["local"], "remote": outcome["remote"],
             "job_record_dropped": job_dropped, "data": "rainfall series"}
+
+
+@app.get("/analytics/summary")
+async def analytics_summary(limit: int = 2000):
+    """Aggregate view of recent usage, for whoever is looking after the service.
+
+    Aggregates only. The per-event rows are deliberately not returned: a row
+    carries a timestamp, a duration and an area band, and a long enough tail of
+    them starts to describe a specific person even without any field that does.
+    """
+    import usage as _usage
+
+    events = _usage.read_events()[-max(1, min(limit, 20000)):]
+    summary = _usage.summarise(events)
+    per_module: dict[str, dict[str, int]] = {}
+    per_dataset: dict[str, int] = {}
+    for event in events:
+        for module, verdict in (event.get("outcomes") or {}).items():
+            per_module.setdefault(module, {})
+            per_module[module][verdict] = per_module[module].get(verdict, 0) + 1
+        for dataset in event.get("datasets_requested") or []:
+            per_dataset[dataset] = per_dataset.get(dataset, 0) + 1
+    return {
+        "analytics_enabled": _usage.analytics_enabled(),
+        **summary,
+        "by_module": {k: dict(sorted(v.items())) for k, v in sorted(per_module.items())},
+        "datasets_requested": dict(sorted(per_dataset.items())),
+        "window": {
+            "from": events[0]["at"] if events else None,
+            "to": events[-1]["at"] if events else None,
+        },
+        "note": (
+            "Counts and percentiles only. Individual rows are not exposed, and no "
+            "submitted geometry, raw area or full address is ever recorded."
+        ),
+    }
 
 
 @app.get("/analytics")

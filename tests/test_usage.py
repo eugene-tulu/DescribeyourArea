@@ -511,3 +511,116 @@ async def _sleep(seconds):
 
 async def _boom():
     raise RuntimeError("boom")
+
+
+class SummaryEndpointTests(unittest.TestCase):
+    """The developer view must be aggregates only.
+
+    A row carries a timestamp, a duration and an area band, and a long enough tail
+    of them starts to describe a person even with no directly identifying field.
+    """
+
+    def setUp(self):
+        self.previous = os.environ.get("USAGE_EVENTS_PATH")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / "events.jsonl"
+        os.environ["USAGE_EVENTS_PATH"] = str(self.path)
+        from fastapi.testclient import TestClient
+
+        import main
+
+        self.client = TestClient(main.app)
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        if self.previous is None:
+            os.environ.pop("USAGE_EVENTS_PATH", None)
+        else:
+            os.environ["USAGE_EVENTS_PATH"] = self.previous
+
+    def _emit(self, count=3, **overrides):
+        for _ in range(count):
+            usage.emit(usage.build_event(
+                datasets_requested=["dem", "ndvi"],
+                outcomes={"dem": {"status": "ok"}, "ndvi": {"status": "skipped"}},
+                duration_ms={"ndvi": 1000},
+                total_ms=2000,
+                area_km2=60.0,
+                **overrides,
+            ))
+
+    def test_it_aggregates_by_module_and_dataset(self):
+        self._emit()
+        body = self.client.get("/analytics/summary").json()
+        self.assertEqual(body["events"], 3)
+        self.assertEqual(body["by_module"]["ndvi"], {"skipped": 3})
+        self.assertEqual(body["datasets_requested"], {"dem": 3, "ndvi": 3})
+        self.assertEqual(body["outcomes"], {"ok": 3, "skipped": 3})
+
+    def test_it_reports_latency_percentiles(self):
+        self._emit()
+        body = self.client.get("/analytics/summary").json()
+        self.assertEqual(body["total_ms"]["p50"], 2000)
+
+    def test_it_never_returns_individual_rows(self):
+        self._emit()
+        body = self.client.get("/analytics/summary").json()
+        for key in ("events_list", "rows", "records", "items"):
+            self.assertNotIn(key, body, "per-event rows must not be exposed")
+        # No field anywhere in the response may carry a timestamp of its own beyond
+        # the coarse window bounds.
+        self.assertEqual(set(body["window"]), {"from", "to"})
+
+    def test_the_response_carries_no_area_value(self):
+        self._emit()
+        raw = self.client.get("/analytics/summary").text
+        self.assertNotIn("60.0", raw, "a raw area leaked into the aggregate view")
+        self.assertIn("10-100", raw, "the area band is what should appear")
+
+    def test_it_is_empty_and_harmless_before_any_traffic(self):
+        body = self.client.get("/analytics/summary").json()
+        self.assertEqual(body["events"], 0)
+        self.assertIsNone(body["total_ms"]["p50"])
+        self.assertIsNone(body["window"]["from"])
+
+
+class PlanEstimationTests(unittest.TestCase):
+    """A stated wait has to come from a measurement, not a guess."""
+
+    def test_the_vegetation_estimate_grows_with_months_not_area(self):
+        import indicators
+
+        small = indicators.plan_indicator("vegetation_series", 60)
+        large = indicators.plan_indicator("vegetation_series", 5_500)
+        self.assertEqual(small["estimated_seconds"], large["estimated_seconds"],
+                         "cost is request latency, not pixels, so area must not change it")
+        self.assertGreater(small["months"], 0)
+        self.assertIn("measured", small["estimate_basis"])
+
+    def test_a_longer_window_costs_more(self):
+        import vegetation_series as vs
+
+        self.assertGreater(vs.estimate_seconds(300), vs.estimate_seconds(30))
+
+    def test_the_estimate_is_named_as_an_estimate(self):
+        import vegetation_series as vs
+
+        self.assertGreater(vs.estimate_seconds(12), 0)
+        self.assertIn("estimate", vs.plan(100)["estimate_basis"])
+
+    def test_rainfall_is_reported_as_a_cache_read(self):
+        import indicators
+
+        plan = indicators.plan_indicator("rainfall", 5505)
+        self.assertIn("cache", plan["reason"])
+        self.assertLess(plan["estimated_seconds"], 120)
+
+    def test_raster_indicators_get_a_pixels_based_plan(self):
+        import indicators
+
+        small = indicators.plan_indicator("ndvi", 50)
+        large = indicators.plan_indicator("ndvi", 5_500)
+        self.assertIn("pixels_analysed", small)
+        self.assertGreater(large["estimated_seconds"], small["estimated_seconds"],
+                           "a bigger area must cost more for a raster pass")
