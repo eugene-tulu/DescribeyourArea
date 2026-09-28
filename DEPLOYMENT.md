@@ -140,13 +140,35 @@ The payload is Slack-shaped and also sends `content`, so Mattermost, n8n, Zapier
 and Discord all work unchanged.
 
 **Email** carries the same messages to people, including a notice when a queued
-job finishes, which a browser tab that has been closed cannot deliver:
+job finishes, which a browser tab that has been closed cannot deliver. Sent over
+plain HTTP, with no SDK:
 
 ```bash
 AGENTMAIL_API_KEY=am_...
 AGENTMAIL_INBOX_ID=inbox_...
 ALERT_EMAIL_TO=you@example.org
 ```
+
+**The inbox does not need a paid plan.** The service only ever *sends*, so it
+needs an inbox id and never calls `inboxes.create`, which is the gated endpoint.
+AgentMail's agent sign-up returns an `inbox_id` directly, with no console and no
+dashboard:
+
+```bash
+curl -X POST https://api.agentmail.to/agent/sign-up \
+  -H "Content-Type: application/json" \
+  -d '{"human_email": "you@example.org", "username": "geocontextualize"}'
+# returns { api_key, inbox_id, organization_id }
+
+# then confirm the 6-digit OTP emailed to you
+curl -X POST https://api.agentmail.to/agent/verify \
+  -H "Authorization: Bearer $AGENTMAIL_API_KEY" -H "Content-Type: application/json" \
+  -d '{"otp_code": "123456"}'
+```
+
+The default domain is `@agentmail.to`; a custom domain needs a paid plan. The API
+rate-limits with `429` and a `Retry-After` header, which surfaces as a failed
+delivery rather than a silent drop.
 
 Neither channel is required. Unconfigured, both are no-ops and the sweep is
 unaffected.
