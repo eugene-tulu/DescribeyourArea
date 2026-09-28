@@ -31,6 +31,82 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.18.0 — The endpoint anyone could call, and the volume nobody could write
+
+Both of these were found by deploying and then actually using the service, rather
+than by reading the code. Neither would have shown up in a test run.
+
+### An open delete, and a queue that had never run
+
+`POST /admin/rainfall/forget` took a `geojson` or a `cache_key` from anyone who
+reached the API. The cache is keyed by a hash of the submitted geometry, so a
+request carrying a study area removed that area's monthly series -- local copy
+and object store together. There was no credential, no rate limit, and no log
+line. Anyone who found the host could have deleted records one at a time, and
+nothing would have said so.
+
+It is now gated by a shared secret in `X-Admin-Key` (`main.py:1768`,
+`require_admin_key`), compared with `secrets.compare_digest`, and returning
+**503 when the key is unset rather than 200**. That distinction is the point: a
+deployment that forgets to set the key gets a disabled endpoint, not an open
+one. Four tests cover the four cases -- no key, wrong key, unset, and correct
+key -- because the failure mode that matters is the one nobody tests.
+
+The pattern is not new. The other service on this host, gaul-api, already gates
+its `/stats/monitoring` behind `GAUL_ADMIN_API_KEY` the same way; it was worth
+copying a convention from a neighbouring project rather than inventing a second
+one.
+
+Verified live through nginx after deploy:
+
+```
+no key:   401
+bad key:  401
+good key: 200 {"cache_key":"aaa…","removed":false,…}
+```
+
+### A named volume that remembered who it used to belong to
+
+`/rainfall/submit` returned 500 and the worker restarted 29 times without
+processing a single job. The two symptoms pointed in opposite directions -- a
+write failure in the request path and a `PermissionError` on `worker.lock` --
+and neither one mentions the actual cause.
+
+The cause: **Docker only applies a directory's ownership when it *creates* a
+named volume.** The containers run as uid 999 (`USER app`), and
+`Dockerfile:28` chowns `/app` before dropping privileges, so a fresh volume
+inherits the right owner. The volume on the droplet predated that line, so it
+was still `root:root` from a 10-day-old image, and ten days of nothing was
+enough to be permanent. `chown -R 999:999` on the volume fixed it, and the
+worker has processed jobs ever since without a restart.
+
+The lesson is not the chown, it is that a stale volume fails in a way that
+looks like two unrelated bugs. `scripts/fix-cache-ownership.sh` now repairs it,
+is a no-op when ownership is already correct, and `docker-entrypoint.sh` refuses
+to start with the cause and the remedy in the log. A crash loop that says
+"Permission denied" on its own line was the wrong answer; a startup refusal that
+says *what* is wrong and *what to run* is the right one.
+
+The worker still sets `entrypoint: []` in `docker-compose.yml:62`, so the guard
+does not run for it. That is deliberate and noted: the worker is the process
+that most needs the diagnosis, and it is the one that skips the check. Repairing
+the volume at the start of a deploy is the real fix, and the script makes that
+one command.
+
+### Evidence
+
+- 381 backend tests, 1 failure: `test_contract.CaveatTests` depends on live
+  Planetary Computer search and fails intermittently, passing on isolated
+  rerun. Pre-existing, unrelated to either change, and worth pinning.
+- A real queued job, submitted through nginx and processed by the worker,
+  produced **195 monthly ERA5 values** (2010-01 to 2026-03) with anomalies
+  against the 1991-2020 normal, served warm in 2.2s and labelled `modelled`.
+- Frontend rebuilt and verified current by fetching all 9 assets the page
+  references and confirming the markers from the newest client commit
+  (`rainfall/plan`, `offline`, `queued`) are present.
+
+---
+
 ## 1.17.0 — Two notification channels, and a completion message
 
 ### Webhook for machines, email for people

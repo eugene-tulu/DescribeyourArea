@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -254,3 +255,184 @@ def area_km2_of(geojson_geom: Optional[dict]) -> Optional[float]:
 
     minx, miny, maxx, maxy = shape(geojson_geom).bounds
     return _bbox_area_km2([float(minx), float(miny), float(maxx), float(maxy)])
+
+
+def _percentile(values: list[int], fraction: float) -> Optional[int]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    return ordered[min(len(ordered) - 1, int(len(ordered) * fraction))]
+
+
+def breakdown(events: list[dict]) -> dict:
+    """The detail :func:`summarise` deliberately leaves out.
+
+    ``summarise`` answers "is it working"; this answers "working on what". Two
+    questions need per-dataset detail and neither is visible in the totals: which
+    datasets people actually ask for (so a dataset nobody requests is a candidate
+    for removal, not for investment), and which dataset is slow (the total is an
+    average over datasets the user may not have wanted, so a slow total can hide
+    a fast request and a fast total can hide a slow one).
+    """
+    requested: dict[str, int] = {}
+    outcomes: dict[str, dict[str, int]] = {}
+    durations: dict[str, list[int]] = {}
+    by_day: dict[str, int] = {}
+    clients: dict[str, int] = {}
+    totals: list[int] = []
+
+    for event in events:
+        for name in event.get("datasets_requested") or []:
+            requested[name] = requested.get(name, 0) + 1
+        for name, verdict in (event.get("outcomes") or {}).items():
+            outcomes.setdefault(name, {})
+            outcomes[name][verdict] = outcomes[name].get(verdict, 0) + 1
+        for name, ms in (event.get("duration_ms") or {}).items():
+            durations.setdefault(name, []).append(ms)
+        at = (event.get("at") or "")[:10]
+        if at:
+            by_day[at] = by_day.get(at, 0) + 1
+        client = event.get("client_prefix")
+        if client:
+            clients[client] = clients.get(client, 0) + 1
+        if event.get("total_ms") is not None:
+            totals.append(event["total_ms"])
+
+    return {
+        "requested": dict(sorted(requested.items(), key=lambda kv: -kv[1])),
+        "outcomes": {k: dict(sorted(v.items(), key=lambda kv: -kv[1]))
+                     for k, v in sorted(outcomes.items())},
+        "duration_ms": {k: {"n": len(v), "p50": _percentile(v, 0.5),
+                            "p95": _percentile(v, 0.95)}
+                        for k, v in sorted(durations.items())},
+        "by_day": dict(sorted(by_day.items())),
+        "clients": dict(sorted(clients.items(), key=lambda kv: -kv[1])),
+        "total_ms_p95": _percentile(totals, 0.95),
+    }
+
+
+def _table(title: str, rows: list[tuple[str, str]]) -> str:
+    if not rows:
+        return f"\n{title}\n  (none)"
+    width = max(len(label) for label, _ in rows)
+    body = "\n".join(f"  {label.ljust(width)}  {value}" for label, value in rows)
+    return f"\n{title}\n{body}"
+
+
+def render(events: list[dict]) -> str:
+    """A summary a human reads, rather than one a browser fetches.
+
+    The shape is a report, not JSON: this is for answering a question at a
+    terminal, and the questions are always comparative -- which dataset, which
+    day, which client. JSON forces the reader to do the summing.
+    """
+    if not events:
+        return (
+            "no usage events found.\n\n"
+            "Events go to stdout unless USAGE_EVENTS_PATH names a file. To read the\n"
+            "container log without copying it off the host:\n"
+            "  docker logs <container> 2>&1 | python -m usage -"
+        )
+
+    head = summarise(events)
+    detail = breakdown(events)
+    lines = [f"{head['events']} event(s)"]
+
+    if head["total_ms"]["p50"] is not None:
+        lines.append(
+            f"  request total_ms   p50 {head['total_ms']['p50']}   "
+            f"p95 {head['total_ms']['p95']}"
+        )
+    lines.append(_table(
+        "outcomes",
+        [(k, str(v)) for k, v in head["outcomes"].items()],
+    ))
+    lines.append(_table(
+        "datasets requested",
+        [(k, str(v)) for k, v in detail["requested"].items()],
+    ))
+
+    per_dataset = []
+    for name, verdicts in detail["outcomes"].items():
+        timing = detail["duration_ms"].get(name, {})
+        rendered = ", ".join(f"{k}={v}" for k, v in verdicts.items())
+        if timing.get("p95") is not None:
+            rendered += f"  (p50 {timing['p50']}ms, p95 {timing['p95']}ms, n={timing['n']})"
+        per_dataset.append((name, rendered))
+    lines.append(_table("per dataset", per_dataset))
+
+    if head["sensors"]:
+        lines.append(_table("sensors",
+                            [(k, str(v)) for k, v in head["sensors"].items()]))
+    if head["area_bands"]:
+        lines.append(_table("area bands (km2)",
+                            [(k, str(v)) for k, v in head["area_bands"].items()]))
+    lines.append(_table("by day",
+                        [(k, str(v)) for k, v in detail["by_day"].items()]))
+    lines.append(_table("client prefixes (truncated in the event itself)",
+                        [(k, str(v)) for k, v in detail["clients"].items()]))
+    return "\n".join(lines)
+
+
+def _events_from_stdin() -> list[dict]:
+    """Read a log stream, ignoring everything that is not a usage event.
+
+    Reading ``docker logs`` directly is the point: the container's log is a
+    rotating buffer, so copying it off the host and analysing it later is
+    analysing whatever survived rotation. Parsing lines that turn out not to be
+    events is cheaper than a round trip, and a log full of tracebacks is the
+    normal case, not an error.
+    """
+    events = []
+    for line in sys.stdin:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            candidate = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(candidate, dict) and candidate.get("v") == EVENT_VERSION:
+            events.append(candidate)
+    return events
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="python -m usage",
+        description="Summarise recorded usage events.",
+    )
+    parser.add_argument(
+        "path", nargs="?", default=None,
+        help="events file, or - for stdin (e.g. 'docker logs <c> 2>&1 | python -m usage -')",
+    )
+    parser.add_argument("--json", action="store_true",
+                        help="emit the aggregates as JSON instead of a report")
+    args = parser.parse_args(argv)
+
+    # No path and a pipe on stdin means a log is being fed in. Without this,
+    # `docker logs <c> | python -m usage --json` prints a confident zero-event
+    # report, which reads as "no traffic" rather than "you forgot to say -".
+    piped = args.path is None and not sys.stdin.isatty()
+
+    if args.path == "-" or piped:
+        events = _events_from_stdin()
+    else:
+        target = Path(args.path).expanduser() if args.path else events_path()
+        events = read_events(target)
+        if not events and args.path:
+            print(f"no events at {target}", file=sys.stderr)
+            return 1
+
+    if args.json:
+        print(json.dumps({"summary": summarise(events), "detail": breakdown(events)},
+                         indent=2, sort_keys=True))
+    else:
+        print(render(events))
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - a terminal entry point
+    raise SystemExit(main())
