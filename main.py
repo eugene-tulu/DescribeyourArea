@@ -280,7 +280,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.16.0"
+APP_VERSION = "1.17.0"
 
 
 @app.middleware("http")
@@ -957,18 +957,23 @@ async def _search_items(
 
     def search_once() -> list:
         catalog = pystac_client.Client.open(STAC_URL)
+        # Candidates must exceed the number of scenes actually used, or the
+        # cloud-cover sort below has nothing to choose from. Capping the pool at
+        # ``max_scenes`` returned only the most recent items, so a request for a
+        # 30-year window silently produced a composite of the last six weeks.
+        pool = max(4 * max_scenes, 50)
         arguments: dict[str, Any] = {
             "collections": [sensor.collection],
             "bbox": bbox,
             "datetime": time_window,
-            "limit": max_scenes,
-            "max_items": max_scenes,
+            "limit": pool,
+            "max_items": pool,
         }
         # A product sensor is already cloud-masked, so there is no reason to spend
         # the scene budget on a cloudy scene.
         if sensor.cloud_mask != "product":
             arguments["query"] = {"eo:cloud_cover": {"lt": 30}}
-        return list(catalog.search(**arguments).items())
+        return list(catalog.search(**arguments).items())[:pool]
 
     for attempt in range(3):
         try:
@@ -984,7 +989,9 @@ async def _search_items(
                 # MODIS publishes datetime=null and only start_datetime, so the
                 # default ordering is by recency using the field that exists.
                 items.sort(key=_item_start_datetime, reverse=True)
-            return items
+            # The wider pool is for *selection*. Only the best ``max_scenes`` are
+            # composited, so widening the search does not widen the read.
+            return items[:max_scenes]
         except Exception:
             if attempt == 2:
                 print(f"STAC search failed after 3 attempts for {sensor.id}", file=sys.stderr)

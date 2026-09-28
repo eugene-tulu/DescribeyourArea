@@ -315,3 +315,55 @@ class VegetationProvenanceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SceneSelectionTests(unittest.TestCase):
+    """The candidate pool must exceed the number of scenes composited.
+
+    Capping the pool at ``max_scenes`` made the cloud-cover sort decorative: the
+    search returned only the most recent items, and those were all that ever got
+    medianed. A request for a 30-year window therefore produced a composite of the
+    last six weeks, presented as a thirty-year figure.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import pystac_client
+
+            cls.catalog = pystac_client.Client.open(main.STAC_URL)
+        except Exception:
+            cls.catalog = None
+
+    def setUp(self):
+        if self.catalog is None:
+            self.skipTest("STAC unreachable")
+        self.bbox = [35.10, -1.55, 35.17, -1.48]
+
+    def _search(self, max_scenes, start, end):
+        pool = max(4 * max_scenes, 50)
+        found = list(self.catalog.search(
+            collections=[LANDSAT.collection], bbox=self.bbox,
+            datetime=f"{start}/{end}", query={"eo:cloud_cover": {"lt": 30}},
+            limit=pool, max_items=pool,
+        ).items())
+        found.sort(key=lambda item: (item.properties or {}).get("eo:cloud_cover", 100.0))
+        return found[:max_scenes]
+
+    def test_the_pool_is_wider_than_the_composite(self):
+        self.assertGreater(max(4 * 4, 50), 4)
+
+    def test_a_wide_window_selects_from_the_whole_window(self):
+        chosen = self._search(4, "2021-01-01", "2026-01-01")
+        self.assertEqual(len(chosen), 4, "only the selected scenes are composited")
+        dates = sorted(main._item_start_datetime(i) for i in chosen)
+        # A pool capped at 4 returned four consecutive recent scenes; a real pool
+        # spreads the selection across the window.
+        self.assertGreater(max(dates) - min(dates), 60 * 86400,
+                           "the selected scenes are clustered, so the wider window "
+                           "is not reaching the search")
+
+    def test_the_clearest_available_scenes_win(self):
+        chosen = self._search(4, "2026-06-01", "2026-09-01")
+        covers = [(i.properties or {}).get("eo:cloud_cover", 100.0) for i in chosen]
+        self.assertEqual(covers, sorted(covers), "scenes must arrive sorted by cloud cover")

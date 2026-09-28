@@ -31,6 +31,72 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.17.0 — Snapshot and series are different questions, and the window could not tell them apart
+
+Asked how to tell a user who wants a quick look at a place from one who wants a
+trend. Answering the question turned up a defect in how the window worked at all.
+
+### A 30-year window was returning six weeks
+
+`_search_items` capped the STAC query at `limit=max_items=max_scenes` and *then*
+sorted the results by cloud cover. The search therefore returned only the most
+recent items, the sort had nothing to choose from, and the "clearest scenes" logic
+was decorative. Measured over the same study area:
+
+| window asked for | scenes returned | what they actually were |
+| --- | --- | --- |
+| 90 days | 4 | 2026-08-06 to 2026-08-30, 0.2–17.5% cloud |
+| **30 years** | 4 | **2025-11-23 to 2025-12-09 — six weeks** |
+
+Both were then medianed into a single number and returned as though the window
+meant something. Raising the candidate pool to `max(4 × scenes, 50)` and
+truncating *after* the sort fixes it: the 5-year window now selects from 50
+candidates spanning 1.9 years, with the widest pool for selection and only the best
+four composited, so the read cost is unchanged. This is the same failure the
+project keeps finding — a number that looks like what was asked for and is not —
+and it was there precisely because one control was being asked to serve two
+incompatible intents.
+
+### Why one control cannot do both
+
+A snapshot is a **state** and a series is a **trajectory**. They are not the same
+computation over a different span:
+
+- A snapshot is a median composite over a handful of recent, clear scenes. That is
+  a legitimate estimate of "what this place looks like now", and `max_scenes=4`
+  is the right shape for it.
+- A series is **monthly values**. It cannot be produced by medianing four scenes
+  chosen for clarity, at any window length. Widening the window does not make a
+  median into a trend; it only makes the sample more arbitrary.
+
+So the fix is not a wider window, it is a different reduction, and the mode has to
+be explicit because one is cheap and synchronous and the other is worker work.
+
+### The uncomfortable third thing
+
+**Elevation and land cover have no time dimension at all.** NASADEM is a static
+DEM and ESA WorldCover a single-date classification, which the evidence line
+already says: *"a single-date classification, so it reflects the scene, not a
+year."* The data has been telling us this and the window control was offering a
+capability two of the four modules do not have.
+
+### What is proposed, not yet built
+
+A question rather than a mode toggle, because the audience is mixed and "snapshot
+vs time series" means nothing to a ward planner:
+
+- **"What is it like now?"** — the numbers, no chart, no window control, cache
+  hit, synchronous. The default, and what the webinar audience actually asked for.
+- **"Is it changing?"** — monthly values, a per-decade slope, the series shown so
+  it can be checked. Worker territory, and visibly a different cost.
+
+The mode is also the unit of cost, which matters against the droplet credits and
+eventually for pricing: a snapshot is a cache read, a series is a job.
+
+Tests 328 -> 331.
+
+---
+
 ## 1.16.0 — The watermark removed from the satellite basemap, and user-defined date ranges
 
 ### The watermark was CARTO, not Esri
