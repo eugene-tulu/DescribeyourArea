@@ -12,9 +12,15 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import datetime
 from typing import Any, Optional
 
 import sensors
+
+# How many years of vegetation history a series covers when the caller does not
+# ask for a specific window. MOD13Q1 begins in 2000-02, so 2010 leaves two
+# decades of record without pretending to more.
+DEFAULT_SERIES_YEARS = 16
 
 
 def resolution_for(bbox_area_km2: float, indicator: str) -> tuple[int, str]:
@@ -73,6 +79,22 @@ async def compute_indicator(
 
     if indicator == "rainfall":
         return rainfall.cached_context(geojson_geom)
+
+    if indicator == "vegetation_series":
+        import vegetation_series
+
+        series_start = window_start or None
+        if series_start is None:
+            end_dt = datetime.date.fromisoformat((window_end or "")[:10]) if window_end else None
+            series_start = (
+                f"{end_dt.year - DEFAULT_SERIES_YEARS:04d}-01-01" if end_dt
+                else None
+            )
+        return vegetation_series.compute_monthly_series(
+            geojson_geom, bbox,
+            start=series_start or "2010-01-01",
+            end=(window_end or None),
+        )
 
     if indicator == "dem":
         assets = await _find_core_assets(bbox, need_dem=True, need_landcover=False)

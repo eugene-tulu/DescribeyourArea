@@ -99,7 +99,10 @@ class MultiIndicatorJobTests(unittest.TestCase):
     def test_the_supported_indicators_are_declared(self):
         import jobs
 
-        self.assertEqual(set(jobs.INDICATORS), {"rainfall", "dem", "landcover", "ndvi"})
+        self.assertEqual(
+            set(jobs.INDICATORS),
+            {"rainfall", "dem", "landcover", "ndvi", "vegetation_series"},
+        )
 
     def test_artefacts_do_not_collide_across_indicators(self):
         import jobs

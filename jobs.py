@@ -42,8 +42,8 @@ JOB_VERSION = 2
 # What a job computes. Rainfall is a cheap cache read; the others read rasters,
 # which is why they need a resolution and why they are the reason a large area is
 # queued rather than refused.
-INDICATORS = ("rainfall", "dem", "landcover", "ndvi")
-RUNTIME_INDICATORS = ("dem", "landcover", "ndvi")
+INDICATORS = ("rainfall", "dem", "landcover", "ndvi", "vegetation_series")
+RUNTIME_INDICATORS = ("dem", "landcover", "ndvi", "vegetation_series")
 
 
 def artefact_path(key: str, indicator: str) -> Path:

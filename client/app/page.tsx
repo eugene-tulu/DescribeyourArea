@@ -10,6 +10,8 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
 import CopySummary from '@/components/Copy';
+import ClimateChart from '@/components/ClimateChart';
+import RainChart from '@/components/RainChart';
 import { useToast } from '@/hooks/use-toast';
 
 
@@ -50,6 +52,20 @@ interface SubmissionState {
   state: string;
   reason?: string | null;
   cacheKey?: string;
+}
+
+interface ClimateVegSeries {
+  status: string;
+  source?: string | null;
+  resolution_km?: number | null;
+  months?: number | null;
+  thin_months?: string[];
+  caveat?: string | null;
+  climatology?: { standard?: string | null; start?: string | null; end?: string | null } | null;
+  series?: Array<{
+    month: string; value: number; min?: number; max?: number;
+    normal?: number; anomaly?: number; anomaly_pct?: number | null;
+  }>;
 }
 
 interface JobProgress {
@@ -427,11 +443,13 @@ function DatasetResultCard({
   summary,
   submission,
   onSubmit,
+  vegetationSeries,
 }: {
   dataset: DatasetId;
   summary: Summary;
   submission?: SubmissionState;
   onSubmit?: () => void;
+  vegetationSeries?: ClimateVegSeries | null;
 }) {
   const option = DATASET_OPTIONS.find((item) => item.id === dataset);
   if (!option) return null;
@@ -579,6 +597,27 @@ function DatasetResultCard({
           </p>
         )}
         <EvidenceLine evidence={rain.evidence} status={rain.status} />
+        {(vegetationSeries?.series?.length ?? 0) > 0 ? (
+          <ClimateChart
+            rain={rain.series || []}
+            vegetation={vegetationSeries?.series || []}
+            rainNormal={rain.climatology?.standard ?? null}
+            vegetationNormal={vegetationSeries?.climatology?.standard ?? null}
+            vegetationStatus={vegetationSeries?.status}
+            vegetationSource={vegetationSeries?.source}
+          />
+        ) : (
+          <RainChart
+            series={rain.series || []}
+            normalByMonth={rain.climatology?.monthly_mean_mm}
+          />
+        )}
+        {vegetationSeries && vegetationSeries.thin_months?.length ? (
+          <p className="fig mt-1 text-xs text-caution">
+            {vegetationSeries.thin_months.length} vegetation month(s) had thin
+            coverage and may not reflect a real change.
+          </p>
+        ) : null}
         <Working
           rows={[
             ['area', rain.label],
@@ -664,6 +703,8 @@ export default function Home() {
   // Progress for a queued area. A spinner is a decorated wait; this shows the
   // conditions the work happens under, which we already compute and discard.
   const [progress, setProgress] = useState<JobProgress | null>(null);
+  // The per-area monthly vegetation series, fetched alongside the summary.
+  const [vegetationSeries, setVegetationSeries] = useState<ClimateVegSeries | null>(null);
   const [planned, setPlanned] = useState<
     { resolution_m?: number; reason?: string; pixels_analysed?: number } | null
   >(null);
@@ -842,6 +883,22 @@ export default function Home() {
   const customRangeValid =
     !customStart || !customEnd || (customStart <= customEnd && customStart <= windowEndISO());
 
+  // The monthly vegetation series lives in its own artefact, keyed by area, so it
+  // is fetched after the summary rather than returned inside it.
+  async function loadVegetationSeries(cacheKey: string) {
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    try {
+      const response = await fetch(
+        `${backendUrl}/rainfall?cache_key=${cacheKey}&indicator=vegetation_series`,
+      );
+      if (!response.ok) return;
+      const body = await response.json();
+      setVegetationSeries((body.rainfall as ClimateVegSeries) ?? null);
+    } catch {
+      /* the chart falls back to rainfall alone */
+    }
+  }
+
   // Poll a queued area and describe what the worker is actually doing. The job
   // record already holds the timestamps, the indicator and the reason; all that
   // was missing was showing it.
@@ -1013,6 +1070,9 @@ export default function Home() {
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
       setAnalysisSummary(summary);
+      const areaKey = (summary.rainfall as { cache_key?: string } | undefined)?.cache_key;
+      setActiveCacheKey(areaKey ?? null);
+      if (areaKey) void loadVegetationSeries(areaKey);
       setResponse(result);
       setSummaryText(result);
     } catch (err) {
@@ -1403,6 +1463,7 @@ export default function Home() {
                                   summary={analysisSummary}
                                   submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                                   onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
+                                  vegetationSeries={vegetationSeries}
                                 />
                               ))}
                           </div>

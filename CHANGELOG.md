@@ -31,6 +31,82 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.14.0 — Rainfall and vegetation on one time axis
+
+The comparison the DEA dashboard appears to offer, built on data that is actually
+there: 189 months of ERA5 rainfall and 189 months of MODIS NDVI over the same
+months, each with its own climatological normal, on one shared time axis.
+
+### Two panels, not a dual axis
+
+Millimetres and NDVI cannot share a scale without implying they are comparable,
+and implying that is the one thing this product exists not to do. So: rainfall as
+bars with its normal as a stepped rule on top, vegetation as a line with its
+normal dashed beneath, sharing the time axis. The reader compares the *shape* of the
+two seasons vertically, which is the honest reading.
+
+The single-series chart remains for a series with no vegetation counterpart, and the
+figure degrades to it rather than showing an empty panel.
+
+### Why MOD13Q1 and not Landsat
+
+A 16-day NDVI **product**, already cloud-masked by NASA, so no cloud decisions are
+made here and its cadence maps onto ERA5's monthly buckets. Landsat monthly is
+possible but thin at 16-day revisit, and thin composites produce swings that look
+like change and are not — the failure mode already diagnosed once in this project
+and again in the Baringo work.
+
+Two facts taken from that work rather than re-derived: the QA_PIXEL bit mask it
+uses is exactly ours, and so are the radiometric constants. Its more useful
+contribution is the principle behind its water mask — a single index cannot
+separate open water from moist soil, so each pixel must satisfy several
+physically independent signals. That is structurally our SCL class-5 problem, and
+it is the pattern for any classifier in a surface where one signal is unreliable.
+
+### Measured cost, and the concurrency that made it viable
+
+Over a 5,505 km² area: 1.42 s per month sequentially, **0.41 s at 4-way
+concurrency**, so 1991 to present is about 3.5 minutes. Eight-way was *worse* than
+four, which is server-side contention rather than local, so the default is four.
+
+Four bugs found by building it, all of the same species as the rest of this
+project — a right-looking number that is not what it claims:
+
+- One STAC search per month meant 420 requests for a 35-year span, and one came
+  back as a connection reset. Now one paged search for the whole span, bucketed
+  locally, with the search rebuilt per retry so a reset cannot yield silence.
+- `geometry_mask` does not reproject, and the MODIS grid is a custom sinusoidal
+  CRS. The unprojected WGS84 polygon landed millions of metres away and the mask
+  came back empty, which surfaced as "this area covers no whole MODIS cell".
+- The baseline was labelled **1991-2020**. MOD13Q1 begins in 2000-02, so it was
+  really 2000-2020. It now reports the period it actually used, and names
+  `nominal_start` separately.
+- The native resolution is **231.656 m**, not 250. The grid is sinusoidal. Calling
+  it 250 m would be a small lie propagated into every stated resolution.
+
+### What the data shows
+
+Over Melako, the vegetation climatology is textbook East African bimodal: low
+through June to September (0.206 down to 0.179), peaking at **0.300 in April** for
+the long rains and **0.279 in November** for the short rains. Driest month
+2022-03 at 0.107, wettest 2018-04 at 0.667, and **zero thin months** across 189.
+The 32 KiB artefact is smaller than a screenshot.
+
+### Honesty, structurally
+
+- A rainfall overlay beside vegetation is exactly where an implied causal claim
+  creeps in, so the caveat is a module constant, asserted by a test, and printed
+  under the figure: *co-variation is not attribution; vegetation responds with a
+  lag that varies by season, and water is not always the limiting factor.*
+- Every month carries its valid-pixel fraction, and any month below 90% is listed
+  as thin and surfaced beneath the chart.
+- The two series carry different epistemic statuses — rainfall `modelled`,
+  vegetation `derived` — and the figure says so.
+
+Tests 331 -> 346.
+
+---
+
 ## 1.17.0 — Snapshot and series are different questions, and the window could not tell them apart
 
 Asked how to tell a user who wants a quick look at a place from one who wants a
