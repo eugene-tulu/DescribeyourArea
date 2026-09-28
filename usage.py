@@ -412,19 +412,26 @@ def main(argv: Optional[list[str]] = None) -> int:
                         help="emit the aggregates as JSON instead of a report")
     args = parser.parse_args(argv)
 
-    # No path and a pipe on stdin means a log is being fed in. Without this,
-    # `docker logs <c> | python -m usage --json` prints a confident zero-event
-    # report, which reads as "no traffic" rather than "you forgot to say -".
-    piped = args.path is None and not sys.stdin.isatty()
-
-    if args.path == "-" or piped:
+    # Precedence matters more here than it looks, because a wrong source returns
+    # a confident zero rather than an error. `-` always means stdin. Otherwise a
+    # configured path wins, because `docker compose exec backend python -m usage`
+    # runs with a non-TTY stdin and would otherwise read that empty pipe instead
+    # of the file it was sent to read. Only when nothing is configured does an
+    # unclaimed pipe get used, so `docker logs <c> | python -m usage` still works
+    # on a host with no USAGE_EVENTS_PATH.
+    target = Path(args.path).expanduser() if args.path and args.path != "-" else None
+    if args.path == "-":
         events = _events_from_stdin()
-    else:
-        target = Path(args.path).expanduser() if args.path else events_path()
+    elif target is not None or events_path() is not None:
+        target = target or events_path()
         events = read_events(target)
         if not events and args.path:
             print(f"no events at {target}", file=sys.stderr)
             return 1
+    elif not sys.stdin.isatty():
+        events = _events_from_stdin()
+    else:
+        events = []
 
     if args.json:
         print(json.dumps({"summary": summarise(events), "detail": breakdown(events)},

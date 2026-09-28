@@ -7,6 +7,7 @@ the report can be built from a log stream full of things that are not events.
 
 import io
 import json
+import os
 import sys
 import unittest
 from contextlib import redirect_stdout
@@ -144,3 +145,33 @@ class _NonTTY(io.StringIO):
 
     def isatty(self):
         return False
+
+
+class SourcePrecedenceTests(unittest.TestCase):
+    def test_a_configured_path_beats_a_non_tty_stdin(self):
+        # docker compose exec gives a non-TTY stdin, so treating "not a tty" as
+        # "a log is being piped in" made the tool read an empty pipe and report
+        # no events while the file it was sent to read held two. A wrong source
+        # that returns a confident zero is worse than one that errors.
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            path.write_text(json.dumps(_event()) + "\n", encoding="utf-8")
+            saved_path = os.environ.get("USAGE_EVENTS_PATH")
+            saved_stdin = sys.stdin
+            os.environ["USAGE_EVENTS_PATH"] = str(path)
+            sys.stdin = _NonTTY("")
+            try:
+                buffer = io.StringIO()
+                with redirect_stdout(buffer):
+                    code = usage.main([])
+            finally:
+                sys.stdin = saved_stdin
+                if saved_path is None:
+                    os.environ.pop("USAGE_EVENTS_PATH", None)
+                else:
+                    os.environ["USAGE_EVENTS_PATH"] = saved_path
+        self.assertEqual(code, 0)
+        self.assertIn("1 event(s)", buffer.getvalue())
