@@ -11,6 +11,18 @@
 # should degrade a card, not take the API down.
 set -e
 
+# Fail legibly rather than as a PermissionError later. Docker only applies the
+# image's ownership when it creates a named volume, so a volume made by an older
+# image stays root-owned while this container runs as uid 999. The symptom is a
+# 500 on /rainfall/submit and a worker crash-looping on worker.lock, which does
+# not obviously point at the directory. Say so, and name the fix.
+RAINFALL_CACHE_DIR="${RAINFALL_CACHE_DIR:-/app/.rainfall-cache}"
+if [ -d "$RAINFALL_CACHE_DIR" ] && [ ! -w "$RAINFALL_CACHE_DIR" ]; then
+    echo "rainfall: ${RAINFALL_CACHE_DIR} is not writable by uid $(id -u)." >&2
+    echo "rainfall: run 'sh scripts/fix-cache-ownership.sh' on the host, then restart." >&2
+    exit 1
+fi
+
 if [ -n "${RAINFALL_CACHE_S3_URI:-}" ]; then
     echo "rainfall: pulling portfolio from ${RAINFALL_CACHE_S3_URI}"
     if ! python -m tools.sync_rainfall_cache --pull; then
