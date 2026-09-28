@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, type ReactNode } from 'react';
+import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import { Search, MapPin, Loader2, Globe, Satellite } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -98,6 +98,12 @@ interface JobProgress {
 }
 
 type DatasetId = 'dem' | 'landcover' | 'ndvi' | 'rainfall';
+
+// Pasted above roughly this length and chat clients, email servers and proxies
+// start truncating, so the link stops being a link.
+const SHARE_URL_LIMIT = 8000;
+
+const DATASET_IDS: readonly DatasetId[] = ['dem', 'landcover', 'ndvi', 'rainfall'];
 
 const DATASET_OPTIONS: Array<{
   id: DatasetId;
@@ -615,7 +621,10 @@ function DatasetResultCard({
             }
           />
           <Figure
-            term="trend per year"
+            // The slope is fitted over the whole record, not the chosen window.
+            // Labelling it "trend per year" next to a 1y window button invites
+            // the reader to attribute sixteen years of slope to their year.
+            term={`trend per year (${(rain.series || []).length} months)`}
             value={trend == null ? '—' : `${trend > 0 ? '+' : ''}${formatNumber(trend, 1)} mm`}
           />
           <Figure
@@ -757,6 +766,33 @@ export default function Home() {
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
    const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
+  // Read the share link back on arrival. Without this the link was write-only:
+  // it encoded the area, the datasets, the sensor and the window, and nothing
+  // ever decoded any of it, so a colleague opened a blank page.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const area = params.get('area');
+    if (!area) return;
+    try {
+      const parsed = JSON.parse(decodeURIComponent(area));
+      if (!parsed || typeof parsed !== 'object') return;
+      setUploadedGeojson(parsed as GeoJsonObject);
+    } catch {
+      return;
+    }
+    const datasets = (params.get('datasets') || '')
+      .split(',')
+      .map((d) => d.trim())
+      .filter((d): d is DatasetId => DATASET_IDS.includes(d as DatasetId));
+    if (datasets.length) setSelectedDatasets(datasets);
+    const sensor = params.get('sensor');
+    if (sensor) setSelectedSensor(sensor);
+    const years = Number(params.get('years'));
+    if (years === 1 || years === 3 || years === 10 || years === 30) {
+      setWindowYears(years);
+    }
+  }, []);
+
   // State of a request to have an area's precipitation processed. Keyed by the
   // area, so switching areas does not show another area's progress.
   const [submission, setSubmission] = useState<Record<string, SubmissionState>>({});
@@ -997,15 +1033,18 @@ export default function Home() {
   async function loadOfflineOffer(geojson: GeoJsonObject) {
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     try {
+      // The indicator belongs in the body. It used to ride along as a query
+      // parameter, where the server ignored it and fell back to planning
+      // rainfall alone -- so a user who selected every dataset was offered
+      // "process 1 module offline" and only rainfall was ever queued.
       const query = new URLSearchParams({
-        indicator: selectedDatasets.join(','),
         window_start: windowStartISO(),
         window_end: windowEndISO(),
       });
       const response = await fetch(`${backendUrl}/rainfall/plan?${query.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ geojson }),
+        body: JSON.stringify({ geojson, indicator: selectedDatasets.join(',') }),
       });
       if (!response.ok) return;
       const body = await response.json();
@@ -1091,21 +1130,39 @@ export default function Home() {
   // A link that reproduces this exact analysis, so a result can be sent to a
   // colleague instead of described. The area has to travel somehow; encoding the
   // drawn geometry is smaller than uploading a file.
+  // A link that reproduces this exact analysis, so a result can be sent to a
+  // colleague instead of described. The area travels in the query string because
+  // there is no account, no storage, and no id to point at.
+  //
+  // This used to be gated on an *uploaded* file, so a drawn area never got a
+  // link at all, which is the common case: drawing is what the map invites.
   const shareLink = (() => {
     const geojson = currentGeojson();
-    if (!geojson || !uploadedGeojson) return '';
+    if (!geojson) return '';
     try {
-      const encoded = encodeURIComponent(JSON.stringify(uploadedGeojson));
       const q = new URLSearchParams({
-        area: encoded,
+        area: encodeURIComponent(JSON.stringify(geojson)),
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
         years: String(windowYears),
       });
-      return `${window.location.origin}${window.location.pathname}?${q.toString()}`;
+      const link = `${window.location.origin}${window.location.pathname}?${q.toString()}`;
+      // A detailed boundary is a megabyte of coordinates and the link silently
+      // dies the moment it is pasted into a chat client or an email. Better to
+      // say so than to hand over something that looks shareable and is not.
+      return link.length > SHARE_URL_LIMIT ? '' : link;
     } catch {
       return '';
     }
+  })();
+
+  // Why there is no link, when there is no link. Silent absence would read as
+  // "this app cannot be shared", which is the wrong conclusion.
+  const shareLinkUnavailable = (() => {
+    if (currentGeojson() && !shareLink) {
+      return 'This boundary is too detailed for a link. Download the GeoJSON and share the file instead.';
+    }
+    return '';
   })();
 
   // Preserve the source geometry whenever one was supplied. A bounding box is
@@ -1372,7 +1429,7 @@ export default function Home() {
                   <div className="space-y-2">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
-                        <Label className="text-sm font-medium text-ink-2">Window</Label>
+                        <Label className="text-sm font-medium text-ink-2">Vegetation window</Label>
                         {([1, 3, 10, 30] as const).map((years) => (
                           <button
                             key={years}
@@ -1406,6 +1463,13 @@ export default function Home() {
                             className="border border-rule bg-white px-1 py-0.5 text-ink"
                           />
                         </div>
+                        <p className="w-full text-xs text-ink-3">
+                          This window selects the vegetation period. It also sets how
+                          finely precipitation is sampled, but the rainfall series below is
+                          always the full monthly record. Elevation and land cover have no
+                          time dimension: NASADEM is a static surface and WorldCover a
+                          single-date classification, so no window changes them.
+                        </p>
                         <Label className="ml-2 text-sm font-medium text-ink-2">Source</Label>
                         <select
                           value={selectedSensor}
@@ -1538,6 +1602,9 @@ export default function Home() {
                 {summaryText && <CopySummary summaryText={summaryText} />}
               </CardHeader>
               <CardContent>
+                {shareLinkUnavailable && (
+                  <div className="mb-4 text-xs text-ink-3">{shareLinkUnavailable}</div>
+                )}
                 {shareLink && (
                   <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-ink-3">
                     <span>Share this analysis:</span>

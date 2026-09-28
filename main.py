@@ -281,7 +281,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.19.0"
 
 
 @app.middleware("http")
@@ -1791,6 +1791,51 @@ class ForgetRequest(BaseModel):
     cache_key: Optional[str] = None
 
 
+def _rainfall_by_key(key: str, indicator: str) -> dict:
+    """Read a precomputed artefact by cache key, for either transport."""
+    import jobs
+    import rainfall
+
+    if not re.fullmatch(r"[0-9a-f]{32}", key or ""):
+        raise HTTPException(
+            status_code=422,
+            detail="cache_key must be 32 lowercase hex characters",
+        )
+    name = (indicator or "rainfall").strip().lower()
+    if name in jobs.RUNTIME_INDICATORS:
+        return jobs.read_artefact(key, name) or {
+            "status": "not_computed",
+            "reason": "no_computed_artefact",
+            "message": f"No {name} has been computed for this area yet.",
+            "cache_key": key,
+        }
+    return rainfall.cached_context_by_key(key)
+
+
+@app.get("/rainfall")
+async def rainfall_lookup_by_key(cache_key: str, indicator: str = "rainfall"):
+    """Read a computed series by key, without resending the polygon.
+
+    The client has always called this with GET and a query string, while the
+    route was registered POST-only, so every vegetation-series fetch returned
+    405 and the chart behind it could never render. A key-addressed read is a
+    GET by any reading of the verb, so the transport follows the intent rather
+    than the other way round.
+    """
+    result = _rainfall_by_key(cache_key.strip(), indicator)
+    import rainfall
+
+    return {
+        "rainfall": result,
+        "cache_key": cache_key.strip(),
+        "analysis": {
+            "bbox_area_km2": None,
+            "mode": "cache lookup",
+            "remote_configured": rainfall.remote_prefix() is not None,
+        },
+    }
+
+
 @app.post("/rainfall")
 async def rainfall_lookup(request: RainfallLookupRequest):
     """Return the precomputed rainfall series for a study area.
@@ -1807,18 +1852,7 @@ async def rainfall_lookup(request: RainfallLookupRequest):
         # A caller that already knows the key never resends a polygon, which for a
         # detailed conservancy is a megabyte of coordinates.
         key = request.cache_key.strip()
-        if not re.fullmatch(r"[0-9a-f]{32}", key):
-            raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
-        indicator = (request.indicator or "rainfall").strip().lower()
-        if indicator in jobs.RUNTIME_INDICATORS:
-            result = jobs.read_artefact(key, indicator) or {
-                "status": "not_computed",
-                "reason": "no_computed_artefact",
-                "message": f"No {indicator} has been computed for this area yet.",
-                "cache_key": key,
-            }
-        else:
-            result = rainfall.cached_context_by_key(key)
+        result = _rainfall_by_key(key, request.indicator or "rainfall")
         bbox_area = None
     else:
         if not request.geojson:
@@ -1976,14 +2010,18 @@ def _autorun_jobs() -> None:
 
 
 @app.get("/rainfall/status")
-async def rainfall_status(cache_key: str):
+async def rainfall_status(cache_key: str, indicator: str = "rainfall"):
     """State of one area's submission, without resending its polygon."""
     if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
         raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
     import jobs
 
     return {
-        "submission": jobs.status_for(cache_key),
+        # The indicator matters: the client polls once per queued module, and
+        # asking for the rainfall job's state while a vegetation job is running
+        # reported the wrong module -- "not_submitted" when no rainfall series
+        # existed, and a false "ready" when one did.
+        "submission": jobs.status_for(cache_key, indicator.strip().lower() or "rainfall"),
         "computed": rainfall_hash and rainfall_cache_present(cache_key),
     }
 

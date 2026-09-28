@@ -31,6 +31,115 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.19.0 — The seam, and what the window actually governs
+
+### Four breaks, one cause: nothing tested the contract
+
+The client has always called exactly five backend endpoints. Between them, four
+defects shipped, each of which broke a feature that was otherwise complete and
+announced:
+
+- **`GET /rainfall` was a 405.** The client fetches a vegetation series with
+  `GET /rainfall?cache_key=…&indicator=vegetation_series`; the route was
+  registered POST-only. No GET existed, and nginx does a plain `proxy_pass` with
+  no method rewriting. So `loadVegetationSeries` returned at `page.tsx:1041`
+  before it could set state, and the `catch` was an explicit silent no-op.
+  **The 1.14.0 headline chart -- rainfall and vegetation on one time axis -- had
+  never rendered, and could not.** A key-addressed read is a GET by any reading
+  of the verb, so the route follows the intent rather than the other way round.
+- **The offline offer planned one of four modules.** The client sent `indicator`
+  as a query parameter; `plan_rainfall` reads it from the body
+  (`SubmitRequest.indicator`) and ignores unknown query parameters, falling back
+  to `["rainfall"]`. A user who selected every dataset and drew a large area was
+  told "Process 1 module offline", and only rainfall was ever queued -- while
+  `indicators.plan_indicator` could plan all four. This is 1.16.0's headline claim
+  ("a large area is a route, not a refusal") holding for one dataset.
+- **`/rainfall/status` ignored its own `indicator`.** The route declared only
+  `cache_key`, so `jobs.status_for(key)` always reported the *rainfall* job. A
+  queued vegetation submission read `not_submitted` when no rainfall series
+  existed and a false `ready` when one did.
+- **The share link was write-only.** It encoded the area, datasets, sensor and
+  window into `?area=…`, and nothing in the client ever read a query parameter.
+  It was also gated on an *uploaded* file, so a drawn area -- the case the map
+  actually invites -- got no link at all. It copied cleanly and opened a blank
+  page, which is worse than having none.
+
+None of these would have failed a test. The client is TypeScript, the server is
+Python, each side is internally consistent and thoroughly tested, and the only
+thing they share is a string in a `fetch` call. `tests/test_client_contract.py`
+now reads that string. It scans the client for backend calls, resolves each
+method and path against the live route table, and fails on the one direction
+that breaks: a client calling something the server does not serve. It also pins
+the two specific regressions by name, and the share link by behaviour -- whatever
+keys the link writes, each must be read back.
+
+A new backend route is not a failure. A new client call to a missing route is.
+
+The share link is also fixed: it now encodes whatever area is loaded, restores
+all four fields on arrival, and refuses to mint a link longer than 8,000
+characters. A 10,000-vertex boundary is a megabyte of coordinates and the link
+dies the moment it is pasted into a chat client, so it says so instead of
+handing over something that looks shareable and is not.
+
+### The window governed one dataset out of four, and said "Window"
+
+The control sat above all four dataset cards under the bare word **Window**, so
+selecting `1y` read as a claim about all of them. It is a claim about one:
+
+| dataset | time dimension | what the window does |
+|---|---|---|
+| vegetation | yes | selects the composite period, in full |
+| precipitation | yes | sets how many monthly reads are needed, so it sets the **sampling resolution**; the series returned is always the whole record |
+| elevation | none | nothing -- NASADEM is a static surface |
+| land cover | none | nothing -- WorldCover is a single-date classification |
+
+The changelog has said since 1.14.0 that two of the four have no time dimension
+at all, and that the control was offering a capability they do not have. The
+data was telling us; the interface was not.
+
+So the control is now **Vegetation window**, and states plainly that it also
+sets the precipitation sampling resolution, that the rainfall series is always
+the full monthly record, and that elevation and land cover have no time
+dimension. The rainfall card's fitted slope is labelled **trend per year (N
+months)**: it is a least-squares fit over the whole record, and sitting next to
+a `1y` button it invited the reader to attribute sixteen years of slope to their
+year.
+
+`describe()` in `rainfall.py` takes no window, deliberately. A series is a
+record, not a window. `TemporalScopeTests` asserts that, so changing it has to be
+a decision rather than a drift.
+
+**Not built:** the two-question redesign proposed under 1.14.0 -- "What is it
+like now?" against "Is it changing?". It remains the right shape, and the mode is
+also the unit of cost, since a snapshot is a cache read and a series is a job.
+
+### Still missing, and not fixed here
+
+- **Four user-facing messages go nowhere.** `useToast` dispatches to a store that
+  is never rendered; no `<Toaster />` is mounted. A rejected or unparseable file
+  upload therefore gives *no indication at all* -- not a poor experience, an
+  absent one.
+- **No way to withdraw an area.** Nothing in the UI deletes anything, and the one
+  endpoint that does is admin-gated. We hold the user's queued job geometry and
+  their derived series, and they cannot ask us to remove it.
+- **No way to get the numbers out.** Prose to clipboard only: no CSV, no JSON, no
+  print stylesheet, no table of monthly values. "Give me the table for my report"
+  is the likely real need and it is unmet.
+- Drawing a second shape silently discards the first (`MapComponent.tsx:79`), and
+  the offline panel is never cleared, so it persists across new areas.
+
+### Evidence
+
+- 408 backend tests, 1 failure: `test_contract.CaveatTests` depends on live
+  Planetary Computer search and passes on isolated rerun. Pre-existing flake.
+- 15 new contract and temporal tests. `tsc --noEmit`, `eslint` and
+  `next build` clean.
+- Confirmed live before the fix and after: `GET /api/rainfall?cache_key=…`
+  returned **405**; the plan endpoint returned `['rainfall']` for
+  `?indicator=dem,landcover,ndvi,vegetation_series`.
+
+---
+
 ## 1.18.0 — The endpoint anyone could call, and the volume nobody could write
 
 Both of these were found by deploying and then actually using the service, rather
