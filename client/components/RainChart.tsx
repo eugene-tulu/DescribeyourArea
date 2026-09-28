@@ -30,7 +30,12 @@ interface RainChartProps {
 }
 
 const W = 960;
-const H = 200;
+// The viewBox sets the rendered proportions, because the svg is w-full: the
+// browser scales height by the same factor as width. At 960x200 that is 4.8:1,
+// which in a two-thirds-width column rendered as roughly 760x158 -- 195 monthly
+// bars about 3px wide in a strip too short to read an axis against. 3.2:1 holds
+// the width usable and gives the axis and the hover read-out room.
+const H = 300;
 const PAD = { top: 12, right: 74, bottom: 26, left: 44 };
 
 function niceMax(value: number): number {
@@ -126,10 +131,13 @@ export default function RainChart({
   const shown = active ?? model.bars[model.bars.length - 1];
 
   return (
-    <figure className="fig mt-4">
+    // Scroll rather than shrink on a narrow screen. A 195-month series in 360px
+    // is unreadable at any size; a scrollbar is honest about that, whereas
+    // scaling to fit quietly produces a strip of hairlines.
+    <figure className="fig mt-4 overflow-x-auto">
       <svg
         viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
+        className="w-full min-w-[640px]"
         role="img"
         aria-label="Monthly rainfall against the 1991-2020 normal"
         onMouseLeave={() => setHover(null)}

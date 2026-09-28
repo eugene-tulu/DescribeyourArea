@@ -41,8 +41,11 @@ interface ClimateChartProps {
 }
 
 const W = 960;
-const RAIN_H = 150;
-const VEG_H = 110;
+// Same reasoning as RainChart, and it stacks: two panels in 320 viewBox units
+// rendered around 253px, so each panel was ~120px. Raised to give each one room
+// for its own axis, labels and read-out.
+const RAIN_H = 200;
+const VEG_H = 150;
 const GAP = 26;
 const PAD = { top: 10, right: 66, bottom: 24, left: 42 };
 const TOTAL_H = PAD.top + RAIN_H + GAP + VEG_H + PAD.bottom;
@@ -163,10 +166,10 @@ export default function ClimateChart({
   const activeVeg = hover != null ? vegetation[hover] : null;
 
   return (
-    <figure className="fig mt-5">
+    <figure className="fig overflow-x-auto mt-5">
       <svg
         viewBox={`0 0 ${W} ${TOTAL_H}`}
-        className="w-full"
+        className="w-full min-w-[640px]"
         role="img"
         aria-label="Monthly rainfall and vegetation index against their climatological normals"
         onMouseLeave={() => setHover(null)}
