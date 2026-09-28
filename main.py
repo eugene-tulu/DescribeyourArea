@@ -281,7 +281,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.19.0"
+APP_VERSION = "1.20.0"
 
 
 @app.middleware("http")
@@ -2086,6 +2086,68 @@ async def forget_rainfall_series(
     return {"cache_key": key, "removed": bool(outcome["local"] or outcome["remote"]),
             "local": outcome["local"], "remote": outcome["remote"],
             "job_record_dropped": job_dropped, "data": "rainfall series"}
+
+
+@app.post("/rainfall/forget")
+async def forget_my_area(payload: ForgetRequest, http_request: Request = None):
+    """Let a user remove the record their own analysis created.
+
+    We hold a series derived from the polygon someone submitted, plus a job
+    record naming it, and there is no account system to ask them through. Without
+    this, a user has no way to withdraw what they handed over -- which contradicts
+    the privacy position the rest of the app argues for. The admin route cannot
+    do it: it is keyed on a secret a browser does not have.
+
+    **Why the key alone is enough.** The cache key is a hash of the submitted
+    geometry, so holding it means you submitted that geometry. Guessing one is a
+    128-bit preimage, which is not a thing anyone does by accident.
+
+    **What this does not give you.** If two people analyse the *same* boundary
+    they get the *same* key, so one can remove the other's series. That is a real
+    limitation and it is the price of having no accounts. It is bounded rather
+    than free, because what is removed is a derived climate series over a
+    published reanalysis: not personal, not secret, and the worker will recompute
+    it on the next request. The cost is a little compute, not data loss.
+
+    Deliberately narrow: exact 32-hex keys only, artefacts for that key only, and
+    the shared per-read cell cache is left alone because it is keyed by grid
+    rather than by area and other areas still read from it.
+    """
+    import rainfall
+
+    key = (payload.cache_key or "").strip()
+    if not key:
+        raise HTTPException(
+            status_code=422,
+            detail="supply the cache_key shown for this area",
+        )
+    if not re.fullmatch(r"[0-9a-f]{32}", key):
+        raise HTTPException(
+            status_code=422,
+            detail="cache_key must be 32 hexadecimal characters",
+        )
+    if rainfall.cache_path(key).parent.resolve() != rainfall.cache_dir().resolve():
+        raise HTTPException(status_code=400, detail="refusing a path outside the cache")
+
+    outcome = rainfall.forget(key)
+    import jobs
+
+    # rainfall is not in RUNTIME_INDICATORS -- it has its own job record.
+    dropped = {name: jobs.drop(key, name)
+               for name in (*jobs.RUNTIME_INDICATORS, "rainfall")}
+    print(
+        f"rainfall forget: user request removed local={outcome['local']} "
+        f"remote={outcome['remote']} jobs={dropped} for {key}",
+        file=sys.stderr,
+    )
+    return {
+        "cache_key": key,
+        "removed": bool(outcome["local"] or outcome["remote"] or any(dropped.values())),
+        "local": outcome["local"],
+        "remote": outcome["remote"],
+        "job_records_dropped": dropped,
+        "data": "the rainfall series and any queued jobs for this area",
+    }
 
 
 @app.get("/analytics/summary")

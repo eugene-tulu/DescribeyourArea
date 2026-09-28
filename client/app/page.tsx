@@ -315,6 +315,39 @@ function trendPerYear(series: Array<{ month: string; precip_mm: number }>): numb
   return den === 0 ? null : num / den;
 }
 
+/**
+ * Backend error codes, in words.
+ *
+ * These used to arrive as the evidence note verbatim, so a user read
+ * `landcover_area_exceeded` where a sentence belonged. Translating at the
+ * presentation boundary rather than in the API means a code added later cannot
+ * leak: anything unrecognised falls through to a sentence that at least says
+ * something went wrong and what to try.
+ */
+const ERROR_COPY: Record<string, string> = {
+  elevation_unavailable:
+    'No elevation data covers this area. Try a location nearer a land mass, or check the coordinates.',
+  no_valid_elevation_pixels:
+    'Elevation data exists for this region but not inside the boundary. The outline may be in the sea or on the wrong side of the antimeridian.',
+  landcover_unavailable:
+    'No land-cover data covers this area.',
+  no_valid_landcover_pixels:
+    'Land-cover data exists for this region but not inside the boundary.',
+  landcover_area_exceeded:
+    'This area is too large for land cover, which is read at 10 m. Draw a smaller boundary, or process this area offline at a coarser resolution.',
+};
+
+/** An untranslated code is a defect, so never render one. */
+function readableNote(note?: string | null): string | null {
+  if (!note) return null;
+  const known = ERROR_COPY[note];
+  if (known) return known;
+  if (/^[a-z0-9]+(_[a-z0-9]+)+$/.test(note)) {
+    return 'This source could not be read for the area. Try a smaller or differently placed boundary.';
+  }
+  return note;
+}
+
 function EvidenceLine({
   evidence,
   status,
@@ -328,7 +361,9 @@ function EvidenceLine({
     <p className="fig mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs">
       {kind && <span className={`status status-${kind}`}>{kind}</span>}
       {evidence?.source && <span className="text-ink-2">{evidence.source}</span>}
-      {evidence?.note && <span className="text-ink-2">{evidence.note}</span>}
+      {readableNote(evidence?.note) && (
+        <span className="text-ink-2">{readableNote(evidence?.note)}</span>
+      )}
       {status !== 'ok' && <span className="text-ink-3">{STATUS_COPY[status]}</span>}
     </p>
   );
@@ -807,6 +842,11 @@ export default function Home() {
   // take: it is answered offline at a coarser resolution, and the user should see
   // what they would get before committing.
   const [offline, setOffline] = useState<OfflineOffer | null>(null);
+  // The synchronous cap is a server setting, not a constant. The banner used to
+  // hard-code 100 km², which meant a deployment that raised or lowered the cap
+  // published a number its own API disagreed with. The plan response carries the
+  // real value, so prefer that and fall back to the documented default.
+  const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
 
@@ -828,6 +868,13 @@ export default function Home() {
       setShowResults(true);
     } catch (error) {
       console.error('Search error:', error);
+      setSearchResults([]);
+      setShowResults(false);
+      toast({
+        title: 'Place search is unavailable',
+        description:
+          'Could not reach the search service. You can still draw the area on the map, or upload a GeoJSON file.',
+      });
     } finally {
       setIsSearching(false);
     }
@@ -860,13 +907,32 @@ export default function Home() {
   // Handle bounding box creation from map
   // Stable identity: the map's draw-control effect depends on these, and a new
   // function on every render tore down and re-registered the control each time.
+  // Changing the area invalidates everything downstream of the old one. None of
+  // this was cleared: the results pane kept showing the previous area's numbers
+  // under a freshly drawn boundary, and the offline panel survived every later
+  // analysis until a page reload. Both read as "these are the numbers for this
+  // area", which was the one thing they were not.
+  const clearAnalysis = useCallback(() => {
+    setAnalysisSummary(null);
+    setSummaryText('');
+    setResponse('');
+    setPlan(null);
+    setOffline(null);
+    setProgress(null);
+    setSubmission({});
+    setActiveCacheKey(null);
+    setVegetationSeries(null);
+  }, []);
+
   const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
     setBoundingBox(bbox);
-  }, []);
+    clearAnalysis();
+  }, [clearAnalysis]);
 
   const handleFeaturesChange = useCallback((geojson: FeatureCollection) => {
     setDrawnFeatures(geojson);
-  }, []);
+    clearAnalysis();
+  }, [clearAnalysis]);
 
   // Handle file upload
   const handleGeojsonUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1048,6 +1114,9 @@ export default function Home() {
       });
       if (!response.ok) return;
       const body = await response.json();
+      if (typeof body.analysis.synchronous_limit_km2 === 'number') {
+        setSyncLimitKm2(body.analysis.synchronous_limit_km2);
+      }
       setOffline({
         areaKm2: body.analysis.bbox_area_km2,
         limitKm2: body.analysis.synchronous_limit_km2,
@@ -1090,6 +1159,19 @@ export default function Home() {
     }
   }
 
+  // `handleAnalyze` is declared below this poller, so reaching for it directly
+  // is a temporal-dead-zone error. The ref is assigned on every render, and by
+  // the time a poll can run the current function is in it.
+  const analyzeRef = useRef<() => Promise<void>>(async () => {});
+
+  // Failures arrive in the same string slot as a successful summary, prefixed
+  // "Error: ". Splitting here is what lets the panel style them differently.
+  const responseIsError = response.startsWith('Error:');
+  const errorHeadline = responseIsError
+    ? (response.split('\n')[0].replace(/^Error:\s*/, '') || 'The analysis did not finish')
+    : '';
+  const errorDetail = responseIsError ? response.split('\n').slice(1).join(' ') : '';
+
   // Poll a queued area and describe what the worker is actually doing. The job
   // record already holds the timestamps, the indicator and the reason; all that
   // was missing was showing it.
@@ -1120,6 +1202,13 @@ export default function Home() {
       if (state === 'ready' || state === 'failed' || state === 'not_submitted') {
         if (state === 'ready') {
           setSubmission((previous) => ({ ...previous, [cacheKey]: { state, cacheKey } }));
+          // Fetch the finished series. The progress line said "Done" and the
+          // card still read "no series has been processed for this exact
+          // boundary yet", and the only way to see the result was to notice that
+          // and press Analyze again. The work is already done; showing it is the
+          // last step, and skipping it is the difference between a queue and a
+          // black hole.
+          void analyzeRef.current();
         }
         return;
       }
@@ -1130,6 +1219,89 @@ export default function Home() {
   // A link that reproduces this exact analysis, so a result can be sent to a
   // colleague instead of described. The area has to travel somehow; encoding the
   // drawn geometry is smaller than uploading a file.
+  // Withdraw this area. The app holds a series derived from the submitted
+  // geometry and a job record naming it, and there are no accounts to ask
+  // through, so without this the user has no way to take any of it back. The
+  // cache key is the capability: only someone who submitted that geometry has it.
+  async function forgetThisArea() {
+    if (!activeCacheKey) return;
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    try {
+      const response = await fetch(`${backendUrl}/rainfall/forget`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cache_key: activeCacheKey }),
+      });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || `Request failed (${response.status}).`);
+      }
+      const body = await response.json();
+      toast({
+        title: 'Area removed',
+        description: body.removed
+          ? 'The stored series for this area has been deleted from this server and from object storage.'
+          : 'Nothing was stored for this area, so there was nothing to delete.',
+      });
+      clearAnalysis();
+    } catch (error) {
+      toast({
+        title: 'Could not remove the area',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    }
+  }
+
+  /**
+   * The numbers as a file.
+   *
+   * Prose to the clipboard was the only way out, and prose is the wrong shape for
+   * the likely actual need: someone who wants the monthly figures for a report,
+   * a spreadsheet or another tool. CSV carries the series; JSON carries everything
+   * the cards show, so a result can be re-read later without the server.
+   */
+  function exportCsv(): string {
+    const rows = (analysisSummary?.rainfall as { series?: Array<Record<string, number | string | null>> } | undefined)?.series
+      ?? [];
+    const header = 'month,precip_mm,normal_mm,anomaly_mm,anomaly_pct';
+    const body = rows
+      .map((r) => [r.month, r.precip_mm, r.normal_mm, r.anomaly_mm, r.anomaly_pct]
+        .map((v) => (v == null ? '' : String(v))).join(','))
+      .join('\n');
+    return [header, body].join('\n');
+  }
+
+  function exportJson(): string {
+    return JSON.stringify(
+      {
+        exported_at: new Date().toISOString(),
+        note: 'Derived from public satellite and reanalysis products. '
+          + 'Every figure carries an evidence label; read them before relying on them.',
+        country: analysisSummary?.country ?? null,
+        area_km2: (analysisSummary?.rainfall as { label?: string } | undefined)?.label ?? null,
+        summary: analysisSummary,
+      },
+      null,
+      2,
+    );
+  }
+
+  function download(filename: string, contents: string, type: string) {
+    // A data URL keeps this a single click with no round trip and no server
+    // round trip to hold a file. The byte cap matters: a 195-month series is
+    // small, but an unbounded summary is not something to base64 into a URL.
+    const blob = new Blob([contents], { type });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    document.body.removeChild(anchor);
+    URL.revokeObjectURL(url);
+  }
+
   // A link that reproduces this exact analysis, so a result can be sent to a
   // colleague instead of described. The area travels in the query string because
   // there is no account, no storage, and no id to point at.
@@ -1267,9 +1439,13 @@ export default function Home() {
 
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
-        if (response.status === 413 && geojson) {
-          // Too large for a request, not impossible. Offer the offline route with
-          // the resolution and time it would actually take.
+        // A 413 is not one thing. Only the area-too-large case has an offline
+        // route to offer; "too many vertices" and "payload too large" are
+        // answered by simplifying the geometry, and sending those to the
+        // offline panel told the user to wait for a job that would never help.
+        const detail = String(failure?.detail || '');
+        const isAreaTooLarge = detail.includes('synchronous limit');
+        if (response.status === 413 && geojson && isAreaTooLarge) {
           await loadOfflineOffer(geojson);
           return;
         }
@@ -1300,6 +1476,9 @@ export default function Home() {
     }
   };
 
+  // Keep the poller's view of the analysis current.
+  analyzeRef.current = handleAnalyze;
+
   return (
     <div className="min-h-screen bg-paper text-ink">
       <div className="container mx-auto px-4 py-8">
@@ -1321,7 +1500,9 @@ export default function Home() {
         <Alert className="mb-6 bg-amber-50 border-amber-200 max-w-4xl mx-auto">
           <Satellite className="h-4 w-4 text-amber-600" />
           <AlertDescription className="text-amber-800">
-            <strong>Analysis limits:</strong> Keep the study-area bounding box within 100 km². Larger areas can be processed offline; the worker reads them at a coarser resolution and says which.
+            <strong>Analysis limits:</strong> Keep the study-area bounding box within{' '}
+            {syncLimitKm2 ?? 100} km². Larger areas can be processed offline; the worker reads
+            them at a coarser resolution and says which.
           </AlertDescription>
         </Alert>
 
@@ -1618,6 +1799,37 @@ export default function Home() {
                     >
                       Copy link
                     </Button>
+                    <span className="basis-full" />
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
+                    >
+                      Download CSV
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => download('analysis.json', exportJson(), 'application/json')}
+                    >
+                      Download JSON
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => window.print()}>
+                      Print
+                    </Button>
+                    {activeCacheKey && (
+                      // Withdrawal is a first-class action, not a support email.
+                      // The app holds a series derived from the submitted
+                      // geometry, and the person who submitted it should be the
+                      // one who can say to remove it.
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => void forgetThisArea()}
+                      >
+                        Remove this area
+                      </Button>
+                    )}
                   </div>
                 )}
                 {offline && (
@@ -1693,9 +1905,37 @@ export default function Home() {
                   ) : response ? (
                     <>
                       <div className="text-ink-2 whitespace-pre-wrap break-words text-base leading-relaxed">
-                        {response.split('\n').map((paragraph, index) => (
-                          <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
-                        ))}
+                        {responseIsError ? (
+                          // An error used to render in the same paragraph style as
+                          // a successful result, in the same panel, with the same
+                          // weight. Reading "Error: Raster processing timed out" as
+                          // a finding is exactly the failure this avoids.
+                          <div role="alert" className="rounded border border-red-300 bg-red-50 p-4">
+                            <p className="mb-2 flex items-center gap-2 text-sm font-medium text-red-800">
+                              <span aria-hidden>!</span>
+                              {errorHeadline}
+                            </p>
+                            {errorDetail && (
+                              <p className="text-sm text-red-700">{errorDetail}</p>
+                            )}
+                            <p className="mt-2 text-xs text-red-600">
+                              Nothing was charged for a failed analysis. Try a smaller
+                              boundary, or press Analyze again.
+                            </p>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mt-3"
+                              onClick={() => void handleAnalyze()}
+                            >
+                              Try again
+                            </Button>
+                          </div>
+                        ) : (
+                          response.split('\n').map((paragraph, index) => (
+                            <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
+                          ))
+                        )}
                       </div>
 
                       {analysisSummary && (

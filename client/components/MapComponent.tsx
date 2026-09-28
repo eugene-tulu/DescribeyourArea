@@ -76,7 +76,12 @@ function MapController({
     
     const { layer } = e;
     if (!(layer instanceof L.Polygon || layer instanceof L.Rectangle)) return;
-    drawnItemsRef.current.clearLayers();
+    // Add rather than replace. Clearing here meant a second shape silently
+    // deleted the first, with nothing on screen to say so -- so drawing two
+    // forest stands gave you whichever one you drew last and no explanation.
+    // The backend dissolves a multi-part area to a MultiPolygon, and a
+    // FeatureCollection of several is a real ask: two blocks either side of a
+    // road, a reserve in two parcels.
     drawnItemsRef.current.addLayer(layer);
 
     const bounds = layer.getBounds();

@@ -31,6 +31,108 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.20.0 — What a first-time user actually needs
+
+An audit of what a stranger can do, rather than what the code contains. Every
+item below is something a person arrives at within a minute of the landing page.
+
+### A rejected upload told the user nothing
+
+`useToast` dispatched into an in-memory store that nothing rendered. No
+`<Toaster />` was mounted anywhere, so all four messages the app produced --
+"Invalid GeoJSON file", "File is too large", "GeoJSON file uploaded
+successfully", "Choose at least one dataset" -- went nowhere. A rejected upload
+was not a poor experience, it was an absent one: the user pressed a button and
+could not tell whether the file had loaded. `<Toaster />` is now mounted at the
+root, and a failed place search reports itself instead of leaving a dropdown that
+never appears.
+
+### Drawing a second shape silently deleted the first
+
+`handleCreated` called `clearLayers()` before adding, so a user drawing two forest
+stands got whichever they drew last, with nothing on screen saying so. Shapes now
+accumulate. The backend already dissolves a multi-part area to a MultiPolygon, so
+this is a supported request, not a new capability -- it just never reached it.
+
+### Results for the old area sat under the new one
+
+Changing the area cleared nothing. The previous area's numbers, caveats, offline
+panel and job progress all stayed on screen under a freshly drawn boundary, and
+read as the numbers for *this* area -- the one thing they were not. `clearAnalysis`
+resets every piece of state derived from the area when the area changes.
+
+### A finished job never showed its result
+
+The progress line reached "Done" and the rainfall card still read "No series has
+been processed for this exact boundary yet", with the same button offered again.
+The only way to see the work was to notice and press Analyze a second time. The
+queue is now the difference between a finished job and a black hole: reaching
+`ready` re-runs the analysis. `handleAnalyze` is declared below the poller that
+needs it, so the call goes through a ref rather than a temporal-dead-zone error.
+
+### Errors rendered as findings
+
+A failure was written into the same string slot as a successful summary and drawn
+in the same paragraph style, in the same panel. "Error: Raster processing timed
+out" was formatted exactly like a result, so it read as a finding. Errors now get
+an alert role, a red panel, the detail on its own line, an honest note that
+nothing was charged, and a Try again button.
+
+Raw codes reached the reader too: a land-cover failure displayed
+`landcover_area_exceeded`. Five backend codes are now translated, and anything
+unrecognised falls through to a sentence rather than to the identifier -- so a
+code added later cannot leak the same way.
+
+### Every 413 was treated as "area too large"
+
+A 413 is three different refusals: area too large, payload too large, and too
+many vertices. Only the first has an offline route, so sending all three to the
+offline panel told users to wait for a job that could not help. The client now
+distinguishes them, and matches on a phrase the contract test pins in the
+backend, so a rename breaks a test rather than the interface.
+
+The banner also hard-coded "100 km²" while the cap is a server setting the plan
+response reports. A deployment that changed the cap published a number its own
+API disagreed with; the banner now reads the real value.
+
+### Withdrawing an area
+
+The app holds a series derived from the submitted geometry and a job record
+naming it. There are no accounts, and the only deletion route required an admin
+secret a browser does not have, so a user had no way to take any of it back.
+`POST /rainfall/forget` takes the cache key alone.
+
+The key is the capability: it is a hash of the submitted geometry, so holding it
+means you submitted that geometry, and guessing one is a 128-bit preimage. The
+limitation is real and is written into the handler's docstring: two people who
+analyse the *same* boundary get the *same* key, so one can remove the other's
+series. That is the price of no accounts. It is bounded, because what is removed
+is a derived climate series over a published reanalysis -- not personal, not
+secret, and recomputed by the worker on the next request. Narrow by construction:
+exact 32-hex keys, that key's artefacts only, and the shared per-read cell cache
+left alone because it is keyed by grid and other areas still read from it.
+
+### Getting the numbers out
+
+Prose to the clipboard was the only exit, and prose is the wrong shape for the
+likely need: someone who wants the monthly figures for a report or a spreadsheet.
+CSV for the series, JSON for everything the cards show, and a print stylesheet
+that hides the map -- the one thing that cannot be printed -- instead of scaling
+a thousand basemap tiles into a smear.
+
+### Evidence
+
+- 422 backend tests, 1 failure: `test_contract.CaveatTests` depends on live
+  Planetary Computer search, fails intermittently in the full suite and passes in
+  isolation (3 of 3 runs). Pre-existing, and it now looks like a real signal
+  because it shares a name with the work above.
+- 15 new tests covering the withdrawal route and the user-facing surface.
+- `tsc --noEmit`, `eslint` and `next build` clean.
+- TLS: the droplet serves a valid Let's Encrypt certificate for the IP address
+  itself, so a shared link opens without a browser warning.
+
+---
+
 ## 1.19.0 — The seam, and what the window actually governs
 
 ### Four breaks, one cause: nothing tested the contract

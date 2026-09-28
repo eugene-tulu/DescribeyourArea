@@ -844,3 +844,93 @@ class AdminGateTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text[:200])
         self.assertTrue(response.json()["removed"])
         self.assertIsNone(rainfall.read_cache(key))
+
+
+class UserForgetTests(unittest.TestCase):
+    """A user must be able to withdraw what their own analysis stored.
+
+    The admin route is keyed on a secret a browser does not have, so without this
+    a user had no way to remove the series their submission created -- which
+    contradicts the privacy position the app argues for everywhere else.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import main
+
+        self.previous = {
+            k: os.environ.get(k) for k in ("RAINFALL_CACHE_DIR", "RAINFALL_CACHE_S3_URI")
+        }
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        os.environ["RAINFALL_CACHE_S3_URI"] = ""
+        self.client = TestClient(main.app)
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        for key, value in self.previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    KEY = "c" * 32
+
+    def test_it_removes_a_series_without_any_credential(self):
+        import rainfall
+
+        rainfall.write_cache(self.KEY, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        response = self.client.post("/rainfall/forget", json={"cache_key": self.KEY})
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertTrue(response.json()["removed"])
+        self.assertIsNone(rainfall.read_cache(self.KEY))
+
+    def test_it_needs_no_admin_key_at_all(self):
+        # If this ever starts requiring one, the browser cannot supply it and the
+        # feature is dead. Asserted so the difference from the admin route is
+        # deliberate rather than accidental.
+        response = self.client.post("/rainfall/forget", json={"cache_key": self.KEY})
+        self.assertIn(response.status_code, (200, 404))
+        self.assertNotEqual(response.status_code, 401)
+        self.assertNotEqual(response.status_code, 503)
+
+    def test_it_removes_every_queued_job_for_the_area(self):
+        import jobs
+
+        for name in ("rainfall", "vegetation_series"):
+            jobs.write_job({"cache_key": self.KEY, "indicator": name,
+                            "state": "pending", "submitted_at": "2026-09-28T00:00:00+00:00"})
+        response = self.client.post("/rainfall/forget", json={"cache_key": self.KEY})
+        dropped = response.json()["job_records_dropped"]
+        self.assertTrue(dropped["rainfall"], "the rainfall job record survived")
+        self.assertTrue(dropped["vegetation_series"])
+        self.assertIsNone(jobs.read_job(self.KEY, "rainfall"))
+        self.assertIsNone(jobs.read_job(self.KEY, "vegetation_series"))
+
+    def test_it_refuses_anything_that_is_not_a_key(self):
+        # The only untrusted input here reaches a filesystem path.
+        for bad in ("", "..", "../../etc", "nope", "C" * 32, "c" * 31, "c" * 33):
+            response = self.client.post("/rainfall/forget", json={"cache_key": bad})
+            self.assertNotIn(response.status_code, (200, 500), f"{bad!r} was not refused")
+
+    def test_it_leaves_the_shared_cell_cache_alone(self):
+        # Cells are keyed by grid, not by area. Another area still reads from
+        # them, and deleting them would slow down work we did not cancel.
+        import rainfall
+
+        cell_dir = rainfall.cache_dir() / "cells"
+        cell_dir.mkdir(parents=True, exist_ok=True)
+        (cell_dir / "abc.npz").write_bytes(b"not really an npz")
+        self.client.post("/rainfall/forget", json={"cache_key": self.KEY})
+        self.assertTrue((cell_dir / "abc.npz").exists(),
+                        "the shared cell cache was deleted by an area-level forget")

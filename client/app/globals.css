@@ -169,3 +169,50 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* Printing a result should produce the result, not a screenshot of a website.
+   The map is the one thing that cannot be printed, and it is the only thing
+   hidden outright: a basemap tile is thousands of small images that no printer
+   wants, so it is dropped rather than scaled into an unreadable smear. */
+@media print {
+  @page {
+    margin: 14mm;
+  }
+
+  body {
+    background: #fff;
+  }
+
+  /* Chrome that has nothing to do with the finding. */
+  nav,
+  .leaflet-container,
+  .leaflet-control-container,
+  [data-print-hide] {
+    display: none !important;
+  }
+
+  main,
+  .max-w-4xl,
+  .max-w-6xl {
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Cards become plain ruled blocks; a border in a page box is decoration. */
+  [class*="rounded"],
+  [class*="shadow"] {
+    box-shadow: none !important;
+    border-radius: 0 !important;
+  }
+
+  a[href]::after {
+    content: "";
+  }
+
+  /* Keep a long evidence table from splitting a row across pages. */
+  tr,
+  .fig {
+    break-inside: avoid;
+  }
+}

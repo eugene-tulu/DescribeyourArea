@@ -302,3 +302,105 @@ class TemporalScopeTests(unittest.TestCase):
                          "the rainfall summary is computed over the whole "
                          "record; if it has become window-aware, update the "
                          "client copy that says so")
+
+
+class UserFacingSurfaceTests(unittest.TestCase):
+    """The things a first-time user needs, asserted so they cannot vanish.
+
+    Each of these was a gap found by auditing what a stranger can do, and each is
+    a single line of code that would fail silently if deleted -- a button that
+    renders nothing, a message dispatched to a store nobody watches.
+    """
+
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    def test_the_toaster_is_mounted(self):
+        # useToast dispatched into a store that nothing rendered, so a rejected
+        # upload gave no indication at all.
+        layout = (CLIENT_ROOT / "app" / "layout.tsx").read_text(encoding="utf-8")
+        self.assertIn("<Toaster />", layout,
+                      "toasts are dispatched but never rendered")
+        self.assertTrue((CLIENT_ROOT / "components" / "Toaster.tsx").exists())
+
+    def test_a_user_can_remove_their_own_area(self):
+        # We store a series derived from their geometry and had no way to let
+        # them take it back, which contradicts the privacy claim.
+        self.assertIn("rainfall/forget", self.source,
+                      "no user-facing route to withdraw an area's data")
+        self.assertIn("forgetThisArea", self.source,
+                      "the route exists with no way to reach it")
+        self.assertNotIn(
+            "require_admin_key", _handler_source("forget_my_area"),
+            "the withdrawal route now requires the admin secret, which a browser "
+            "cannot hold, so the feature is dead in the only place it is used")
+
+    def test_the_numbers_can_be_exported(self):
+        for needle, why in (
+            ("Download CSV", "a table of the monthly figures is the likely real need"),
+            ("Download JSON", "so a result can be re-read without this server"),
+            ("window.print()", "printing a result should produce the result"),
+        ):
+            self.assertIn(needle, self.source, why)
+
+    def test_changing_the_area_clears_the_previous_result(self):
+        # A result for the old area sat under a newly drawn boundary with nothing
+        # marking it stale, which read as "these are the numbers for this area".
+        self.assertIn("clearAnalysis", self.source)
+        body = self.source.split("const clearAnalysis")[1][:800]
+        for piece in ("setAnalysisSummary(null)", "setOffline(null)", "setResponse('')"):
+            self.assertIn(piece, body, f"clearAnalysis does not reset {piece}")
+
+    def test_a_finished_job_fetches_its_result(self):
+        # The progress line said "Done" while the card still said no series had
+        # been processed, and only pressing Analyze again showed the work.
+        self.assertIn("analyzeRef.current()", self.source,
+                      "a job that reaches ready does not load its result")
+
+    def test_errors_render_as_errors(self):
+        # A failure used to render in the same paragraph style as a result, in
+        # the same panel, so it read as a finding.
+        self.assertIn("responseIsError", self.source)
+        self.assertIn("role=\"alert\"", self.source)
+        self.assertIn("Try again", self.source, "no way to retry from the error")
+
+    def test_no_machine_token_is_rendered_verbatim(self):
+        # A user read `landcover_area_exceeded` where a sentence belonged.
+        self.assertIn("readableNote", self.source)
+        body = self.source.split("function readableNote")[1][:700]
+        self.assertIn("ERROR_COPY", body,
+                      "an unrecognised code must fall through to a sentence")
+        # The component that renders the note must route it through the
+        # translator, not print it. Checked on the component body, because
+        # asserting the call exists somewhere in the file would pass even if the
+        # note were still rendered raw right beside it.
+        line = self.source[self.source.index("function EvidenceLine("):][:900]
+        self.assertIn("readableNote(", line,
+                      "EvidenceLine renders the raw note, so a code can still "
+                      "reach the reader")
+        self.assertNotIn("{evidence?.note}", line,
+                         "EvidenceLine still prints the untranslated note")
+
+    def test_the_limit_shown_is_the_one_the_server_reports(self):
+        # The banner hard-coded 100 km2, so a deployment that changed the cap
+        # published a number its own API disagreed with.
+        self.assertNotIn("within 100 km²", self.source,
+                         "the analysis limit is a server setting, not a constant")
+        self.assertIn("syncLimitKm2", self.source)
+
+    def test_only_an_oversized_area_offers_the_offline_route(self):
+        # A 413 is three things; sending all of them to the offline panel told
+        # the user to wait for a job that could not help.
+        self.assertIn("isAreaTooLarge", self.source)
+        backend = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+            encoding="utf-8")
+        self.assertIn("synchronous limit", backend,
+                      "the phrase the client matches on must exist server-side")
+
+
+def _handler_source(name: str) -> str:
+    source = (Path(__file__).resolve().parent.parent / "main.py").read_text(
+        encoding="utf-8")
+    start = source.index(f"async def {name}(")
+    return source[start:source.index("\n@app", start)]
