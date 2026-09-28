@@ -24,6 +24,15 @@ import main
 
 CLIENT_ROOT = Path(__file__).resolve().parent.parent / "client"
 
+# The backend image does not carry the client, so these cannot run inside the
+# container. Skipping says so plainly; erroring 11 times on a server that
+# correctly has no frontend would read like a real regression.
+CLIENT_PRESENT = CLIENT_ROOT.is_dir()
+requires_client = unittest.skipUnless(
+    CLIENT_PRESENT,
+    "client sources are not present (the backend image ships no frontend)",
+)
+
 # Calls are written as `${backendUrl}/path` or a literal. Both are template
 # literals in practice, so one pattern covers them; the optional method and the
 # query string are stripped because the server's route table has neither.
@@ -63,6 +72,7 @@ def server_routes() -> set[tuple[str, str]]:
     }
 
 
+@requires_client
 class ClientServerContractTests(unittest.TestCase):
     def test_the_client_calls_something_the_server_serves(self):
         calls = client_calls()
@@ -226,6 +236,7 @@ class RouteBehaviourTests(unittest.TestCase):
             response.json()["submission"].get("indicator", "rainfall"), "rainfall")
 
 
+@requires_client
 class TemporalScopeTests(unittest.TestCase):
     """Which datasets the analysis window actually governs.
 
