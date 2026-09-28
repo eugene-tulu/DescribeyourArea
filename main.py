@@ -280,7 +280,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.15.0"
+APP_VERSION = "1.16.0"
 
 
 @app.middleware("http")
@@ -1813,6 +1813,51 @@ async def rainfall_lookup(request: RainfallLookupRequest):
             "bbox_area_km2": bbox_area,
             "mode": "cache lookup",
             "remote_configured": rainfall.remote_prefix() is not None,
+        },
+    }
+
+
+@app.post("/rainfall/plan")
+async def plan_rainfall(
+    payload: SubmitRequest,
+    window_start: str = "",
+    window_end: str = "",
+):
+    """What would be computed for this area, without queueing anything.
+
+    Read-only, so the caller can show what it will cost in resolution and time
+    before committing. The synchronous endpoint refuses a large area outright, so
+    this is the honest way to tell a user what they would actually get instead.
+    """
+    import indicators
+    import jobs
+
+    if not payload.geojson:
+        raise HTTPException(status_code=422, detail="supply geojson to plan an area")
+    area = validate_for_lookup(payload.geojson)
+    requested = [
+        d.strip().lower()
+        for d in (payload.indicator or "").split(",")
+        if d.strip().lower() in jobs.INDICATORS
+    ] or ["rainfall"]
+    plans = []
+    for indicator in requested:
+        plan = indicators.plan_indicator(
+            indicator, area["bbox_area_km2"],
+            start=window_start or None, end=window_end or None,
+        )
+        plan["already_computed"] = (
+            jobs.status_for(
+                rainfall_hash(area["feature"]["geometry"]), indicator
+            )["state"] == "ready"
+        )
+        plans.append(plan)
+    return {
+        "plans": plans,
+        "analysis": {
+            "bbox_area_km2": round(area["bbox_area_km2"], 2),
+            "synchronous_limit_km2": MAX_SYNC_BBOX_KM2,
+            "cache_key": rainfall_hash(area["feature"]["geometry"]),
         },
     }
 

@@ -65,6 +65,13 @@ interface WorkPlan {
   estimate_basis?: string;
 }
 
+interface OfflineOffer {
+  areaKm2: number;
+  limitKm2: number;
+  plans: Array<WorkPlan & { already_computed?: boolean }>;
+  queued: string[];
+}
+
 interface ClimateVegSeries {
   status: string;
   source?: string | null;
@@ -760,6 +767,10 @@ export default function Home() {
   const [vegetationSeries, setVegetationSeries] = useState<ClimateVegSeries | null>(null);
   const [plan, setPlan] = useState<WorkPlan | null>(null);
   const [pendingIndicator, setPendingIndicator] = useState<string | null>(null);
+  // A study area past the synchronous cap is not an error to read but a route to
+  // take: it is answered offline at a coarser resolution, and the user should see
+  // what they would get before committing.
+  const [offline, setOffline] = useState<OfflineOffer | null>(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
 
@@ -981,6 +992,44 @@ export default function Home() {
     }
   }
 
+  // Ask what the worker would do for this area. Read-only, so nothing is queued
+  // until the user says so.
+  async function loadOfflineOffer(geojson: GeoJsonObject) {
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    try {
+      const query = new URLSearchParams({
+        indicator: selectedDatasets.join(','),
+        window_start: windowStartISO(),
+        window_end: windowEndISO(),
+      });
+      const response = await fetch(`${backendUrl}/rainfall/plan?${query.toString()}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ geojson }),
+      });
+      if (!response.ok) return;
+      const body = await response.json();
+      setOffline({
+        areaKm2: body.analysis.bbox_area_km2,
+        limitKm2: body.analysis.synchronous_limit_km2,
+        plans: body.plans || [],
+        queued: [],
+      });
+    } catch {
+      /* the existing error path reports the 413 */
+    }
+  }
+
+  async function queueOffline() {
+    if (!offline) return;
+    setOffline({ ...offline, queued: offline.plans.map((p) => p.indicator || '') });
+    for (const plan of offline.plans) {
+      const indicator = plan.indicator;
+      if (!indicator) continue;
+      await submitIndicator(indicator);
+    }
+  }
+
   // The monthly vegetation series lives in its own artefact, keyed by area, so it
   // is fetched after the summary rather than returned inside it.
   async function loadVegetationSeries(cacheKey: string) {
@@ -1161,6 +1210,12 @@ export default function Home() {
 
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
+        if (response.status === 413 && geojson) {
+          // Too large for a request, not impossible. Offer the offline route with
+          // the resolution and time it would actually take.
+          await loadOfflineOffer(geojson);
+          return;
+        }
         throw new Error(failure?.detail || `Analysis request failed (${response.status}).`);
       }
 
@@ -1496,6 +1551,54 @@ export default function Home() {
                     >
                       Copy link
                     </Button>
+                  </div>
+                )}
+                {offline && (
+                  <div className="mb-4 rule-t pt-4">
+                    <p className="headline">
+                      This area is {formatNumber(offline.areaKm2, 0)} km²
+                    </p>
+                    <p className="fig mt-1 text-sm text-ink-2">
+                      A request handles up to {formatNumber(offline.limitKm2, 0)} km² so
+                      it stays inside a few seconds. A larger area is not refused — it
+                      is read offline, at a coarser resolution, and you choose whether
+                      to wait.
+                    </p>
+                    <dl className="rows mt-3">
+                      {offline.plans.map((plan) => (
+                        <Figure
+                          key={plan.indicator}
+                          term={
+                            plan.already_computed
+                              ? `${plan.indicator} — already computed`
+                              : plan.indicator || ''
+                          }
+                          value={`${
+                            plan.resolution_m ? `${plan.resolution_m} m` : `${plan.resolution_km} km`
+                          } · ${plan.estimated_seconds ?? '?'}s est.`}
+                        />
+                      ))}
+                    </dl>
+                    {offline.queued.length ? (
+                      <p className="fig mt-3 text-sm text-ink">
+                        Queueing {offline.queued.join(', ')}. The progress line reports
+                        when each is ready.
+                      </p>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={queueOffline}
+                        className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper"
+                      >
+                        Process {offline.plans.length} module
+                        {offline.plans.length === 1 ? '' : 's'} offline
+                      </button>
+                    )}
+                    <p className="fig mt-2 text-[10px] text-ink-3">
+                      Times are estimates from the measured per-read cost, not
+                      guarantees. A coarser grid is a different kind of claim, so the
+                      resolution each module will use is listed rather than buried.
+                    </p>
                   </div>
                 )}
                 {analysisWarnings.map((warning) => (

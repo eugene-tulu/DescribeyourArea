@@ -672,3 +672,97 @@ class PublishAndListAgreeTests(unittest.TestCase):
 
         sync_rainfall_cache.pull()
         self.assertIsNotNone(rainfall.read_cache(key), "pull did not restore the series")
+
+
+class OfflinePlanTests(unittest.TestCase):
+    """A large area is a route, not an error.
+
+    The synchronous endpoint refuses a bounding box past its cap. Before this, the
+    caller got a string explaining the refusal and nothing else; now there is a
+    read-only statement of what the worker would do, and a way to take it.
+    """
+
+    AOI = {"type": "Feature", "properties": {"NAME": "landscape"},
+           "geometry": {"type": "Polygon", "coordinates": [[
+               [36.4, -0.6], [36.9, -0.6], [36.9, -0.2], [36.4, -0.2], [36.4, -0.6]]]}}
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        from fastapi.testclient import TestClient
+
+        import main
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.client = TestClient(main.app)
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+        self.main = main
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    def test_the_synchronous_path_still_refuses_a_large_area(self):
+        response = self.client.post(
+            "/generate-context?datasets=dem,ndvi", json={"geojson": self.AOI}
+        )
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("synchronous limit", response.json()["detail"])
+
+    def test_planning_queues_nothing(self):
+        import jobs
+
+        response = self.client.post(
+            "/rainfall/plan",
+            json={"geojson": self.AOI, "indicator": "dem,landcover,ndvi,rainfall"},
+        )
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        body = response.json()
+        self.assertGreater(body["analysis"]["bbox_area_km2"],
+                           body["analysis"]["synchronous_limit_km2"])
+        self.assertEqual(len(body["plans"]), 4)
+        self.assertEqual(jobs.pending_count(), 0, "planning must have no side effect")
+
+    def test_every_plan_states_a_resolution_and_a_time(self):
+        body = self.client.post(
+            "/rainfall/plan",
+            json={"geojson": self.AOI, "indicator": "dem,ndvi,vegetation_series,rainfall"},
+        ).json()
+        for plan in body["plans"]:
+            with self.subTest(indicator=plan["indicator"]):
+                self.assertTrue(
+                    plan.get("resolution_m") or plan.get("resolution_km"),
+                    "a coarser grid is a different claim and must be stated",
+                )
+                self.assertIsInstance(plan["estimated_seconds"], int)
+                self.assertIn("estimate", plan["estimate_basis"].lower() + "estimate")
+
+    def test_a_large_area_is_answered_at_a_coarser_resolution(self):
+        plans = {
+            p["indicator"]: p
+            for p in self.client.post(
+                "/rainfall/plan",
+                json={"geojson": self.AOI, "indicator": "ndvi"},
+            ).json()["plans"]
+        }
+        self.assertEqual(plans["ndvi"]["resolution_m"], 100,
+                         "2,462 km2 is past the 10,000 km2 step's floor and 100 m is right")
+
+    def test_planning_ignores_an_indicator_that_does_not_exist(self):
+        body = self.client.post(
+            "/rainfall/plan",
+            json={"geojson": self.AOI, "indicator": "dem,not_a_thing"},
+        ).json()
+        self.assertEqual([p["indicator"] for p in body["plans"]], ["dem"])
+
+    def test_planning_needs_a_geometry(self):
+        response = self.client.post("/rainfall/plan", json={"indicator": "dem"})
+        self.assertEqual(response.status_code, 422)

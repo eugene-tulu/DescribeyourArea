@@ -31,6 +31,47 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.16.0 — A large area is a route, not a refusal
+
+The last gap between "refused" and "answered". A bounding box past the
+synchronous cap used to produce a string explaining the refusal and nothing else,
+even though the worker will happily compute the same area at a coarser
+resolution. The caller was told no and offered no alternative.
+
+`POST /rainfall/plan` is the honest way to state the alternative: **read-only, no
+queueing**, returning per module the resolution it would use and how long it
+should take, with `already_computed` set for any that exist. A test asserts the
+plan leaves the queue empty, because a preview that starts jobs is a different
+thing than a preview.
+
+The interface then offers it: on a 413 it shows the area against the cap, one row
+per module with its resolution and estimate, and a single button to queue them all
+and watch the progress line. **The resolution is listed rather than buried**,
+because a 100 m land-cover composition is a different kind of claim from a 10 m one
+and the user should see it before waiting three minutes for it.
+
+Measured for a 2,462 km² landscape:
+
+| module | resolution | estimate |
+| --- | --- | --- |
+| elevation | 100 m | 81 s |
+| land cover | 100 m | 81 s |
+| vegetation | 100 m | 81 s |
+| rainfall | 27.8 km grid | 60 s |
+
+### Blocked on a credential
+
+The Spaces key pair in `.env` is rejected with `InvalidAccessKeyId`. Both values
+are non-placeholder and correctly formatted, and the bucket worked earlier in the
+session with the original pair, so the new secret is very likely paired with the
+old access key ID. **Both halves must come from the same key.** Nothing is lost:
+the 21 series already in the bucket are the ones published earlier, and pulling
+still works once the pair is right.
+
+Tests 356 -> 362.
+
+---
+
 ## 1.15.0 — A wait you can read, and instrumentation that gates everything else
 
 ### "Ready in about 3 minutes"
