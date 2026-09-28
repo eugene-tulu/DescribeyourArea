@@ -7,6 +7,12 @@ services:
       # Shared with the worker. Without this the worker writes series into its
       # own filesystem where the backend never sees them.
       - rainfall-cache:/app/.rainfall-cache
+      # Usage events land in a volume rather than stdout. The container log is a
+      # rotating 3 x 10 MB buffer, so without this the first real user's session
+      # is worth about thirty megabytes of log and then gone -- and the
+      # instrumentation that gates every later decision measures nothing. Read it
+      # with: docker compose exec backend python -m usage
+      - usage-events:/app/.usage
     env_file:
       - .env
     environment:
@@ -32,6 +38,7 @@ services:
       RAINFALL_CACHE_S3_URI: ${RAINFALL_CACHE_S3_URI:-}
       RAINFALL_S3_ENDPOINT: ${RAINFALL_S3_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
       RAINFALL_S3_REGION: ${RAINFALL_S3_REGION:-nyc3}
+      USAGE_EVENTS_PATH: ${USAGE_EVENTS_PATH:-/app/.usage/events.jsonl}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     healthcheck:
@@ -112,3 +119,4 @@ services:
 
 volumes:
   rainfall-cache:
+  usage-events:

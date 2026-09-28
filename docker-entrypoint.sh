@@ -16,12 +16,15 @@ set -e
 # image stays root-owned while this container runs as uid 999. The symptom is a
 # 500 on /rainfall/submit and a worker crash-looping on worker.lock, which does
 # not obviously point at the directory. Say so, and name the fix.
-RAINFALL_CACHE_DIR="${RAINFALL_CACHE_DIR:-/app/.rainfall-cache}"
-if [ -d "$RAINFALL_CACHE_DIR" ] && [ ! -w "$RAINFALL_CACHE_DIR" ]; then
-    echo "rainfall: ${RAINFALL_CACHE_DIR} is not writable by uid $(id -u)." >&2
-    echo "rainfall: run 'sh scripts/fix-cache-ownership.sh' on the host, then restart." >&2
-    exit 1
-fi
+for DIR in "${RAINFALL_CACHE_DIR:-/app/.rainfall-cache}" "${USAGE_EVENTS_PATH:-}"; do
+    [ -n "$DIR" ] || continue
+    [ -d "$DIR" ] || continue
+    if [ ! -w "$DIR" ]; then
+        echo "not writable by uid $(id -u): $DIR" >&2
+        echo "run 'sh scripts/fix-cache-ownership.sh' on the host, then restart." >&2
+        exit 1
+    fi
+done
 
 if [ -n "${RAINFALL_CACHE_S3_URI:-}" ]; then
     echo "rainfall: pulling portfolio from ${RAINFALL_CACHE_S3_URI}"
