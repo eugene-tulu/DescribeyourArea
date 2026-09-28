@@ -716,7 +716,11 @@ def cached_context_by_key(key: str) -> dict:
             ),
             "cache_key": key,
         }
-    return {"status": "ok", **payload}
+    # The key is the caller's handle on this area: it is what /rainfall/status
+    # polls and what /rainfall/forget needs in order to remove it. It used to be
+    # returned only on a *miss*, so the key reached the browser only when there
+    # was nothing stored -- which is precisely when there is nothing to delete.
+    return {"status": "ok", "cache_key": key, **payload}
 
 
 def cached_context(geojson_geom: dict) -> dict:
@@ -740,4 +744,8 @@ def cached_context(geojson_geom: dict) -> dict:
             ),
             "cache_key": key,
         }
-    return {"status": "ok", **payload}
+    # The key is the caller's handle on this area: it is what /rainfall/status
+    # polls and what /rainfall/forget needs in order to remove it. It used to be
+    # returned only on a *miss*, so the key reached the browser only when there
+    # was nothing stored -- which is precisely when there is nothing to delete.
+    return {"status": "ok", "cache_key": key, **payload}

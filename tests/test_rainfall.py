@@ -934,3 +934,67 @@ class UserForgetTests(unittest.TestCase):
         self.client.post("/rainfall/forget", json={"cache_key": self.KEY})
         self.assertTrue((cell_dir / "abc.npz").exists(),
                         "the shared cell cache was deleted by an area-level forget")
+
+
+class CacheKeyAlwaysPresentTests(unittest.TestCase):
+    """The key is the caller's handle on the area, so it has to always be there.
+
+    It was returned only on a *miss*, so the browser learned the key exactly
+    when nothing was stored -- which is precisely when there is nothing to
+    remove. The result was a withdrawal button that appeared when it could not
+    work and stayed hidden when it should.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    GEOM = {"type": "Polygon", "coordinates": [[[35.10, -1.55], [35.17, -1.55],
+                                               [35.17, -1.48], [35.10, -1.48],
+                                               [35.10, -1.55]]]}
+
+    def test_the_key_is_present_on_a_hit(self):
+        import rainfall
+
+        key = rainfall.geometry_hash(self.GEOM)
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        result = rainfall.cached_context(self.GEOM)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result.get("cache_key"), key,
+                         "a hit did not report the key, so there was no handle "
+                         "to withdraw the area with")
+
+    def test_the_key_is_present_on_a_miss(self):
+        import rainfall
+
+        result = rainfall.cached_context(self.GEOM)
+        self.assertEqual(result["status"], "not_computed")
+        self.assertEqual(result.get("cache_key"), rainfall.geometry_hash(self.GEOM))
+
+    def test_the_by_key_lookup_reports_it_too(self):
+        import rainfall
+
+        key = rainfall.geometry_hash(self.GEOM)
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2020-01", "precip_mm": 1.0}],
+        })
+        result = rainfall.cached_context_by_key(key)
+        self.assertEqual(result.get("cache_key"), key)
