@@ -31,6 +31,57 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.17.0 — Two notification channels, and a completion message
+
+### Webhook for machines, email for people
+
+`notify.py` separates the two rather than letting one carry both. The alerting
+pipeline stays on the webhook, because a webhook delivers in seconds and returns
+something an automated system can act on. **Email is for humans** -- a breach a
+conservancy manager should hear about, and the case a polling browser tab cannot
+solve: someone submits an area, closes the tab, and three minutes later the work is
+done.
+
+A completion notice is a new trigger, not an alert. It carries the indicator, the
+month count, the resolution, the grid cells, and **the cache key, which is the
+retrieval handle** -- a test caught that a message without it was not actionable
+even when the area had a name.
+
+The webhook payload now sends both `text` and `content`, so a Slack or Mattermost
+endpoint shows the message and a Discord one is not silently empty. That was the
+one common exception worth handling.
+
+### Email over AgentMail
+
+Plumbed over plain HTTP with no SDK, matching how the webhook already works and
+keeping the dependency list shorter.
+
+```bash
+AGENTMAIL_API_KEY=am_...
+AGENTMAIL_INBOX_ID=inbox_...
+ALERT_EMAIL_TO=you@example.org,someone@example.org
+```
+
+Neither channel is required. Unconfigured, both are no-ops and the sweep is
+unaffected, and a channel that fails never prevents another from being tried nor
+loses the record of which episodes are open.
+
+An email carries the area *label* and key, the value, the threshold and the source.
+Never a submitted geometry, never a raw area, never a client address -- an alert
+that names a place is a disclosure of interest in that place, which is the same
+restraint the usage log follows.
+
+### The Spaces key
+
+Confirmed the secret is rejected, not malformed: no carriage return, no quotes, no
+stray whitespace, correct lengths. The value itself is wrong, so it needs re-copying
+from the panel -- and the access key ID alongside it, because DigitalOcean issues
+both together and a new secret with an old ID is a pair that never existed.
+
+Tests 362 -> 377.
+
+---
+
 ## 1.16.0 — A large area is a route, not a refusal
 
 The last gap between "refused" and "answered". A bounding box past the

@@ -65,6 +65,33 @@ def worker_lock(blocking: bool = False):
             handle.close()
 
 
+def _completion_notice(area_key: str, indicator: str, payload: dict) -> None:
+    """Tell a human the work they submitted is ready.
+
+    A polling browser tab does not help someone who submitted an area and then
+    closed it, which is the normal way this is used. Webhook and email both carry
+    it, so the same message serves an automated consumer and a person.
+    """
+    import notify
+
+    ready = str(payload.get("status") or "") == "ok"
+    try:
+        notify.dispatch({
+            "event": notify.JOB_READY if ready else notify.JOB_FAILED,
+            "area_key": area_key,
+            "area": payload.get("label"),
+            "indicator": indicator,
+            "months": payload.get("months") or (len(payload.get("series") or []) or None),
+            "resolution_m": payload.get("resolution_m"),
+            "grid_cells": payload.get("grid_cells_in_area"),
+            "source": payload.get("source"),
+            "reason": payload.get("reason") or payload.get("warning"),
+            "retrieve_hint": f"POST /rainfall with cache_key {area_key} and indicator {indicator}",
+        })
+    except Exception:  # noqa: BLE001 - a notice must never fail a sweep
+        pass
+
+
 async def sweep(
     *,
     limit: int = 5,
@@ -77,7 +104,9 @@ async def sweep(
     Alerts are evaluated after the queue drains so a freshly computed series is
     checked immediately rather than waiting for the next sweep.
     """
-    outcome = await jobs.run_pending(limit=limit, publish=publish, progress=progress)
+    outcome = await jobs.run_pending(
+        limit=limit, publish=publish, progress=progress, on_complete=_completion_notice
+    )
     outcome["alerts"] = 0
     if on_alert is not None:
         sent = on_alert(ready_keys_since())

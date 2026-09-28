@@ -272,6 +272,7 @@ async def run_pending(
     source: Optional[Callable] = None,
     publish: bool = True,
     progress: Optional[Callable[[str], None]] = None,
+    on_complete: Optional[Callable[[str, str, dict], None]] = None,
 ) -> dict:
     """Compute queued areas. The runner.
 

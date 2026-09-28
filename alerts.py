@@ -29,6 +29,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+import notify
 import rainfall
 
 ALERT_VERSION = 1
@@ -308,8 +309,8 @@ def evaluate_and_notify(keys: list[str], send: Optional[Callable[[dict], None]] 
         try:
             return delivery(message)
         except (urllib.error.URLError, OSError, ValueError) as exc:
-            # A webhook that is down must not stop the sweep, and must not lose
-            # the record of which episodes are open.
+            # A channel that is down must not stop the sweep, and must not lose the
+            # record of which episodes are open.
             print(f"alert delivery failed: {type(exc).__name__}: {exc}", flush=True)
             return False
 

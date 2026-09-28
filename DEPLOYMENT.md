@@ -136,6 +136,21 @@ RAINFALL_ALERT_WEBHOOK=https://hooks.slack.com/services/...
 RAINFALL_ALERT_RULES=[{"id":"severe-drought","metric":"trailing_12m_anomaly_pct","below":-40}]
 ```
 
+The payload is Slack-shaped and also sends `content`, so Mattermost, n8n, Zapier
+and Discord all work unchanged.
+
+**Email** carries the same messages to people, including a notice when a queued
+job finishes, which a browser tab that has been closed cannot deliver:
+
+```bash
+AGENTMAIL_API_KEY=am_...
+AGENTMAIL_INBOX_ID=inbox_...
+ALERT_EMAIL_TO=you@example.org
+```
+
+Neither channel is required. Unconfigured, both are no-ops and the sweep is
+unaffected.
+
 Rules are evaluated against each calendar month's 1991-2020 normal, so a
 percentage means the same thing in a wet and a dry month. An alert fires once per
 episode, and a recovery is announced too. Episodes are recorded whether or not a
