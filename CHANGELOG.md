@@ -31,6 +31,335 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## 1.22.0 — An instrument, not a report
+
+Follows 1.21.0. Four things were wrong with it: the charts were too small to
+read, a snapshot user got a 35-year rainfall chart, the vegetation trend was
+effectively hidden, and the product read as well-designed rather than as
+something worth paying for. The last of those is the least measurable and the
+one that needed the most structural change.
+
+The reference for the charts is the Digital Earth Africa conservancies dashboard
+(`community-conservancies-dashboard`), which the first users responded to in a
+webinar. Its standard is the one held here: one question per plot, full width,
+type you can read across a room.
+
+### The charts got a room
+
+`RainChart` and `ClimateChart` are gone. They drew two plots inside a module,
+inside a two-column grid, which worked out at roughly 480x150 rendered pixels
+with 9px type. That is not a chart you read, it is a chart you lean into. The
+replacement is `TimeSection.tsx`, a full-width section under the dossier with
+three plots at ~960x300 and 12px axis type, sharing one x scale so the year ticks
+and the hover crosshair land in identical pixels in all three.
+
+One question, one plot, is the load-bearing decision. Rainfall totals, rainfall
+departure and vegetation condition are three claims about three different units;
+overlaying them forced a shared axis that flattened all three. Departure from
+normal is now its own diverging plot, because "was it dry" and "how much did it
+rain" do not belong on one scale.
+
+Axis ticks are snapped to 1 / 2 / 2.5 / 5 x 10^n (`TimeSection.tsx:82`). A scale
+ending at 251 mm because 251 is what the data needed looks computed rather than
+read.
+
+### The anomaly axis stopped being destroyed by one month
+
+A single month at +236% — real, this catchment has months like that — set a
+symmetric axis that compressed the other 114 into a hairline around zero. The
+axis now comes from the 97th percentile of |anomaly|, outliers clamp to the edge
+with a flat cap, and the count of clamped months is stated in the subtitle rather
+than left to be noticed.
+
+### The range follows the question
+
+A user who picked a one-year window was looking at a snapshot and got 35 years of
+rainfall back, which reads as the product answering a different question than the
+one asked. The section now defaults to the analysed window and offers the full
+record as an explicit, labelled second option. The four summary figures — rain
+over the span, dry months, vegetation now, change across the span — recompute
+over whatever is on screen, so they are the section's summary and not a caption.
+
+The rail's copy said "the rainfall series is always the full monthly record",
+which is true of the record and false of the chart. It now says both.
+
+### The vegetation series is a headline, and it was broken
+
+The audience responded most strongly to vegetation trends, and the feature was
+sitting behind a ghost button that only appeared when the series was missing —
+the least discoverable place to put the thing people had come for. It is now the
+third plot in the section, with the cost of building it stated.
+
+It also did not work. Two jobs had been marked `running` for 18 hours with the
+worker idle at 0.19 load and zero bytes of network traffic in 20 seconds, and no
+`vegetation_series/` artefact directory existed on the deployment at all. Two
+separate causes, both in `jobs.py`:
+
+`run_pending` tested `rainfall.read_cache(key)` regardless of indicator. For any
+area that had a rainfall series — which is every area anyone would ask a
+vegetation trend for — the runner marked the job complete using the *rainfall*
+payload, and because `complete()` defaults to `indicator="rainfall"` it rewrote
+the rainfall record and left the vegetation record marked `running` forever, with
+no artefact ever written. The skip path is now indicator-aware in both directions.
+
+A job left in `running` by a worker that died, hung or was cancelled was never
+reclaimed: `claim_next` only ever looked at PENDING (and FAILED, and only under
+`retry_failed`), so one interrupted compute retired that indicator for that area
+permanently. Its docstring claimed `retry_failed` provided this recovery; that
+flag never added RUNNING to the candidate states, so the recovery it described
+did not exist. There is now a 30-minute lease (`RAINFALL_JOB_LEASE_SECONDS`)
+after which a running job is reclaimed, and an orphaned job is no longer
+permanent. `CancelledError` descends from `BaseException`, so the `except
+Exception` around the compute never saw it; it is now caught and recorded before
+being re-raised.
+
+Verified after the fix: the two orphaned jobs were reclaimed, both completed, and
+the section renders `Vegetation now 0.250` against a `Change across span` of
+`+0.034`.
+
+### The min/max band was drawn, measured, and removed
+
+The backend returns a per-pixel min and max for every month, and drawing the band
+between them looked like a substantial addition to the chart. Measured on
+Naibunga Upper — 196 months, 5,596 pixels a month — the band runs -0.30 to 0.997
+while the area mean lives between 0.23 and 0.69. Keeping both a readable axis and
+the band meant clipping it, and it ran past the axis in 191 of 196 months. Two
+bars pinned to the top and bottom edges look like information and carry none.
+
+The band is removed. The spread is still reported where it belongs: the
+vegetation module's middle-50% and range rows, and valid-pixel count under Show
+the working.
+
+### Premium, which mostly means fewer and better things
+
+The brief was to make it feel like an established brand. What that turned out to
+mean structurally:
+
+- **The wordmark is now set in the display serif.** The interface is Inter, so
+  anything in Instrument Serif at the same size already reads as chosen rather
+  than inherited. The mark is a 2x2 sampling grid with one cell read — the
+  raster, which is what every number here came from.
+- **Material instead of value.** A premium dark surface is not a lighter colour,
+  it is a different material, and the difference is carried by light falling on
+  it from above. Three surfaces and no more; a 2.5% film of noise so the ground
+  is never a flat fill.
+- **A segmented control with one moving thumb** rather than four bordered
+  buttons. Four borders is a form; a track with a thumb is an instrument.
+- **Four radii and one easing curve**, used everywhere. Restraint here is most
+  of what reads as expensive.
+- Motion remains confined to things genuinely in flight: a sweep across the plot
+  while a series is being read, and a line drawing itself in. Nothing animates on
+  arrival, because a static screen is easier to trust.
+
+### A regression, caught and fixed
+
+Darkening the draw toolbar by inverting the sprite also inverted the button's own
+background, turning it white on a dark map. The sprite is now discarded and the
+four glyphs this app enables are redrawn as CSS masks — filled with the
+interface's own ink, no sprite file, crisp at any DPR.
+
+The hint telling you to draw on the map is at bottom-left. It was at top-left,
+directly over Leaflet's zoom control, so the only way to zoom was to find the
+control underneath the thing telling you to use the map.
+
+### The charts were rendering in the wrong column
+
+Reported as the controls panel obscuring the charts. It was the opposite in the
+markup and the same in the effect: `TimeSection` was the third child of the
+two-column workspace grid, so it auto-placed into column one, row two — the
+380px rail column, directly beneath the sticky rail — and the charts rendered at
+380px wide with a horizontal scroller, which is what made them look like
+something half-hidden behind the controls. A comment in the source had claimed
+the section was full width; only the structure was wrong, and it had been wrong
+for every deploy of 1.22.0.
+
+It is now a sibling of the grid rather than a child of it. Measured on the
+deployed page at 1920x1080: the grid has exactly two children, the rail at
+x=264 w=380 and the results column at x=668 w=972, and the time section sits
+below at x=264 w=1376.
+
+### Supersedes
+
+Nothing in 1.21.0 was reversed. The design basis there — the ramp, the contrast
+floors, the self-hosted type — carried through unchanged and is the thing the
+premium pass is built on.
+
+### Evidence
+
+```
+npx tsc --noEmit && npm run lint && npm run build        # clean
+python3 -m unittest tests.test_jobs                      # 19 tests, OK
+python3 -m unittest discover -s tests -q                  # 7 failures / 58 errors
+curl -s https://209.38.197.161/api/health                # 200
+```
+
+The full suite figures are identical with and without these changes: 58 of them
+are module import failures from dependencies missing in the local environment
+(`fastapi` and others), verified by baselining against HEAD.
+
+End to end on the deployed site, not a local build:
+
+- Small box inside Naibunga Upper: all four modules read, both charts at the
+  window's 115 months, axis 0/50/100/150/200/250 mm, the vegetation series built
+  and rendered at 0.250 with +0.034 across the span.
+- Naibunga Upper proper (a real conservancy, 5,596 valid pixels a month): the
+  series was queued by the runner, went pending → running → ready, and the
+  mean-driven domain gives 0.20–0.65, ten gridlines.
+- The 366 km² draw from 1.21.0 still correctly refuses a live read and offers the
+  offline route.
+
+### Known limitation
+
+The two NDVI charts were designed against synthetic data and a 2-pixel test
+polygon, and the browser tooling kept timing out on the real conservancy, so the
+large-area rendering is verified on its axis maths and its DOM rather than by
+screenshot. Worth one look in a real browser before it goes in front of anyone.
+
+---
+
+## 1.21.0 — The land is the interface
+
+A full visual re-skin. The brief was to make the product worth opening for a
+land manager or an EIA reviewer, drawing on two sources of taste rather than on
+the existing house style: Chris Do's argument that a product is positioned rather
+than decorated, and Rory Sutherland's argument that delight is differentiation
+and that nobody would ever design it like this.
+
+### The design basis, stated rather than assumed
+
+The previous system was International Typographic Style: a warm off-white paper,
+near-black ink, one blue. It was honest, it was rigorous, and it looked like
+every government geospatial form ever issued. `client/app/globals.css:1` is now
+built on one idea instead: **the colour language is the product's own.**
+
+Every person who opens this has already read a false-colour vegetation
+composite. Bare ground is red, stressed cover is amber, vigorous cover runs
+yellow-green into deep green. That ramp is in every product they have ever used,
+so the ramp became the interface rather than decorating it:
+
+| token | value | contrast on `--void` | meaning |
+|---|---|---|---|
+| `--void` | `#05080a` | — | satellite night |
+| `--text` | `#ecf3ee` | 17.0:1 | body |
+| `--text-2` | `#9cac9f` | 8.4:1 | secondary |
+| `--text-3` | `#6e7f72` | 4.7:1 | labels, and the floor for the 11px label |
+| `--signal` | `#b9e84b` | 14.1:1 | vigorous cover, and the only accent |
+| `--deep` | `#4fa83c` | — | established cover |
+| `--stressed` | `#e3a72f` | 9.4:1 | the caution lane |
+| `--bare` | `#e0644a` | 5.8:1 | the error lane |
+
+Ratios were computed against the page ground, not assumed. `--text-3` is the
+worst case in the system because it is the smallest text, and 4.7:1 clears AA
+there too — a floor the previous `--ink-3` also held, which was worth keeping.
+
+The dark ground is a working decision rather than a mood: a lot of this work gets
+done in a vehicle in open sun, and a lime NDVI value on near-black reads as
+emitted rather than printed.
+
+### The number the reader came for stopped being the loudest thing
+
+`Headline` set the result value at 24px beside a 15px caption (`page.tsx:463`).
+That is a comfortable document size and a completely forgettable tool size. A
+land manager opening a result is scanning for a magnitude, and magnitude is a
+size relationship, not a value. The figure is now `clamp(2.25rem, 5.5vw, 3.5rem)`
+in the same monospace as every other figure, with the caption beneath rather than
+beside it. Nothing about the number changed; how loudly it arrives did.
+
+### Colour on the charts encodes the anomaly the axis already shows
+
+`RainChart.tsx:108` and `ClimateChart.tsx:142` painted 120-odd bars in grey and
+picked out only the driest ones. A reader had to compare every bar to a stepped
+line they were holding in their head. Bars are now coloured by `anomaly_pct` on
+the same ramp — green above normal, amber below, red at or below 50%.
+
+This is redundant encoding, not decoration, and it is the test the project has to
+keep passing: hue never says anything the axis does not already say. The dry
+months are now findable pre-attentively.
+
+### A collision in the map chrome made the zoom control unreachable
+
+The "Draw a polygon or rectangle" hint was absolutely positioned at `top-4
+left-4` (`MapComponent.tsx:255`) — directly over Leaflet's zoom control, which
+also defaults to top-left. The only way to zoom was to find the control
+underneath the thing telling you to use the map. Moved to bottom-left.
+
+Three further Leaflet defects, all invisible until rendered: `.leaflet-bar a`
+kept Leaflet's `#fff` because the container rule sat underneath it, so the zoom
+buttons were a white box on satellite imagery; the draw toolbar's sprite has no
+colour hook and disappeared against a dark control (`filter: invert(1)`); and
+the `alerts` shadcn tokens the `ui/` primitives referenced (`--primary`,
+`--ring`, `--card`, `--input`) were never defined in this stylesheet, so those
+components were shipping with no styles at all. All now resolve.
+
+### Alerts stopped shouting
+
+`Alert` was a red block. Almost every refusal in this product has a route
+through it — a large area is queued, not rejected — and a wall of red trained
+people to ignore the panel. Only a genuine failure now takes the bare end of the
+ramp, and even that is a wash rather than a block.
+
+### Copy that behaves like a colleague
+
+The empty state was "Select an area on the map and click Analyze Area to see
+results", which describes a control. It is now "Nothing here yet. That is
+normal.", which confirms the promise. The analysis cap used to be an amber alarm
+across the top of the page, read on arrival and never again; it is now a quiet
+note with the controls it actually constrains.
+
+### Self-hosted type, because the audience is in bad connections
+
+Instrument Serif, Inter and JetBrains Mono, latin subset only, 123 KB across four
+files, preloaded (`layout.tsx:26`). Not a CDN at runtime: this audience is often
+in a vehicle or on a rural connection, and a page that falls back to Helvetica
+because a font CDN was slow is a page that looks like every other geospatial
+form.
+
+### What was deliberately kept
+
+The rules that were right the first time survived the re-skin unchanged: every
+figure is monospaced and tabular, provenance travels with the value, printing a
+result gives you the result. The print stylesheet inverts the ground to ink on
+paper and darkens the accent to `#3f6b00`, which an ordinary non-laminating
+printer can actually lay down — the previous `#0b4f9c` was a gamble.
+
+### Supersedes
+
+Nothing in 1.20.0 was reversed. Three behaviour fixes ride along because the
+re-skin made them visible: an error used to render in the same paragraph style
+and weight as a successful result, so "Error: Raster processing timed out" was
+readable as a finding; the ClimateChart year ticks and the "where am I"
+read-out were drawn on the same baseline at the same x, so the first year label
+was overlapped by the read-out; and a disabled primary action was the accent at
+45% opacity, which on a dark ground is a muddy olive that reads as broken rather
+than unavailable.
+
+### Evidence
+
+Verified against the deployed site, not a local build:
+
+```
+npx tsc --noEmit && npm run lint && npm run build     # clean
+curl -s https://209.38.197.161/api/health             # 200
+```
+
+End to end in a real browser, both paths:
+
+- 366 km² rectangle → correctly refused a live read, offered the offline route
+  with per-module resolutions listed, queued, and a 503 from the upstream
+  rendered as an error panel with a route through it rather than as a result.
+- 19.69 km² box inside Naibunga Upper → all four modules read. Elevation range
+  200 m, NDVI 0.272, rainfall 431 mm / −7% against the 464 mm normal, land cover
+  69.7% shrubland. Status pills rendered `OBSERVED` / `DERIVED` / `MODELLED`,
+  the caveats block showed "Rainfall series ends 2026-09-01", the offline
+  precipitation job went `RUNNING` → `READY`, and the rainfall chart rendered
+  with its bars coloured by anomaly.
+
+The result dossier and the module grid were checked visually against the
+compiled production CSS on the deployed origin, since the results view is only
+reachable by interaction and a screenshot service cannot click.
+
+---
+
 ## 1.20.0 — What a first-time user actually needs
 
 An audit of what a stranger can do, rather than what the code contains. Every
