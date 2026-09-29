@@ -37,6 +37,13 @@ TERMINAL = {READY, FAILED}
 # queued job is a future ERA5 read. This bounds it per host.
 MAX_PENDING_JOBS = int(os.getenv("RAINFALL_MAX_PENDING_JOBS", "25"))
 
+# How long a running job may hold its claim before another runner may take it.
+# Generous, because a long series is a legitimate multi-minute read: the longest
+# work here is a MODIS series at roughly 0.7 s a month, so even a 30-year span
+# is well inside this. It exists to recover from a dead worker, not to police a
+# slow one.
+JOB_LEASE_SECONDS = float(os.getenv("RAINFALL_JOB_LEASE_SECONDS", "1800"))
+
 JOB_VERSION = 2
 
 # What a job computes. Rainfall is a cheap cache read; the others read rasters,
@@ -76,6 +83,24 @@ def write_artefact(key: str, indicator: str, payload: dict) -> None:
 
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
+
+
+def _lease_expired(job: dict) -> bool:
+    """Whether a running job has held its claim for longer than the lease.
+
+    An unreadable or absent timestamp counts as expired: a record that cannot say
+    when it started cannot justify holding a queue slot open forever.
+    """
+    stamp = job.get("started_at")
+    if not stamp:
+        return True
+    try:
+        started = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=datetime.UTC)
+    return (datetime.datetime.now(datetime.UTC) - started).total_seconds() > JOB_LEASE_SECONDS
 
 
 def jobs_dir() -> Path:
@@ -217,6 +242,15 @@ def claim_next(*, retry_failed: bool = False) -> Optional[dict]:
     Written as read-then-write rather than a lock, which is safe here because a
     single runner is the intended deployment. Two runners could claim the same
     job; the work is idempotent, so the worst case is duplicated reads.
+
+    A job left in ``running`` by a worker that died, hung or was cancelled is
+    reclaimed once it is older than ``JOB_LEASE_SECONDS``. It used to be
+    reclaimed never, which meant a single interrupted compute retired that
+    indicator for that area permanently: the record said running, no artefact
+    existed, and every later submission short-circuited on the running record
+    without queueing anything. The docstring above used to promise recovery via
+    ``retry_failed``, but that flag only adds FAILED to the candidate states, so
+    the recovery it described did not exist.
     """
     for state in ((PENDING, FAILED) if retry_failed else (PENDING,)):
         for job in list_jobs(state):
@@ -225,6 +259,15 @@ def claim_next(*, retry_failed: bool = False) -> Optional[dict]:
             job["state"] = RUNNING
             job["started_at"] = _now()
             job["attempts"] = job.get("attempts", 0) + 1
+            write_job(job)
+            return job
+
+    for job in list_jobs(RUNNING):
+        if _lease_expired(job):
+            job["state"] = RUNNING
+            job["started_at"] = _now()
+            job["attempts"] = job.get("attempts", 0) + 1
+            job["reason"] = "reclaimed: previous attempt did not finish"
             write_job(job)
             return job
     return None
@@ -276,9 +319,9 @@ async def run_pending(
 ) -> dict:
     """Compute queued areas. The runner.
 
-    Skips anything that already has a series, so it is safe to run repeatedly and
-    safe to interrupt: completed work is never redone, and a job left in running is
-    recoverable by passing ``retry_failed``.
+    Skips anything that already has a result, so it is safe to run repeatedly and
+    safe to interrupt: completed work is never redone. A job left in running by a
+    dead worker is reclaimed once its lease expires.
     """
     import indicators
 
@@ -295,8 +338,20 @@ async def run_pending(
             fail(key, "job record has no geometry; resubmit the area", indicator)
             failed += 1
             continue
-        if rainfall.read_cache(key) is not None:
-            complete(key, rainfall.read_cache(key))
+        if indicator == "rainfall" and rainfall.read_cache(key) is not None:
+            complete(key, rainfall.read_cache(key), indicator)
+            skipped += 1
+            continue
+        # A non-rainfall indicator is already done when its own artefact exists.
+        # It used to test the rainfall cache instead and, for any area that had a
+        # rainfall series, mark the job complete using the rainfall payload —
+        # through complete()'s default indicator, so the rainfall record was
+        # rewritten and this one was left marked running forever, with no
+        # artefact ever written. A vegetation series could therefore never be
+        # produced for any area that also had rainfall, which is every area
+        # anyone would ask for it on.
+        if indicator != "rainfall" and read_artefact(key, indicator) is not None:
+            complete(key, read_artefact(key, indicator), indicator)
             skipped += 1
             continue
         if progress:
@@ -376,5 +431,17 @@ async def run_pending(
             failed += 1
             if progress:
                 progress(f"failed {key[:12]}: {type(exc).__name__}: {exc}")
+        except BaseException as exc:  # noqa: BLE001
+            # asyncio.CancelledError descends from BaseException, not Exception, so
+            # the branch above does not see it. A cancelled sweep therefore used to
+            # leave the job it was holding marked running with nothing written, and
+            # nothing would ever reclaim it. Record the outcome, then let the
+            # cancellation propagate.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                fail(key, f"interrupted: {type(exc).__name__}", indicator)
+                raise
+            fail(key, f"cancelled: {type(exc).__name__}: {exc}", indicator)
+            failed += 1
+            raise
         processed += 1
     return {"processed": processed, "ready": ready, "failed": failed, "skipped": skipped}
