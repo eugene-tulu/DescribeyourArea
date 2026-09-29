@@ -138,3 +138,19 @@ class QueueWaitTests(unittest.TestCase):
             interval, 30,
             f"a {interval}s poll adds up to {interval // 2}s of dead wait before "
             f"any compute begins; an idle sweep is a directory listing")
+
+
+class NormalProvenanceTests(unittest.TestCase):
+    def test_the_artefact_names_the_period_its_normal_was_computed_over(self):
+        # After the rolling baseline, the normal comes from the trailing
+        # BASELINE_YEARS, not from 1991. The artefact reported the 1991 constant
+        # anyway, so it stated a period the series never used -- and this field is
+        # the one a reader would use to check the number against.
+        import inspect
+
+        source = inspect.getsource(vs.compute_monthly_series)
+        self.assertIn('"nominal_start": in_baseline[0]["month"]', source,
+                      "nominal_start must be the period actually used")
+        self.assertNotIn('"nominal_start": CLIMATOLOGY_START', source,
+                         "nominal_start is still the 1991 constant, which the "
+                         "rolling baseline no longer uses")

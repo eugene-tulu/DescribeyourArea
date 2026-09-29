@@ -352,8 +352,12 @@ def compute_monthly_series(
             ),
             "start": in_baseline[0]["month"] if in_baseline else None,
             "end": in_baseline[-1]["month"] if in_baseline else None,
-            "nominal_start": CLIMATOLOGY_START,
-            "nominal_end": CLIMATOLOGY_END,
+            # The period the normal was actually computed over, which after the
+            # rolling-baseline change is not 1991. Reporting the constant here
+            # would state a period this series never used, which is the one
+            # thing a provenance field must never do.
+            "nominal_start": in_baseline[0]["month"] if in_baseline else None,
+            "nominal_end": in_baseline[-1]["month"] if in_baseline else None,
             "years_used": len({r["month"][:4] for r in in_baseline}) or 0,
             "monthly_mean": climatology,
             "annual_mean": round(
