@@ -134,9 +134,9 @@ function MapController({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const graticule = (L as any).latlngGraticule({
       showLabel: true,
-      opacity: 0.6,
-      weight: 0.8,
-      color: "#999",
+      opacity: 0.34,
+      weight: 0.7,
+      color: "#9cac9f",
       zoomInterval: [{ start: 2, end: 20, interval: 1 }],
     });
     graticule.addTo(map);
@@ -162,9 +162,12 @@ function MapController({
           polyline: false,
           polygon: {
             shapeOptions: {
-              color: "#3b82f6",
+              // The signal hue, not Leaflet's default blue. The boundary you draw
+              // is the one thing on screen that is unambiguously yours, so it is
+              // the one thing allowed to use the accent.
+              color: "#b9e84b",
               weight: 2,
-              fillOpacity: 0.1,
+              fillOpacity: 0.14,
             },
           },
           circle: false,
@@ -172,9 +175,9 @@ function MapController({
           circlemarker: false,
           rectangle: {
             shapeOptions: {
-              color: "#3b82f6",
+              color: "#b9e84b",
               weight: 2,
-              fillOpacity: 0.1,
+              fillOpacity: 0.14,
             },
           },
         },
@@ -214,12 +217,11 @@ export default function MapComponent({
   onSaveFeatures,
 }: MapComponentProps) {
   return (
-    <div className="h-[600px] w-full relative">
+    <div className="h-[440px] w-full relative sm:h-[540px] xl:h-[620px]">
       <MapContainer
         center={[-1.275, 36.8219]} // Nairobi default
         zoom={11}
         style={{ height: "100%", width: "100%" }}
-        className="rounded-lg"
       >
         {/* Basemap: satellite imagery, no API key. */}
         <TileLayer
@@ -247,12 +249,18 @@ export default function MapComponent({
         {uploadedGeoJSON && (
           <GeoJSON
             data={uploadedGeoJSON}
-            style={{ color: "yellow", weight: 2, fillOpacity: 0.1 }}
+            style={{ color: "#b9e84b", weight: 2, fillOpacity: 0.14 }}
           />
         )}
       </MapContainer>
 
-      <div className="absolute top-4 left-4 bg-black/70 text-white px-3 py-2 rounded-lg text-sm sm:text-xs backdrop-blur z-[1000]">
+      {/* Bottom left, not top left: Leaflet's zoom control is anchored there and
+          the hint was drawn straight over it, so the only way to zoom was to
+          find the control underneath the thing telling you to use the map. */}
+      <div
+        className="pointer-events-none absolute bottom-4 left-4 z-[1000] flex items-center gap-2 rounded-full border border-line-2 bg-void/80 px-3 py-1.5 text-[0.6875rem] text-ink-2 backdrop-blur-md"
+      >
+        <span className="beat h-1.5 w-1.5 rounded-full bg-signal" />
         Draw a polygon or rectangle to select your area
       </div>
     </div>

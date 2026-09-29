@@ -20,14 +20,9 @@ export default function CopySummary({ summaryText }: { summaryText: string }) {
   };
 
   return (
-    <Button
-      onClick={copyToClipboard}
-      variant="outline"
-      size="sm"
-      className="border-white/30 text-white hover:bg-white/10"
-    >
-      <Copy className="w-4 h-4 mr-1" />
-      {copied ? "Copied!" : "Copy"}
+    <Button onClick={copyToClipboard} variant="outline" size="sm">
+      <Copy className="h-3.5 w-3.5" />
+      {copied ? "Copied" : "Copy as text"}
     </Button>
   );
 }

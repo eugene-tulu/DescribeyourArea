@@ -3,14 +3,21 @@ import { cva, type VariantProps } from 'class-variance-authority';
 
 import { cn } from '@/lib/utils';
 
+/* An alert is a warm lane, not a red one. The old interface shouted in red for
+   every refusal, which trained people to ignore the panel entirely; here only a
+   genuine failure takes the bare end of the ramp, and even that is a wash rather
+   than a block, because most refusals in this product have a route through
+   them and the panel has to read as information rather than as a wall. */
 const alertVariants = cva(
-  'relative w-full rounded-lg border p-4 [&>svg~*]:pl-7 [&>svg+div]:translate-y-[-3px] [&>svg]:absolute [&>svg]:left-4 [&>svg]:top-4 [&>svg]:text-foreground',
+  'relative w-full rounded-xl border px-4 py-3.5 flex items-start gap-3 [&>svg]:mt-0.5 [&>svg]:shrink-0',
   {
     variants: {
       variant: {
-        default: 'bg-background text-foreground',
+        default: 'border-line-2 bg-raised text-ink-2 [&>svg]:text-ink-3',
+        caution:
+          'border-stressed/35 bg-stressed/10 text-stressed [&>svg]:text-stressed',
         destructive:
-          'border-destructive/50 text-destructive dark:border-destructive [&>svg]:text-destructive',
+          'border-bare/40 bg-bare/10 text-bare [&>svg]:text-bare',
       },
     },
     defaultVariants: {
@@ -25,7 +32,6 @@ const Alert = React.forwardRef<
 >(({ className, variant, ...props }, ref) => (
   <div
     ref={ref}
-    role="alert"
     className={cn(alertVariants({ variant }), className)}
     {...props}
   />
@@ -38,7 +44,7 @@ const AlertTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h5
     ref={ref}
-    className={cn('mb-1 font-medium leading-none tracking-tight', className)}
+    className={cn('mb-1 text-sm font-semibold tracking-tight', className)}
     {...props}
   />
 ));
@@ -46,11 +52,11 @@ AlertTitle.displayName = 'AlertTitle';
 
 const AlertDescription = React.forwardRef<
   HTMLParagraphElement,
-  React.HTMLAttributes<HTMLParagraphElement>
+  React.HTMLAttributes<HTMLHeadingElement>
 >(({ className, ...props }, ref) => (
   <div
     ref={ref}
-    className={cn('text-sm [&_p]:leading-relaxed', className)}
+    className={cn('text-sm leading-relaxed [&_p]:leading-relaxed', className)}
     {...props}
   />
 ));

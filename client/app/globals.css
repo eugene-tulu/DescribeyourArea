@@ -1,35 +1,130 @@
 @import "tailwindcss";
 
 /* ---------------------------------------------------------------------------
-   Design basis: International Typographic Style, as a system rather than a skin.
+   Design basis: the colour language is the product's own.
 
-   Müller-Brockmann and Ruder built the visual language of Swiss cartography and
-   scientific information out of a grid and a type hierarchy, with no ornament. That
-   is not a decorative choice for this product: it is the honest form for measured
-   values with stated uncertainty, arranged so a reader can check them.
+   Every person who opens this has already seen a false-colour vegetation
+   composite. Bare ground reads red, stressed cover reads amber, vigorous cover
+   reads yellow-green into deep green — and that ramp is the same ramp in every
+   product they have ever used. So the ramp became the interface rather than
+   decorating it: the chrome is drawn from the scale the user is reading, so the
+   surface and the evidence are one continuous instrument.
 
-   Crouwel is the constraint behind it. Constrain the means — two greys, one
-   accent, one prose face, one figure face — and the invention appears in what you
-   do with the constraint. Everything below is deliberately non-negotiable so the
-   layout is a consequence of the rules rather than a series of decisions.
+   The two briefs behind that, taken seriously rather than as decoration:
+
+   Chris Do — a product is positioned, not decorated. A land manager or an EIA
+   reviewer opening this should feel they have picked up an instrument, not
+   filled in a form. That means scale contrast (one very large statement
+   against small precise labels), a ground dark enough that the data glows on
+   it, and exactly one accent that means something.
+
+   Rory Sutherland — nobody would ever design it like this, which is the point.
+   Delight is differentiation, and this audience lives inside austere, joyless
+   tools. The move is recognition: the app's own skin is the thing it measures.
+   Warmth shows up as confidence in the copy and as motion that reads as
+   *alive*, never as animation for its own sake.
+
+   What was kept, deliberately, from the previous International Typographic
+   Style system: every figure is monospaced and tabular, provenance travels with
+   the value, and printing a result gives you the result. Those were the right
+   calls and a re-skin was not a reason to throw them away.
    --------------------------------------------------------------------------- */
 
+@font-face {
+  font-family: "Instrument Serif";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/instrument-serif-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Instrument Serif";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/instrument-serif-italic-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/inter-var-latin.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/jetbrains-mono-var-latin.woff2") format("woff2");
+}
+
 :root {
-  /* One light, two greys, one accent. Nothing else earns colour. */
-  --paper: #f7f6f2;
-  --ink: #14161a;
-  --ink-2: #4d5359;   /* 7.2:1 on paper */
-  --ink-3: #5f656c;   /* 5.5:1 on paper: the 11px uppercase label is the worst case */
-  --rule: #d6d4cd;
-  --rule-strong: #14161a;
-  --accent: #0b4f9c;
-  /* Modelled data is not a measurement, and it never looks like one. */
-  --caution: #7a4f00; /* 6.6:1 on paper */
-  --caution-wash: #fbf1dc;
+  /* The ground: satellite night. Dark enough that a lime NDVI value reads as
+     emitted rather than printed, and legible in a vehicle in open sun, which is
+     where a lot of this work actually gets done.
+
+     Three surfaces, and that is the whole inventory. Anything that reads as a
+     fourth is a border pretending to be a surface. The gap from void to surface
+     is small on purpose: a premium dark surface is not a lighter colour, it is a
+     different *material*, and the difference is carried by the light falling on
+     it from above rather than by its value. */
+  --void: #06080a;
+  --surface: #0c0f11;
+  --raised: #14181b;
+
+  /* Light, not colour. Every raised surface gets the same faint top-light, which
+     is what makes a stack of panels read as a stack of things rather than as
+     nested rectangles. */
+  --light: rgba(226, 240, 232, 0.055);
+  --light-strong: rgba(226, 240, 232, 0.09);
+
+  --line: rgba(203, 224, 211, 0.11);
+  --line-2: rgba(203, 224, 211, 0.2);
+
+  --text: #f0f5f1;    /* 17.6:1 on void */
+  --text-2: #a3b3a8;  /*  8.9:1 on void */
+  --text-3: #77877c;  /*  5.0:1 on void — the worst case, the 11px label */
+
+  /* The ramp. One accent does the signalling; the rest is only ever used where
+     it also carries meaning, so colour never becomes noise. */
+  --signal: #c3f24e;   /* 15.0:1 on void — vigorous cover, and the accent */
+  --signal-dim: #86b62f;
+  --deep: #55ad3e;     /* established cover */
+  --stressed: #e8ac33; /*  9.8:1 — the caution lane */
+  --bare: #e56a4e;     /*  6.0:1 — the error lane */
+
+  /* A caution wash that is still a wash, not a block. */
+  --stressed-wash: rgba(232, 172, 51, 0.11);
+  --bare-wash: rgba(229, 106, 78, 0.11);
+
+  /* Legacy aliases. The charts, the map and most of the page read these names,
+     so the system could be inverted in one place rather than forty. */
+  --paper: var(--void);
+  --ink: var(--text);
+  --ink-2: var(--text-2);
+  --ink-3: var(--text-3);
+  --rule: var(--line);
+  --rule-strong: var(--text);
+  --accent: var(--signal);
+  --caution: var(--stressed);
+  --caution-wash: var(--stressed-wash);
 
   --measure: 68ch;
   --gap: 1.5rem;
+
+  /* One easing curve, used everywhere. Slow out, long settle: the motion in
+     expensive objects decelerates for a long time rather than stopping. */
+  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out: cubic-bezier(0.33, 1, 0.68, 1);
+
+  /* Four radii, no others. Restraint here is most of what reads as expensive. */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 18px;
+  --r-xl: 24px;
 }
+
 
 @theme inline {
   --color-paper: var(--paper);
@@ -37,40 +132,95 @@
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
   --color-rule: var(--rule);
+  --color-line-2: var(--line-2);
   --color-accent: var(--accent);
   --color-caution: var(--caution);
-  --font-sans: "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  --color-signal: var(--signal);
+  --color-signal-dim: var(--signal-dim);
+  --color-deep: var(--deep);
+  --color-stressed: var(--stressed);
+  --color-bare: var(--bare);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-void: var(--void);
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-serif: "Instrument Serif", "Iowan Old Style", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 * {
-  border-color: var(--rule);
+  border-color: var(--line);
 }
 
 html {
-  background: var(--paper);
+  background: var(--void);
+  color-scheme: dark;
+  scroll-behavior: smooth;
 }
 
 body {
-  background: var(--paper);
-  color: var(--ink);
+  background: var(--void);
+  color: var(--text);
   font-family: var(--font-sans);
   font-size: 15px;
-  line-height: 1.5;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: "kern" 1, "liga" 1;
+  font-feature-settings: "kern" 1, "liga" 1, "cv11" 1;
 }
+
+/* Material. A 2.5% film of noise over the whole page, fixed, so the ground is
+   never a flat fill. Expensive objects are never flat fills — it is the cheapest
+   available signal that a surface is a surface and not a colour, and it costs
+   one composited layer and no network. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.032;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
 
 /* Every figure is monospaced and tabular, everywhere, without exception.
    Vertically aligned digits cannot be misread column-wise, and it reads as
    instrumentation rather than marketing. This is the single highest-value rule
-   in the whole system. */
+   in the whole system, and it survived the re-skin unchanged. */
 .fig,
 .fig * {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1, "zero" 1;
   letter-spacing: -0.01em;
+}
+
+/* Scale contrast, which is the Do half of the brief: one statement set very
+   large against labels set very small. Fluid, so the claim survives a phone
+   and still fills a 27-inch display without becoming a billboard. */
+.display {
+  font-family: var(--font-serif);
+  font-weight: 400;
+  line-height: 0.92;
+  letter-spacing: -0.022em;
+  text-wrap: balance;
+}
+
+.display-xl {
+  font-size: clamp(2.75rem, 8.2vw, 7rem);
+}
+.display-lg {
+  font-size: clamp(2rem, 5.2vw, 4.25rem);
+}
+.display-md {
+  font-size: clamp(1.5rem, 3vw, 2.25rem);
+  line-height: 1.04;
+}
+
+/* The one accent, doing one job: a value worth looking at. */
+.mark {
+  color: var(--signal);
+  font-style: italic;
 }
 
 /* The measure: a column wide enough to read and narrow enough to scan. */
@@ -80,56 +230,232 @@ body {
 
 /* Section division is a rule, never a container. */
 .rule-t {
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--line);
 }
 .rule-b {
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid var(--line);
 }
 .rule-strong-t {
-  border-top: 2px solid var(--rule-strong);
+  border-top: 2px solid var(--line-2);
 }
 
 /* Labels do the work that badges and pills would otherwise do. */
 .label {
   font-size: 0.6875rem;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.13em;
   text-transform: uppercase;
-  color: var(--ink-3);
+  color: var(--text-3);
   font-family: var(--font-sans);
   font-weight: 500;
+  line-height: 1.4;
 }
 
 .headline {
   font-size: 1.0625rem;
   font-weight: 600;
-  letter-spacing: -0.01em;
+  letter-spacing: -0.012em;
 }
+
+/* Panels. A surface, a hairline and a top-light: enough to group, not enough to
+   decorate. The light is the part that does the work — it is what separates one
+   dark panel from the next without a heavier border. */
+.panel {
+  background: linear-gradient(180deg, var(--light), rgba(226, 240, 232, 0) 120px), var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  box-shadow: 0 1px 0 rgba(226, 240, 232, 0.04) inset, 0 30px 60px -40px rgba(0, 0, 0, 0.9);
+}
+
+/* The instrument rail. The same material one step up, with a lit top edge, so
+   the controls read as a panel you operate rather than a column you scroll. */
+.rail {
+  background: linear-gradient(180deg, var(--light-strong), rgba(226, 240, 232, 0) 220px), var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  box-shadow:
+    inset 0 1px 0 rgba(226, 240, 232, 0.1),
+    0 40px 80px -50px rgba(0, 0, 0, 0.95);
+}
+
 
 /* The distinct bit: what kind of number this is, set in the same face as the
    number so the source reads as part of the measurement, not as a disclaimer. */
 .status {
-  font-size: 0.6875rem;
-  letter-spacing: 0.08em;
+  font-size: 0.625rem;
+  letter-spacing: 0.11em;
   text-transform: uppercase;
   font-weight: 600;
   border: 1px solid currentColor;
-  padding: 0 0.3em;
+  border-radius: 999px;
+  padding: 0.1em 0.55em;
   white-space: nowrap;
+  line-height: 1.5;
 }
-.status-observed { color: var(--ink-2); }
-.status-derived { color: var(--ink-2); }
-.status-modelled { color: var(--caution); background: var(--caution-wash); }
-.status-unconfirmed { color: var(--caution); background: var(--caution-wash); }
+.status-observed { color: var(--text-2); }
+.status-derived { color: var(--text-2); }
+/* Modelled and unconfirmed are the two lanes that must not be mistaken for a
+   measurement, so they take the warm end of the ramp and a filled ground. */
+.status-modelled {
+  color: var(--stressed);
+  background: var(--stressed-wash);
+  border-color: rgba(227, 167, 47, 0.4);
+}
+.status-unconfirmed {
+  color: var(--stressed);
+  background: var(--stressed-wash);
+  border-color: rgba(227, 167, 47, 0.4);
+}
+
+/* Controls. One shape language, two weights: the primary action is a solid
+   signal, everything else is a hairline that lights on approach. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: var(--r-md);
+  font-weight: 550;
+  letter-spacing: -0.005em;
+  white-space: nowrap;
+  transition:
+    transform 0.28s var(--ease),
+    background-color 0.28s var(--ease),
+    border-color 0.28s var(--ease),
+    color 0.28s var(--ease),
+    box-shadow 0.28s var(--ease),
+    opacity 0.28s var(--ease);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 3px;
+}
+.btn:disabled {
+  cursor: not-allowed;
+}
+/* A disabled primary used to be the same colour at 45% opacity, which on a dark
+   ground turns the accent into a muddy olive and reads as a broken button
+   rather than an unavailable one. Dropping to a flat inert surface says
+   "not yet" instead of "wrong". */
+.btn-primary:disabled {
+  background: var(--raised);
+  border-color: var(--line);
+  color: var(--text-3);
+  opacity: 1;
+  box-shadow: none;
+  transform: none;
+}
+.btn-ghost:disabled,
+.btn-quiet:disabled {
+  opacity: 0.5;
+}
+
+.btn-primary {
+  background: var(--signal);
+  color: #0a1405;
+  border: 1px solid transparent;
+}
+.btn-primary:not(:disabled):hover {
+  background: #d2ff62;
+  box-shadow: 0 0 0 5px rgba(195, 242, 78, 0.1), 0 8px 24px -12px rgba(195, 242, 78, 0.5);
+  transform: translateY(-1px);
+}
+.btn-primary:not(:disabled):active {
+  transform: translateY(0);
+  box-shadow: 0 0 0 2px rgba(195, 242, 78, 0.08);
+}
+
+.btn-ghost {
+  background: rgba(226, 240, 232, 0.045);
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+.btn-ghost:not(:disabled):hover {
+  background: rgba(226, 240, 232, 0.1);
+  border-color: var(--line-2);
+  transform: translateY(-1px);
+}
+
+.btn-quiet {
+  background: transparent;
+  color: var(--text-2);
+  border: 1px solid transparent;
+}
+.btn-quiet:not(:disabled):hover {
+  color: var(--text);
+  background: rgba(226, 240, 232, 0.07);
+}
+
+/* The segmented control: the range switcher and anything else that is one
+   choice out of a small set.
+
+   A track and a single lit thumb rather than four bordered buttons. Four borders
+   is a form; a track with a moving thumb is an instrument, and it is also the
+   interaction people already have a decade of muscle memory for from every
+   premium product they own. */
+.segmented {
+  display: inline-flex;
+  padding: 3px;
+  gap: 2px;
+  border-radius: var(--r-md);
+  background: rgba(226, 240, 232, 0.05);
+  border: 1px solid var(--line);
+}
+.segmented-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border-radius: 9px;
+  background: rgba(226, 240, 232, 0.1);
+  border: 1px solid var(--line-2);
+  box-shadow: 0 2px 8px -4px rgba(0, 0, 0, 0.8);
+  transition:
+    transform 0.4s var(--ease),
+    width 0.4s var(--ease);
+  pointer-events: none;
+}
+.segmented-item {
+  position: relative;
+  z-index: 1;
+  padding: 0.4rem 0.8rem;
+  border-radius: 9px;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: -0.005em;
+  color: var(--text-3);
+  white-space: nowrap;
+  transition: color 0.28s var(--ease);
+}
+.segmented-item:hover { color: var(--text-2); }
+.segmented-item[aria-pressed="true"],
+.segmented-item[aria-selected="true"] {
+  color: var(--text);
+}
+.segmented-item:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+
+/* The evidence line: a single hairline that lights up on approach, so a table
+   of facts still has somewhere for the eye to land. */
+.hoverline {
+  transition: background-color 0.28s var(--ease), color 0.28s var(--ease);
+  border-radius: var(--r-sm);
+}
+.hoverline:hover {
+  background: rgba(226, 240, 232, 0.045);
+}
 
 /* Progressive disclosure for the working, opened one section at a time. */
 details.working > summary {
   cursor: pointer;
   list-style: none;
   font-size: 0.75rem;
-  color: var(--ink-2);
-  padding: 0.4rem 0;
-  border-top: 1px solid var(--rule);
+  color: var(--text-3);
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--line);
   user-select: none;
+  transition: color 0.18s var(--ease);
 }
 details.working > summary::-webkit-details-marker { display: none; }
 details.working > summary::before {
@@ -137,10 +463,12 @@ details.working > summary::before {
   display: inline-block;
   width: 1.1em;
   font-family: var(--font-mono);
-  color: var(--ink-3);
+  color: var(--text-3);
+  transition: transform 0.2s var(--ease);
 }
 details.working[open] > summary::before { content: "\2212"; }
-details.working > summary:hover { color: var(--ink); }
+details.working > summary:hover { color: var(--text); }
+details.working[open] > summary { color: var(--text-2); }
 details.working > *:not(summary) { padding-top: 0.5rem; }
 
 .working-grid {
@@ -150,37 +478,303 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
   font-size: 0.75rem;
   align-items: baseline;
 }
-.working-grid dt { color: var(--ink-3); }
-.working-grid dd { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.working-grid dt { color: var(--text-3); }
+.working-grid dd {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-2);
+}
 
 /* Hairlines between table-like rows instead of boxes around them. */
 .rows > * + * {
-  border-top: 1px solid var(--rule);
+  border-top: 1px solid var(--line);
 }
 
 .link {
-  color: var(--accent);
+  color: var(--signal);
   text-decoration: underline;
   text-underline-offset: 2px;
   text-decoration-thickness: 1px;
 }
 .link:hover { text-decoration-thickness: 2px; }
 
-@media (prefers-reduced-motion: reduce) {
-  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+::selection {
+  background: rgba(185, 232, 75, 0.28);
+  color: #fff;
 }
 
-/* Printing a result should produce the result, not a screenshot of a website.
+/* --- charts ----------------------------------------------------------------
+   A chart gets a room, not a cell. The plots below are full width of the
+   results column and roughly 300px tall, with 12px axis type inside a viewBox
+   that renders at up to 1.2x, so the numbers are readable at arm's length
+   rather than requiring a lean-in. The minimum width on the scroller is what
+   keeps that true on a phone: the plot gets a horizontal scroll rather than
+   being compressed until it is a secret again. */
+.chart {
+  padding: 1.75rem 0 0.5rem;
+}
+.chart + .chart {
+  padding-top: 2rem;
+}
+.chart-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.5rem 1.5rem;
+  padding-bottom: 1.125rem;
+}
+.chart-title {
+  font-size: 1.0625rem;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  color: var(--text);
+}
+.chart-sub {
+  margin-top: 0.25rem;
+  max-width: 54ch;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  color: var(--text-3);
+}
+.chart svg text {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/* The two data-bearing shapes draw themselves in. Nothing else on this page
+   animates on arrival, because a static screen is easier to trust — but a line
+   that has just been measured is genuinely in flight, and this is the one place
+   that is true. */
+@keyframes draw {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+.reveal {
+  animation: draw 1.1s var(--ease) both;
+}
+.reveal-line {
+  stroke-dasharray: 2400;
+  stroke-dashoffset: 2400;
+  animation: stroke-in 1.4s var(--ease) both;
+}
+@keyframes stroke-in {
+  to { stroke-dashoffset: 0; }
+}
+
+/* --- the ramp, shown as the ramp --------------------------------------------
+   The one place the interface states its own colour logic rather than just
+   using it. A strip that is literally the false-colour scale this product
+   reads, so the accent never reads as an arbitrary brand colour. */
+.ramp {
+  height: 5px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    var(--bare) 0%,
+    var(--stressed) 28%,
+    var(--signal) 62%,
+    var(--deep) 100%
+  );
+}
+
+/* --- motion, with a reason -------------------------------------------------
+   This is a live instrument reading a moving planet, so motion is used only
+   where something is genuinely in flight or genuinely responding. Nothing
+   animates on idle, because a static screen is easier to trust. */
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(340%); }
+}
+.scan {
+  position: relative;
+  overflow: hidden;
+}
+.scan::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 30%;
+  background: linear-gradient(90deg, transparent, rgba(185, 232, 75, 0.55), transparent);
+  animation: sweep 1.5s var(--ease) infinite;
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rise {
+  animation: rise 0.6s var(--ease) both;
+}
+
+@keyframes pulse-soft {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.beat {
+  animation: pulse-soft 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .scan::after { display: none; }
+  .reveal,
+  .reveal-line { animation: none; clip-path: none; stroke-dasharray: none; stroke-dashoffset: 0; }
+}
+
+/* --- Leaflet, wearing the same system --------------------------------------
+   Leaflet ships a light-mode control bar, which on a dark page reads as a
+   pasted-on foreign object. These rules re-skin the zoom control, the draw
+   toolbar and the attribution to match, rather than leaving a white box sitting
+   on top of satellite imagery. */
+.leaflet-container {
+  background: var(--void);
+  font-family: var(--font-sans);
+  outline: none;
+}
+.leaflet-bar,
+.leaflet-draw-toolbar a {
+  background-color: rgba(11, 16, 19, 0.86) !important;
+  backdrop-filter: blur(10px);
+  border-color: var(--line) !important;
+  border-radius: 8px !important;
+  color: var(--text) !important;
+  box-shadow: 0 8px 24px -12px rgba(0, 0, 0, 0.9) !important;
+}
+.leaflet-bar a {
+  /* Leaflet paints the button itself, not the container, so the container rule
+     above is invisible underneath it. Without this the zoom control stays a
+     white box sitting on satellite imagery. */
+  background-color: transparent !important;
+  border-radius: 8px !important;
+  color: var(--text-2) !important;
+}
+.leaflet-bar a:hover {
+  background-color: rgba(185, 232, 75, 0.16) !important;
+  color: var(--signal) !important;
+}
+.leaflet-bar a.leaflet-disabled {
+  color: var(--text-3) !important;
+  opacity: 0.5;
+}
+/* Leaflet-draw ships its glyphs as a dark sprite painted straight onto the
+   button, with no colour hook. Inverting the button to reveal them inverts its
+   background too, which turns the toolbar white on a dark map — so the sprite
+   is discarded and the four glyphs this app actually enables are redrawn as
+   masks. A mask is filled with a colour rather than a picture, so the icons take
+   the interface's own ink, need no sprite file, and stay crisp at any DPR. */
+.leaflet-draw-toolbar a {
+  background-image: none !important;
+  position: relative;
+}
+.leaflet-draw-toolbar a::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-color: var(--text-2);
+  transition: background-color 0.28s var(--ease);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-size: 15px 15px;
+  mask-size: 15px 15px;
+}
+.leaflet-draw-toolbar a:hover::before {
+  background-color: var(--signal);
+}
+.leaflet-draw-draw-polygon::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 3.2 21 9.4 17.4 20H6.6L3 9.4z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M12 3.2 21 9.4 17.4 20H6.6L3 9.4z'/%3E%3C/svg%3E");
+}
+.leaflet-draw-draw-rectangle::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='3.2' y='5.2' width='17.6' height='13.6'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Crect x='3.2' y='5.2' width='17.6' height='13.6'/%3E%3C/svg%3E");
+}
+.leaflet-draw-edit-edit::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M3 17.2 16.1 4.1l3.8 3.8L6.8 21H3z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M3 17.2 16.1 4.1l3.8 3.8L6.8 21H3z'/%3E%3C/svg%3E");
+}
+.leaflet-draw-edit-remove::before {
+  -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M9 2.6h6l.9 1.6H21v2.6H3V4.2h5.1zM4.6 8.4h14.8L18.6 21H5.4z'/%3E%3C/svg%3E");
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='black'%3E%3Cpath d='M9 2.6h6l.9 1.6H21v2.6H3V4.2h5.1zM4.6 8.4h14.8L18.6 21H5.4z'/%3E%3C/svg%3E");
+}
+.leaflet-draw-toolbar a.leaflet-draw-toolbar-button-enabled::before {
+  background-color: var(--signal);
+}
+.leaflet-draw-toolbar a.leaflet-draw-toolbar-button-enabled {
+  box-shadow: inset 0 0 0 1px var(--signal) !important;
+}
+.leaflet-draw-actions a {
+  background: var(--signal) !important;
+  color: #0a1405 !important;
+  font-weight: 600;
+  border-radius: 8px !important;
+}
+.leaflet-draw-actions a:hover {
+  background: #cbf76a !important;
+}
+.leaflet-control-attribution {
+  background: rgba(5, 8, 10, 0.72) !important;
+  backdrop-filter: blur(6px);
+  color: var(--text-3) !important;
+  font-size: 10px !important;
+  border-radius: 8px 0 0 0;
+}
+.leaflet-control-attribution a {
+  color: var(--text-2) !important;
+}
+.leaflet-control-scale-line {
+  background: rgba(5, 8, 10, 0.72);
+  border-color: var(--line-2) !important;
+  color: var(--text-2) !important;
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+/* --- printing --------------------------------------------------------------
+   Printing a result should produce the result, not a screenshot of a website.
    The map is the one thing that cannot be printed, and it is the only thing
    hidden outright: a basemap tile is thousands of small images that no printer
-   wants, so it is dropped rather than scaled into an unreadable smear. */
+   wants, so it is dropped rather than scaled into an unreadable smear. The dark
+   ground is inverted to ink on paper, and the accent darkens to something a
+   non-laminating printer can actually lay down. */
 @media print {
   @page {
     margin: 14mm;
   }
 
+  :root {
+    --void: #ffffff;
+    --surface: #ffffff;
+    --raised: #ffffff;
+    --text: #000000;
+    --text-2: #333333;
+    --text-3: #555555;
+    --line: #cccccc;
+    --line-2: #999999;
+    --signal: #3f6b00;
+    --signal-dim: #3f6b00;
+    --deep: #2f6b1f;
+    --stressed: #7a4f00;
+    --bare: #9c2f16;
+    --stressed-wash: #fbf1dc;
+    --bare-wash: #fbe4de;
+    --light: transparent;
+    --light-strong: transparent;
+  }
+
   body {
     background: #fff;
+  }
+  body::before {
+    display: none;
   }
 
   /* Chrome that has nothing to do with the finding. */
@@ -193,17 +787,25 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
 
   main,
   .max-w-4xl,
-  .max-w-6xl {
+  .max-w-6xl,
+  .max-w-7xl {
     max-width: none !important;
     margin: 0 !important;
     padding: 0 !important;
   }
 
-  /* Cards become plain ruled blocks; a border in a page box is decoration. */
-  [class*="rounded"],
-  [class*="shadow"] {
+  .display {
+    font-size: 26pt !important;
+    color: #000 !important;
+  }
+
+  /* Panels become plain ruled blocks; a border in a page box is decoration. */
+  .panel,
+  .rail {
+    border: 0 !important;
+    background: #fff !important;
     box-shadow: none !important;
-    border-radius: 0 !important;
+    padding: 0 !important;
   }
 
   a[href]::after {
