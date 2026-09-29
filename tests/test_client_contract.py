@@ -266,10 +266,14 @@ class TemporalScopeTests(unittest.TestCase):
         # collapsed or every sentence fails to match itself.
         source = " ".join(
             (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8").split())
-        for phrase in ("no time dimension", "full monthly record"):
+        # The claim, not the wording. A re-skin reworded "record" to "series" and
+        # this failed on the word, which is a test guarding copy edits rather
+        # than the thing that matters: that the control still tells the reader
+        # which of the other three datasets the window does and does not move.
+        for phrase in ("no time dimension", "monthly series", "vegetation period"):
             self.assertIn(phrase, source,
-                          f"the window control must say {phrase!r} rather than "
-                          f"letting a 1y selection imply all four cards changed")
+                          f"the window control must still say {phrase!r} rather "
+                          f"than letting a 1y selection imply all four cards changed")
 
     def test_the_fitted_trend_names_its_own_span(self):
         source = (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
@@ -337,12 +341,18 @@ class UserFacingSurfaceTests(unittest.TestCase):
             "cannot hold, so the feature is dead in the only place it is used")
 
     def test_the_numbers_can_be_exported(self):
+        # The capability, not the button wording. A re-skin shortened
+        # "Download CSV" to "CSV" and this failed on the word.
         for needle, why in (
-            ("Download CSV", "a table of the monthly figures is the likely real need"),
-            ("Download JSON", "so a result can be re-read without this server"),
+            ("rainfall-series.csv", "a table of the monthly figures is the likely real need"),
+            ("analysis.json", "so a result can be re-read without this server"),
             ("window.print()", "printing a result should produce the result"),
         ):
             self.assertIn(needle, self.source, why)
+        # And the buttons are actually wired, not just the helpers defined.
+        self.assertIn("exportCsv()", self.source,
+                      "the CSV helper exists but nothing calls it, so the user "
+                      "has a way out in the code and not on the page")
 
     def test_changing_the_area_clears_the_previous_result(self):
         # A result for the old area sat under a newly drawn boundary with nothing

@@ -128,7 +128,7 @@ const DATASET_OPTIONS: Array<{
 }> = [
   { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain variation' },
   { id: 'landcover', label: 'Land cover', description: 'ESA WorldCover composition' },
-  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Recent Sentinel-2 vegetation condition' },
+  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Recent vegetation condition' },
   { id: 'rainfall', label: 'Rainfall & drought', description: 'ERA5 monthly totals and anomaly vs normal' },
 ];
 

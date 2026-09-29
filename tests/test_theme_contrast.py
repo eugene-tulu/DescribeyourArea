@@ -20,9 +20,15 @@ PAGE = (CLIENT / "app" / "page.tsx").read_text()
 
 # Written out rather than pulled from a library, because the point is that the
 # rule is legible to whoever changes the palette next.
+# The three surfaces the theme declares, and the only three it has. Literal
+# because a test has to be able to check a colour without resolving aliases, and
+# because a hard-coded copy of a *light* theme's surfaces is exactly what made
+# this file red against a dark one -- and it read as broken contrast rather than
+# as a test that had stopped describing the design.
 CONTEXT_SURFACES = {
-    "paper": ("#f7f6f2", "the page ground"),
-    "white": ("#ffffff", "a card surface"),
+    "void": ("#06080a", "the page ground"),
+    "surface": ("#0c0f11", "a card surface"),
+    "raised": ("#14181b", "a raised surface"),
 }
 
 # The floor each role has to clear. 4.5:1 is AA for body text; 7:1 is AAA and is
@@ -72,10 +78,30 @@ def contrast(foreground: str, background: str) -> float:
 
 
 def token(name: str) -> str:
-    match = re.search(rf"^\s*{re.escape(name)}:\s*(#[0-9a-fA-F]{{6}})", CSS, re.M)
-    if not match:
-        raise AssertionError(f"{name} is not declared in globals.css")
-    return match.group(1)
+    """Resolve a token to its literal colour, following the alias layer.
+
+    The theme declares legacy names as aliases over a small set of primitives
+    (``--ink: var(--text)``) so the system can be inverted in one place. A
+    regex looking for a literal hex on the alias found nothing and reported four
+    tokens as undeclared -- which reads exactly like a missing palette, and is
+    the reason this file was red for reasons that had nothing to do with
+    contrast.
+    """
+    seen: set[str] = set()
+    current = name
+    for _ in range(8):  # an alias cycle must not hang the suite
+        match = re.search(rf"^\s*{re.escape(current)}:\s*([^;]+);", CSS, re.M)
+        if not match:
+            raise AssertionError(f"{current} is not declared in globals.css")
+        value = match.group(1).strip()
+        if value.startswith("#"):
+            return value
+        alias = re.findall(r"var\((--[a-z0-9-]+)\)", value)
+        if not alias or alias[0] in seen:
+            raise AssertionError(f"{current} resolves to {value!r}, which is not a colour")
+        seen.add(current)
+        current = alias[0]
+    raise AssertionError(f"{name} is aliased too deeply to resolve")
 
 
 class PaletteContrastTests(unittest.TestCase):
@@ -91,16 +117,32 @@ class PaletteContrastTests(unittest.TestCase):
                         f"below the {floor}:1 floor",
                     )
 
-    def test_the_paper_ground_is_actually_light(self):
-        # A "light theme" token that is dark is the whole bug in one assertion.
-        self.assertGreaterEqual(luminance(token("--paper")), 0.85)
+    def test_the_ground_is_actually_dark(self):
+        # "Satellite night". The assertion demanded a *light* ground, true of the
+        # theme it was written for and false of this one. Inverting it fails
+        # silently in the direction that removes the check, so the polarity is
+        # asserted explicitly rather than left implicit in a comparison.
+        self.assertLess(luminance(token("--void")), 0.02,
+                        "the ground is no longer the dark surface this theme assumes")
+
+    def test_the_three_surfaces_are_distinguishable(self):
+        # The design says three surfaces and that anything reading as a fourth is
+        # a border pretending to be one. If two collapse together the panels stop
+        # reading as a stack, so the ordering is checked.
+        grounds = [luminance(token(n)) for n in ("--void", "--surface", "--raised")]
+        self.assertTrue(grounds[0] < grounds[1] < grounds[2],
+                        f"surfaces are not ordered void < surface < raised: {grounds}")
 
     def test_ink_hierarchy_is_ordered(self):
-        # --ink is the darkest and --ink-3 the lightest, so luminance must ascend.
+        # On a dark ground --ink is the *lightest*, so luminance must descend.
         # A palette where the small uppercase label is darker than the body text
         # has inverted the hierarchy and will read as emphasis.
+        # Descending: --ink is body text and --ink-3 is the small uppercase
+        # label, so the label must be the dimmest. This asserted *ascending*
+        # while the ground was still light, and on a dark ground that assertion
+        # passes only if the hierarchy has been inverted.
         steps = [luminance(token(n)) for n in ("--ink", "--ink-2", "--ink-3")]
-        self.assertEqual(steps, sorted(steps), steps)
+        self.assertEqual(steps, sorted(steps, reverse=True), steps)
 
     def test_caution_is_distinguishable_from_body_ink(self):
         # Modelled and unconfirmed figures must be visually distinct, or the
