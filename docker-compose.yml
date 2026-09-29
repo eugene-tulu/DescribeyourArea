@@ -61,15 +61,14 @@ services:
 
   worker:
     build: .
-    # Supervised by the restart policy below, and serialised against other workers
-    # by an flock on the shared volume, so a second instance waits rather than
-    # duplicating ERA5 reads.
+    # Serialised against other workers by an flock on the shared volume, so a
+    # second instance waits rather than duplicating ERA5 reads.
     # A 300 s poll meant a submitted job waited a mean of 150 s doing nothing
     # before the worker even looked at it: measured 155 s of queue wait against
     # 24 s of compute, so five sixths of the wait a user experiences was the
     # queue not looking. An idle sweep is a local directory listing, so polling
     # every 15 s costs almost nothing and removes most of that wait.
-    command: ["python", "-m", "worker" "--interval", "${RAINFALL_WORKER_INTERVAL:-15}"]
+    command: ["python", "-m", "worker", "--interval", "${RAINFALL_WORKER_INTERVAL:-15}"]
     # No portfolio pull: the backend owns that, and two containers fetching the
     # same prefix on every start would be pointless.
     entrypoint: []
