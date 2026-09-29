@@ -110,3 +110,31 @@ class PrecomputeToolTests(unittest.TestCase):
         ])
         self.assertGreater(max(scattered[2] - scattered[0],
                                scattered[3] - scattered[1]), 10.0)
+
+
+class QueueWaitTests(unittest.TestCase):
+    """The wait a user experiences is the queue plus the compute.
+
+    Measured on the droplet for one 237-read series: 155 s waiting to be picked
+    up, 24 s computing. Five sixths of the wait was a 300 s poll interval, during
+    which the job sat in a directory doing nothing, because the worker only looked
+    for work every fifth minute. The cost model that produces the number shown to
+    the user models the compute; this is the part it does not, and it was the
+    larger part.
+    """
+
+    def test_the_poll_interval_is_short_enough_to_not_dominate_the_wait(self):
+        import re
+        from pathlib import Path
+
+        compose = (Path(__file__).resolve().parent.parent / "docker-compose.yml").read_text()
+        match = re.search(r"RAINFALL_WORKER_INTERVAL:-(\d+)", compose)
+        self.assertIsNotNone(match, "the worker interval is no longer in compose")
+        interval = int(match.group(1))
+        # A mean wait of interval/2. At 300 s that is 150 s, five sixths of the
+        # 180 s a user waited for a 24 s job. Holding it to 15 s caps the mean at
+        # 7.5 s, which is no longer the thing a user notices.
+        self.assertLessEqual(
+            interval, 30,
+            f"a {interval}s poll adds up to {interval // 2}s of dead wait before "
+            f"any compute begins; an idle sweep is a directory listing")
