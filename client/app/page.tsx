@@ -2,16 +2,18 @@
 
 import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
-import { Search, MapPin, Loader2, Globe, Satellite } from 'lucide-react';
+import {
+  Search, MapPin, Loader2, Globe, Satellite, ArrowDown, Download,
+  Link2, Printer, Info, Upload,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
 import CopySummary from '@/components/Copy';
-import ClimateChart from '@/components/ClimateChart';
-import RainChart from '@/components/RainChart';
+import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
+import { Wordmark } from '@/components/Mark';
 import { useToast } from '@/hooks/use-toast';
 
 
@@ -19,14 +21,28 @@ import { useToast } from '@/hooks/use-toast';
 const MapComponent = dynamic(() => import('@/components/MapComponent'), {
   ssr: false,
   loading: () => (
-    <div className="h-[600px] bg-slate-100 rounded-lg flex items-center justify-center">
-      <div className="flex items-center space-x-2">
-        <Globe className="w-6 h-6 animate-spin text-blue-600" />
-        <span className="text-ink-3">Loading satellite map…</span>
+    <div className="flex h-[600px] items-center justify-center bg-void">
+      <div className="flex items-center gap-2.5">
+        <Globe className="h-5 w-5 animate-spin text-signal" />
+        <span className="label">Loading satellite basemap</span>
       </div>
     </div>
   )
 });
+
+/* The four public datasets this reads, named in the open.
+
+   This is the credibility move, and it is placed above the headline on purpose:
+   a land manager or an EIA reviewer can look up every one of these and find what
+   they claim to be. No adjective a marketing department could invent would make
+   the same argument, and putting the evidence before the claim is also the more
+   confident order — it says the product does not need the claim to be believed. */
+const SOURCES = [
+  { id: 'nasadem', label: 'NASADEM', role: 'Elevation · 30 m' },
+  { id: 'worldcover', label: 'ESA WorldCover', role: 'Land cover · 10 m' },
+  { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
+  { id: 'era5', label: 'ERA5', role: 'Precipitation · monthly' },
+] as const;
 
 interface SearchResult {
   place_id: number;
@@ -399,7 +415,7 @@ function Working({
   if (!present.length) return null;
   return (
     <details className="working">
-      <summary>Working</summary>
+      <summary>Show the working</summary>
       <dl className="working-grid">
         {present.map(([term, value]) => (
           <div key={term} style={{ display: 'contents' }}>
@@ -480,33 +496,57 @@ function JobProgressLine({
 
 
 /* One module, one section. Divided by a rule rather than enclosed in a card,
-   because a card grid reads as a dashboard and this is a survey document. */
-function ModuleBlock({ title, description, children }: { title: string; description: string; children?: ReactNode }) {
+   because a card grid reads as a dashboard and this is a survey document.
+
+   Every module takes a top rule, including the first. Suppressing it on the
+   first child is right for a single column and wrong for the two-column grid
+   this becomes on a wide screen, where it leaves a rule hanging above the
+   right-hand module and none above its neighbour. */
+function ModuleBlock({
+  title,
+  description,
+  children,
+}: {
+  title: string;
+  description: string;
+  children?: ReactNode;
+}) {
   return (
-    <section className="rule-t py-4">
-      <div className="flex items-baseline justify-between gap-4">
-        <h3 className="headline">{title}</h3>
+    <section className="module rule-t py-7">
+      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+        <h3 className="headline text-[1.125rem]">{title}</h3>
         <p className="label">{description}</p>
       </div>
-      <div className="mt-3">{children}</div>
+      <div className="mt-4">{children}</div>
     </section>
   );
 }
 
+/* The number the reader came for.
+
+   The old version set this at 24px next to a 15px caption, which is a
+   comfortable size for a document and a completely forgettable one for a tool.
+   A land manager opening a result is scanning for a magnitude, and magnitude is
+   a size relationship, not a value. So the figure is now the largest thing in
+   its section, set in the same monospace as every other figure on the page, and
+   the caption sits under it rather than beside it. Nothing about the number
+   changed; everything about how loudly it arrives did. */
 function Headline({ value, caption }: { value: string; caption: string }) {
   return (
-    <p className="fig mb-3">
-      <span className="text-2xl leading-none">{value}</span>{' '}
-      <span className="label">{caption}</span>
-    </p>
+    <div className="fig mb-5">
+      <p className="text-[clamp(2.25rem,5.5vw,3.5rem)] font-medium leading-[0.9] tracking-[-0.03em] text-signal">
+        {value}
+      </p>
+      <p className="label mt-2.5">{caption}</p>
+    </div>
   );
 }
 
 function Figure({ term, value }: { term: string; value: string }) {
   return (
-    <div className="flex items-baseline justify-between gap-4 py-1">
+    <div className="hoverline flex items-baseline justify-between gap-4 px-2 -mx-2 py-2">
       <dt className="text-sm text-ink-2">{term}</dt>
-      <dd className="fig text-sm">{value}</dd>
+      <dd className="fig text-sm text-ink">{value}</dd>
     </div>
   );
 }
@@ -517,18 +557,12 @@ function DatasetResultCard({
   submission,
   onSubmit,
   vegetationSeries,
-  onSubmitSeries,
-  pendingIndicator,
-  progress,
 }: {
   dataset: DatasetId;
   summary: Summary;
   submission?: SubmissionState;
   onSubmit?: () => void;
   vegetationSeries?: ClimateVegSeries | null;
-  onSubmitSeries?: () => void;
-  pendingIndicator?: string | null;
-  progress?: { state: string; indicator: string } | null;
 }) {
   const option = DATASET_OPTIONS.find((item) => item.id === dataset);
   if (!option) return null;
@@ -622,7 +656,7 @@ function DatasetResultCard({
             <button
               type="button"
               onClick={onSubmit}
-              className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper"
+                        className="btn btn-primary mt-4 h-10 px-4 text-[0.8125rem]"
             >
               {rejected ? 'Try again' : 'Process precipitation for this area'}
             </button>
@@ -679,43 +713,10 @@ function DatasetResultCard({
           </p>
         )}
         <EvidenceLine evidence={rain.evidence} status={rain.status} />
-        {!(vegetationSeries?.series?.length ?? 0) && (
-          <div className="mt-3 rule-t pt-3">
-            <p className="text-sm text-ink-2">
-              No vegetation series for this boundary yet.
-            </p>
-            <p className="fig mt-1 text-xs text-ink-3">
-              A monthly NDVI series is computed offline from MODIS. It reads once
-              per month, so the wait is minutes rather than seconds, and it does not
-              grow with the size of the area.
-            </p>
-            {!progress && (
-              <button
-                type="button"
-                onClick={() => onSubmitSeries && onSubmitSeries()}
-                disabled={pendingIndicator === 'vegetation_series'}
-                className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper disabled:opacity-50"
-              >
-                {pendingIndicator === 'vegetation_series' ? 'Queueing…' : 'Build a vegetation series'}
-              </button>
-            )}
-          </div>
-        )}
-        {(vegetationSeries?.series?.length ?? 0) > 0 ? (
-          <ClimateChart
-            rain={rain.series || []}
-            vegetation={vegetationSeries?.series || []}
-            rainNormal={rain.climatology?.standard ?? null}
-            vegetationNormal={vegetationSeries?.climatology?.standard ?? null}
-            vegetationStatus={vegetationSeries?.status}
-            vegetationSource={vegetationSeries?.source}
-          />
-        ) : (
-          <RainChart
-            series={rain.series || []}
-            normalByMonth={rain.climatology?.monthly_mean_mm}
-          />
-        )}
+        {/* The charts used to live here, inside a module, inside a two-column
+            grid — which left each plot about 480x150 rendered pixels with 9px
+            type. They now live in their own full-width section under the
+            dossier, where each one is a chart rather than a caption. */}
         {vegetationSeries && vegetationSeries.thin_months?.length ? (
           <p className="fig mt-1 text-xs text-caution">
             {vegetationSeries.thin_months.length} vegetation month(s) had thin
@@ -1480,207 +1481,292 @@ export default function Home() {
   analyzeRef.current = handleAnalyze;
 
   return (
-    <div className="min-h-screen bg-paper text-ink">
-      <div className="container mx-auto px-4 py-8">
-        {/* Header */}
-        <div className="text-center mb-8">
-          <div className="flex items-center justify-center mb-4">
-            <Globe className="w-12 h-12 text-accent mr-3" />
-            <h1 className="text-4xl font-bold text-ink tracking-tight">
-              Geo<span className="text-accent">Contextualize</span>
-            </h1>
-          </div>
-          <p className="text-ink-2 text-lg max-w-2xl mx-auto">
-            Discover geographical context and insights by selecting any area on Earth.
-            Search, draw, and analyze with advanced geospatial tools.
-          </p>
+    <div className="min-h-screen bg-void text-ink">
+      {/* The glow off the instrument. One radial in the signal hue, low enough
+          to read as a lit surface rather than as a gradient background. */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed inset-x-0 top-0 z-0 h-[560px]"
+        style={{
+          background:
+            'radial-gradient(1200px 460px at 16% -12%, rgba(185,232,75,0.11), transparent 62%),' +
+            'radial-gradient(900px 400px at 84% -16%, rgba(79,168,60,0.09), transparent 60%)',
+        }}
+      />
+
+      {/* ------------------------------------------------------------- top bar */}
+      <header
+        data-print-hide
+        className="sticky top-0 z-[900] border-b border-rule/60 bg-void/85 backdrop-blur-xl"
+      >
+        <div className="mx-auto flex max-w-[1440px] items-center gap-5 px-5 py-3 sm:px-8">
+          <a href="#top" className="flex items-center gap-2.5">
+            <Wordmark />
+          </a>
+
+          <span className="fig ml-auto hidden text-[0.6875rem] tracking-[0.08em] text-ink-3 md:block">
+            {SOURCES.map((source) => source.label).join('  ·  ')}
+          </span>
+
+          <a
+            href="#workspace"
+            className="btn btn-ghost h-8 px-3 text-[0.8125rem] sm:ml-auto md:ml-0"
+          >
+            Open the map
+            <ArrowDown className="h-3.5 w-3.5" />
+          </a>
         </div>
+      </header>
 
-        {/* Analysis limits */}
-        <Alert className="mb-6 bg-amber-50 border-amber-200 max-w-4xl mx-auto">
-          <Satellite className="h-4 w-4 text-amber-600" />
-          <AlertDescription className="text-amber-800">
-            <strong>Analysis limits:</strong> Keep the study-area bounding box within{' '}
-            {syncLimitKm2 ?? 100} km². Larger areas can be processed offline; the worker reads
-            them at a coarser resolution and says which.
-          </AlertDescription>
-        </Alert>
+      <main className="relative z-10">
+        {/* -------------------------------------------------------------- hero */}
+        <section id="top" className="mx-auto max-w-[1440px] px-5 pt-16 sm:px-8 sm:pt-24">
+          <p className="fig flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.6875rem] tracking-[0.14em] text-ink-3 uppercase">
+            {SOURCES.map((source) => (
+              <span key={source.id} className="inline-flex items-center gap-2">
+                <span className="h-1 w-1 rounded-full bg-signal-dim" />
+                {source.label}
+              </span>
+            ))}
+          </p>
 
-        <div className="grid lg:grid-cols-3 gap-8 max-w-7xl mx-auto">
-          {/* Left Panel - Search and Controls */}
-          <div className="lg:col-span-1 space-y-6">
-            {/* Search Section */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader>
-                <CardTitle className="text-ink flex items-center">
-                  <Search className="w-5 h-5 mr-2" />
-                  Location Search
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
+          {/* Scale contrast is the whole Do argument in one element: a claim set
+              far larger than anything else on the page, with the italic doing
+              the work a second colour would otherwise do. */}
+          <h1 className="display display-xl mt-7 max-w-[19ch]">
+            Point at a piece of land. <span className="mark">Get the truth about it.</span>
+          </h1>
+
+          <div
+            data-print-hide
+            className="mt-9 grid gap-10 border-t border-rule pt-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)] lg:gap-16"
+          >
+            <p className="max-w-[54ch] text-[1.0625rem] leading-relaxed text-ink-2">
+              Terrain, vegetation, rainfall and drought for any boundary you draw on
+              Earth — read from the same public sources a satellite report would
+              use, with the provenance attached to every number. No account, no
+              upload, no survey licence.
+            </p>
+
+            {/* The four modules, named before anyone has to discover them. A
+                stranger should know what the product does in under a second,
+                which is the only honest place to spend a first impression. */}
+            <ul className="grid grid-cols-2 gap-x-6 gap-y-4 self-start">
+              {SOURCES.map((source, index) => (
+                <li key={source.id} className="border-l border-rule pl-3.5">
+                  <span className="fig text-[0.6875rem] text-ink-3">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <p className="mt-1 text-[0.8125rem] font-medium leading-tight">{source.label}</p>
+                  <p className="fig mt-0.5 text-[0.6875rem] text-ink-3">{source.role}</p>
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          <div data-print-hide className="mt-10 flex items-center gap-4">
+            <div className="ramp w-40" aria-hidden />
+            <span className="label">the false-colour scale this reads</span>
+          </div>
+        </section>
+
+        {/* --------------------------------------------------------- workspace */}
+        <section
+          id="workspace"
+          className="mx-auto max-w-[1440px] scroll-mt-20 px-5 pt-20 sm:px-8"
+        >
+          {/* The cap used to be an amber alarm across the top of the page, read
+              on arrival and never again. It is a fact about the service, so it
+              now sits with the controls it constrains, as a quiet note. */}
+          <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-rule bg-surface/60 px-4 py-3">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" />
+            <p className="text-[0.8125rem] leading-relaxed text-ink-3">
+              A study area is read live up to{' '}
+              <span className="fig text-ink-2">{formatNumber(syncLimitKm2 ?? 100, 0)} km²</span>.
+              Anything larger is not refused — it is queued and read offline at a
+              coarser resolution, and the app tells you which before you commit.
+            </p>
+          </div>
+
+          <div className="grid items-start gap-6 lg:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
+            {/* ---------------------------------------------------- the rail */}
+            <aside
+              data-print-hide
+              className="rail lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto"
+            >
+              <div className="border-b border-rule px-5 py-4">
+                <h2 className="text-[0.9375rem] font-semibold tracking-[-0.01em]">
+                  Choose your area
+                </h2>
+                <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">
+                  Search a place, draw on the map, or bring your own boundary.
+                </p>
+              </div>
+
+              {/* Search */}
+              <div className="px-5 py-5">
+                <Label htmlFor="place-search" className="label mb-2.5 block">
+                  Find a place
+                </Label>
                 <div className="relative">
-                  <div className="relative">
-                    <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-ink-3 w-4 h-4" />
-                    <Input
-                      type="text"
-                      placeholder="Search for places..."
-                      value={searchQuery}
-                      onChange={(e) => handleSearchChange(e.target.value)}
-                      className="pl-10 bg-white border-rule text-ink placeholder:text-ink-2"
-                      onFocus={() => searchResults.length > 0 && setShowResults(true)}
-                    />
-                    {isSearching && (
-                      <Loader2 className="absolute right-3 top-1/2 transform -translate-y-1/2 text-ink-3 w-4 h-4 animate-spin" />
-                    )}
-                  </div>
-                  
-                  {/* Search Results Dropdown */}
-                  {showResults && searchResults.length > 0 && (
-                    <div className="absolute z-50 w-full mt-1 bg-white rounded-md shadow-lg border border-gray-200 max-h-60 overflow-y-auto">
-                      {searchResults.map((result) => (
-                        <div
-                          key={result.place_id}
-                          className="px-4 py-3 hover:bg-gray-50 cursor-pointer border-b border-gray-100 last:border-b-0"
-                          onClick={() => handleLocationSelect(result)}
-                        >
-                          <div className="flex items-start">
-                            <MapPin className="w-4 h-4 text-blue-600 mt-0.5 mr-2 flex-shrink-0" />
-                            <span className="text-sm text-gray-900 leading-tight">
-                              {result.display_name}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
+                  <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
+                  <Input
+                    id="place-search"
+                    type="text"
+                    placeholder="Nairobi, Kajiado, Mara North…"
+                    value={searchQuery}
+                    onChange={(e) => handleSearchChange(e.target.value)}
+                    className="pl-10 pr-10"
+                    onFocus={() => searchResults.length > 0 && setShowResults(true)}
+                  />
+                  {isSearching && (
+                    <Loader2 className="absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-ink-3" />
                   )}
                 </div>
-              </CardContent>
-            </Card>
 
-            {/* Instructions */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader>
-                <CardTitle className="text-ink">How to Use</CardTitle>
-              </CardHeader>
-              <CardContent className="text-ink-2 space-y-3">
-                <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">1</div>
-                  <p className="text-sm">Search and select a location to zoom to</p>
-                </div>
-                <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">2</div>
-                  <p className="text-sm">Upload a GeoJSON file, or draw the area yourself</p>
-                </div>
-                <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">3</div>
-                  <p className="text-sm">Draw a polygon or rectangle to define the area to analyze</p>
-                </div>
-                <div className="flex items-start">
-                  <div className="w-6 h-6 rounded-full bg-blue-500 text-ink text-xs flex items-center justify-center mr-3 mt-0.5 flex-shrink-0">4</div>
-                  <p className="text-sm">Click &quot;Analyze Area&quot; to get geographical context</p>
-                </div>
-              </CardContent>
-            </Card>
-            {/* GeoJSON Upload */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader>
-                <CardTitle className="text-ink">Upload GeoJSON</CardTitle>
-              </CardHeader>
-              <CardContent>
+                {showResults && searchResults.length > 0 && (
+                  <div className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
+                    {searchResults.map((result) => (
+                      <button
+                        key={result.place_id}
+                        type="button"
+                        onClick={() => handleLocationSelect(result)}
+                        className="hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2.5 text-left last:border-b-0"
+                      >
+                        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-signal-dim" />
+                        <span className="text-[0.8125rem] leading-snug text-ink-2">
+                          {result.display_name}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Upload */}
+              <div className="rule-t px-5 py-5">
+                <Label htmlFor="geojson-upload" className="label mb-2.5 block">
+                  Or bring a boundary
+                </Label>
                 <input
+                  id="geojson-upload"
                   type="file"
                   accept=".geojson,application/geo+json,application/json"
                   onChange={handleGeojsonUpload}
-                  className="block w-full text-sm text-ink-2 file:mr-4 file:py-2 file:px-4
-                            file:rounded-md file:border-0 file:text-sm file:font-semibold
-                            file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                  className="peer sr-only"
                 />
-                <p className="text-xs text-ink-3 mt-2">
-                  Upload a <code>.geojson</code> file to define your study area.
+                {/* The native file input renders an unstyleable "Choose File /
+                    No file chosen" pair. It is kept in the DOM for the label and
+                    for keyboard focus, and replaced by a control that can
+                    actually be designed. */}
+                <label
+                  htmlFor="geojson-upload"
+                  className="btn btn-ghost h-10 w-full cursor-pointer px-3.5 text-[0.8125rem] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-signal"
+                >
+                  <Upload className="h-4 w-4" />
+                  Choose a .geojson
+                </label>
+                <p className="mt-2.5 text-[0.75rem] leading-relaxed text-ink-3">
+                  A <span className="fig">.geojson</span> Polygon, MultiPolygon or
+                  FeatureCollection, up to 500 KB.
                 </p>
-              </CardContent>
-            </Card>
-            {/* Options */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader>
-                <CardTitle className="text-ink">Options</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="space-y-4">
-                  <div className="space-y-2">
-                    <div className="space-y-2">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Label className="text-sm font-medium text-ink-2">Vegetation window</Label>
-                        {([1, 3, 10, 30] as const).map((years) => (
-                          <button
-                            key={years}
-                            type="button"
-                            onClick={() => setWindowYears(years)}
-                            className={`rounded px-2 py-1 text-xs ${
-                              windowYears === years
-                                ? 'bg-sky-600 text-ink'
-                                : 'bg-white text-ink-2 hover:bg-paper'
-                            }`}
-                          >
-                            {years}y
-                          </button>
-                        ))}
-                        <div className="fig flex items-center gap-1 text-xs text-ink-3">
-                          <input
-                            type="date"
-                            value={customStart}
-                            max={customEnd || windowEndISO()}
-                            onChange={(e) => setCustomStart(e.target.value)}
-                            aria-label="Window start"
-                            className="border border-rule bg-white px-1 py-0.5 text-ink"
-                          />
-                          <span>to</span>
-                          <input
-                            type="date"
-                            value={customEnd}
-                            min={customStart || undefined}
-                            onChange={(e) => setCustomEnd(e.target.value)}
-                            aria-label="Window end"
-                            className="border border-rule bg-white px-1 py-0.5 text-ink"
-                          />
-                        </div>
-                        <p className="w-full text-xs text-ink-3">
-                          This window selects the vegetation period. It also sets how
-                          finely precipitation is sampled, but the rainfall series below is
-                          always the full monthly record. Elevation and land cover have no
-                          time dimension: NASADEM is a static surface and WorldCover a
-                          single-date classification, so no window changes them.
-                        </p>
-                        <Label className="ml-2 text-sm font-medium text-ink-2">Source</Label>
-                        <select
-                          value={selectedSensor}
-                          onChange={(event) => setSelectedSensor(event.target.value)}
-                          aria-label="Vegetation source"
-                          className="rounded border border-rule bg-white px-2 py-1 text-xs text-ink"
+              </div>
+
+              {/* Options */}
+              <div className="rule-t px-5 py-5">
+                <p className="label mb-4">Options</p>
+
+                <div className="space-y-5">
+                  <div>
+                    <div className="mb-2.5 flex flex-wrap items-center gap-2">
+                      <Label className="text-[0.8125rem] text-ink-2">Vegetation window</Label>
+                      {([1, 3, 10, 30] as const).map((years) => (
+                        <button
+                          key={years}
+                          type="button"
+                          aria-pressed={windowYears === years}
+                          onClick={() => setWindowYears(years)}
+                          className={`fig h-7 rounded-lg border px-2.5 text-[0.75rem] transition-colors duration-200 ${
+                            windowYears === years
+                              ? 'border-signal bg-signal/12 text-signal'
+                              : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
+                          }`}
                         >
-                          <option value="auto">auto</option>
-                          <option value="sentinel-2">Sentinel-2</option>
-                          <option value="landsat">Landsat</option>
-                          <option value="modis">MODIS</option>
-                        </select>
-                      </div>
-                      <p className="fig text-xs text-ink-2">
-                        {windowStartISO()} → {windowEndISO()}
-                        {customStart && customEnd ? ' (set)' : ` (${windowYears}y preset)`}
-                      </p>
-                      {!customRangeValid && (
-                        <p className="text-xs text-caution">
-                          The start date is after the end date, or in the future.
-                        </p>
-                      )}
-                      <p className="text-xs text-ink-3">
-                        auto picks the source whose cloud mask can be trusted, and says why.
-                      </p>
+                          {years}y
+                        </button>
+                      ))}
                     </div>
-                    <Label className="text-sm font-medium text-ink-2">Datasets to Analyze</Label>
-                    <div className="space-y-2">
+
+                    <div className="fig flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
+                      <input
+                        type="date"
+                        value={customStart}
+                        max={customEnd || windowEndISO()}
+                        onChange={(e) => setCustomStart(e.target.value)}
+                        aria-label="Window start"
+                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
+                      />
+                      <span>to</span>
+                      <input
+                        type="date"
+                        value={customEnd}
+                        min={customStart || undefined}
+                        onChange={(e) => setCustomEnd(e.target.value)}
+                        aria-label="Window end"
+                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
+                      />
+                    </div>
+
+                    <p className="fig mt-2.5 text-[0.75rem] text-ink-2">
+                      {windowStartISO()} → {windowEndISO()}
+                      {customStart && customEnd ? ' (set)' : ` (${windowYears}y preset)`}
+                    </p>
+                    {!customRangeValid && (
+                      <p className="mt-1.5 text-[0.75rem] text-stressed">
+                        The start date is after the end date, or in the future.
+                      </p>
+                    )}
+                    <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                      This window selects the vegetation period, and sets how finely
+                      precipitation is sampled. The rainfall record behind it is always
+                      the full monthly series — the charts below simply show the part
+                      of it you asked to see. Elevation and land cover have no time
+                      dimension, so no window changes them.
+                    </p>
+                  </div>
+
+                  <div>
+                    <div className="mb-2.5 flex items-center gap-2">
+                      <Label htmlFor="vegetation-source" className="text-[0.8125rem] text-ink-2">
+                        Source
+                      </Label>
+                      <select
+                        id="vegetation-source"
+                        value={selectedSensor}
+                        onChange={(event) => setSelectedSensor(event.target.value)}
+                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+                      >
+                        <option value="auto">auto</option>
+                        <option value="sentinel-2">Sentinel-2</option>
+                        <option value="landsat">Landsat</option>
+                        <option value="modis">MODIS</option>
+                      </select>
+                    </div>
+                    <p className="text-[0.75rem] leading-relaxed text-ink-3">
+                      Auto picks the source whose cloud mask can be trusted, and tells
+                      you why it picked it.
+                    </p>
+                  </div>
+
+                  <div>
+                    <p className="label mb-2.5">Read</p>
+                    <div className="space-y-0.5">
                       {DATASET_OPTIONS.map((dataset) => (
-                        <label key={dataset.id} htmlFor={`dataset-${dataset.id}`} className="flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 hover:bg-paper">
+                        <label
+                          key={dataset.id}
+                          htmlFor={`dataset-${dataset.id}`}
+                          className="hoverline flex cursor-pointer items-start gap-2.5 px-2 py-2"
+                        >
                           <input
                             type="checkbox"
                             id={`dataset-${dataset.id}`}
@@ -1691,241 +1777,287 @@ export default function Home() {
                                 : current.filter((id) => id !== dataset.id),
                               );
                             }}
-                            className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                            className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer appearance-none rounded-[5px] border border-line-2 bg-raised transition-colors duration-150 checked:border-signal checked:bg-signal focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-signal/20"
+                            style={
+                              selectedDatasets.includes(dataset.id)
+                                ? {
+                                    backgroundImage:
+                                      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%230a1405'%3E%3Cpath d='M6.2 11.3 3.4 8.5l1.1-1.1 1.7 1.7 4.6-4.6 1.1 1.1z'/%3E%3C/svg%3E\")",
+                                    backgroundSize: '100%',
+                                  }
+                                : undefined
+                            }
                           />
                           <span>
-                            <span className="block text-sm text-ink-2">{dataset.label}</span>
-                            <span className="block text-xs text-ink-3">{dataset.description}</span>
+                            <span className="block text-[0.8125rem] text-ink-2">{dataset.label}</span>
+                            <span className="block text-[0.75rem] text-ink-3">{dataset.description}</span>
                           </span>
                         </label>
                       ))}
                     </div>
                   </div>
-                  <p className="text-xs text-ink-3 mt-2">
-                    All datasets are selected by default. Vegetation analysis may be skipped for larger study areas.
+                </div>
+              </div>
+
+              <div className="rule-t px-5 py-5">
+                <Button
+                  onClick={handleAnalyze}
+                  disabled={
+                    (!boundingBox && !uploadedGeojson && !drawnFeatures?.features.length)
+                    || selectedDatasets.length === 0
+                    || isLoading
+                    || !customRangeValid
+                  }
+                  className="btn-primary h-12 w-full text-[0.9375rem]"
+                >
+                  {isLoading ? (
+                    <>
+                      <span className="h-1.5 w-1.5 rounded-full bg-void beat" />
+                      Reading the sources
+                    </>
+                  ) : (
+                    <>
+                      <Satellite className="h-4 w-4" />
+                      Read this area
+                    </>
+                  )}
+                </Button>
+                <p className="mt-2.5 text-center text-[0.75rem] text-ink-3">
+                  Nothing is stored against an account. The boundary is hashed into
+                  a key, and you can withdraw it whenever you like.
+                </p>
+              </div>
+            </aside>
+
+            {/* ---------------------------------------------------- the stage */}
+            <div className="space-y-6">
+              {/* Map */}
+              <div className="panel overflow-hidden p-0">
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-rule px-5 py-3.5">
+                  <div className="flex items-center gap-2.5">
+                    <Globe className="h-4 w-4 text-signal" />
+                    <span className="text-[0.9375rem] font-medium">Study area</span>
+                  </div>
+                  <p className="fig text-[0.75rem] text-ink-3">
+                    {boundingBox || drawnFeatures?.features.length || uploadedGeojson
+                      ? 'Area selected — ready to read'
+                      : 'Esri World Imagery · draw with the toolbar top right'}
                   </p>
                 </div>
-              </CardContent>
-            </Card>
-            
-            {/* Analyze Button */}
-            <Button
-              onClick={handleAnalyze}
-              disabled={
-                (!boundingBox && !uploadedGeojson && !drawnFeatures?.features.length)
-                || selectedDatasets.length === 0
-                || isLoading
-                || !customRangeValid
-              }
-              className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-ink py-6 text-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isLoading ? (
-                <div className="flex items-center">
-                  <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"></div>
-                  Analyzing Area...
-                </div>
-              ) : (
-                <div className="flex items-center">
-                  <Satellite className="w-5 h-5 mr-2" />
-                  Analyze Selected Area
-                </div>
-              )}
-            </Button>
-          </div>
 
-          {/* Right Panel - Map and Results */}
-          <div className="lg:col-span-2 space-y-6">
-            {/* Map */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader>
-                <CardTitle className="text-ink flex items-center">
-                  <Globe className="w-5 h-5 mr-2" />
-                  Satellite Map
-                </CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="rounded-lg overflow-hidden">
-                  <div className="relative">
-                    <MapComponent
-                      selectedLocation={selectedLocation}
-                      onBoundingBoxCreated={handleBoundingBoxCreated}
-                      uploadedGeoJSON={uploadedGeojson}
-                      onSaveFeatures={handleFeaturesChange}
-                    />
-                    {drawnFeatures && drawnFeatures.features.length > 0 && (
-                      <button
-                        onClick={() => {
-                          const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(drawnFeatures, null, 2));
-                          const downloadAnchorNode = document.createElement('a');
-                          downloadAnchorNode.setAttribute("href", dataStr);
-                          downloadAnchorNode.setAttribute("download", "drawn_features.geojson");
-                          document.body.appendChild(downloadAnchorNode); // required for firefox
-                          downloadAnchorNode.click();
-                          downloadAnchorNode.remove();
-                        }}
-                        className="absolute bottom-4 right-4 bg-blue-600 hover:bg-blue-700 text-ink px-3 py-2 rounded-md text-sm z-[1000]"
-                      >
-                        Download GeoJSON
-                      </button>
-                    )}
+                <div className="relative">
+                  <MapComponent
+                    selectedLocation={selectedLocation}
+                    onBoundingBoxCreated={handleBoundingBoxCreated}
+                    uploadedGeoJSON={uploadedGeojson}
+                    onSaveFeatures={handleFeaturesChange}
+                  />
+                  {drawnFeatures && drawnFeatures.features.length > 0 && (
+                    <button
+                      onClick={() => {
+                        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(drawnFeatures, null, 2));
+                        const downloadAnchorNode = document.createElement('a');
+                        downloadAnchorNode.setAttribute("href", dataStr);
+                        downloadAnchorNode.setAttribute("download", "drawn_features.geojson");
+                        document.body.appendChild(downloadAnchorNode); // required for firefox
+                        downloadAnchorNode.click();
+                        downloadAnchorNode.remove();
+                      }}
+                      className="btn btn-ghost absolute bottom-10 right-4 z-[1000] h-9 px-3 text-[0.8125rem]"
+                    >
+                      <Download className="h-3.5 w-3.5" />
+                      Download GeoJSON
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Results */}
+              <div className="panel overflow-hidden p-0">
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-b border-rule px-5 py-3.5">
+                  <div className="flex items-center gap-2.5">
+                    <MapPin className="h-4 w-4 text-signal" />
+                    <span className="text-[0.9375rem] font-medium">The reading</span>
                   </div>
+                  {summaryText && <CopySummary summaryText={summaryText} />}
                 </div>
-              </CardContent>
-            </Card>
 
-            {/* Results */}
-            <Card className="bg-white backdrop-blur border-rule">
-              <CardHeader className="flex flex-row items-center justify-between">
-                <CardTitle className="text-ink flex items-center">
-                  <MapPin className="w-5 h-5 mr-2" />
-                  Analysis Results
-                </CardTitle>
-                {summaryText && <CopySummary summaryText={summaryText} />}
-              </CardHeader>
-              <CardContent>
-                {shareLinkUnavailable && (
-                  <div className="mb-4 text-xs text-ink-3">{shareLinkUnavailable}</div>
-                )}
-                {shareLink && (
-                  <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-ink-3">
-                    <span>Share this analysis:</span>
-                    <code className="max-w-sm truncate rounded bg-white px-2 py-1 text-ink-2">
-                      {shareLink}
-                    </code>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => navigator.clipboard?.writeText(shareLink)}
+                <div className="px-5 py-5">
+                  {shareLinkUnavailable && (
+                    <div data-print-hide className="mb-4 text-xs text-ink-3">
+                      {shareLinkUnavailable}
+                    </div>
+                  )}
+                  {shareLink && (
+                    <div
+                      data-print-hide
+                      className="mb-6 flex flex-wrap items-center gap-2 rounded-xl border border-rule bg-raised/60 px-3.5 py-3"
                     >
-                      Copy link
-                    </Button>
-                    <span className="basis-full" />
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
-                    >
-                      Download CSV
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => download('analysis.json', exportJson(), 'application/json')}
-                    >
-                      Download JSON
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => window.print()}>
-                      Print
-                    </Button>
-                    {activeCacheKey && (
-                      // Withdrawal is a first-class action, not a support email.
-                      // The app holds a series derived from the submitted
-                      // geometry, and the person who submitted it should be the
-                      // one who can say to remove it.
+                      <span className="text-[0.75rem] text-ink-3">Take it with you</span>
+                      <code className="fig max-w-xs truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.75rem] text-ink-3">
+                        {shareLink}
+                      </code>
                       <Button
                         size="sm"
                         variant="outline"
-                        onClick={() => void forgetThisArea()}
+                        onClick={() => navigator.clipboard?.writeText(shareLink)}
                       >
-                        Remove this area
+                        <Link2 className="h-3.5 w-3.5" />
+                        Copy link
                       </Button>
-                    )}
-                  </div>
-                )}
-                {offline && (
-                  <div className="mb-4 rule-t pt-4">
-                    <p className="headline">
-                      This area is {formatNumber(offline.areaKm2, 0)} km²
-                    </p>
-                    <p className="fig mt-1 text-sm text-ink-2">
-                      A request handles up to {formatNumber(offline.limitKm2, 0)} km² so
-                      it stays inside a few seconds. A larger area is not refused — it
-                      is read offline, at a coarser resolution, and you choose whether
-                      to wait.
-                    </p>
-                    <dl className="rows mt-3">
-                      {offline.plans.map((plan) => (
-                        <Figure
-                          key={plan.indicator}
-                          term={
-                            plan.already_computed
-                              ? `${plan.indicator} — already computed`
-                              : plan.indicator || ''
-                          }
-                          value={`${
-                            plan.resolution_m ? `${plan.resolution_m} m` : `${plan.resolution_km} km`
-                          } · ${plan.estimated_seconds ?? '?'}s est.`}
-                        />
-                      ))}
-                    </dl>
-                    {offline.queued.length ? (
-                      <p className="fig mt-3 text-sm text-ink">
-                        Queueing {offline.queued.join(', ')}. The progress line reports
-                        when each is ready.
-                      </p>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={queueOffline}
-                        className="mt-3 border border-ink px-3 py-1.5 text-sm hover:bg-ink hover:text-paper"
+                      <span className="basis-full" />
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
                       >
-                        Process {offline.plans.length} module
-                        {offline.plans.length === 1 ? '' : 's'} offline
-                      </button>
-                    )}
-                    <p className="fig mt-2 text-[10px] text-ink-3">
-                      Times are estimates from the measured per-read cost, not
-                      guarantees. A coarser grid is a different kind of claim, so the
-                      resolution each module will use is listed rather than buried.
-                    </p>
-                  </div>
-                )}
-                {analysisWarnings.map((warning) => (
-                  <Alert key={warning.message} className="mb-4 border-amber-300 bg-amber-50">
-                    <Satellite className="h-4 w-4 text-amber-700" />
-                    <AlertDescription className="text-amber-900">
-                      <strong>{warning.status === 'skipped' ? 'Vegetation analysis was skipped:' : 'Vegetation analysis note:'}</strong> {warning.message}
-                    </AlertDescription>
-                  </Alert>
-                ))}
-                <div className="bg-white rounded-lg p-4 min-h-[200px]">
+                        CSV
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => download('analysis.json', exportJson(), 'application/json')}
+                      >
+                        JSON
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => window.print()}>
+                        <Printer className="h-3.5 w-3.5" />
+                        Print
+                      </Button>
+                      {activeCacheKey && (
+                        // Withdrawal is a first-class action, not a support email.
+                        // The app holds a series derived from the submitted
+                        // geometry, and the person who submitted it should be the
+                        // one who can say to remove it.
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => void forgetThisArea()}
+                        >
+                          Remove this area
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                  {offline && (
+                    <div className="mb-6 rule-t pt-5">
+                      <p className="headline">
+                        This area is <span className="fig text-signal">{formatNumber(offline.areaKm2, 0)} km²</span>
+                      </p>
+                      <p className="fig mt-1.5 text-[0.8125rem] leading-relaxed text-ink-2">
+                        A live request handles up to {formatNumber(offline.limitKm2, 0)} km²
+                        so it stays inside a few seconds. A larger area is not refused
+                        — it is read offline, at a coarser resolution, and you choose
+                        whether to wait.
+                      </p>
+                      <dl className="rows mt-4">
+                        {offline.plans.map((plan) => (
+                          <Figure
+                            key={plan.indicator}
+                            term={
+                              plan.already_computed
+                                ? `${plan.indicator} — already computed`
+                                : plan.indicator || ''
+                            }
+                            value={`${
+                              plan.resolution_m ? `${plan.resolution_m} m` : `${plan.resolution_km} km`
+                            } · ${plan.estimated_seconds ?? '?'}s est.`}
+                          />
+                        ))}
+                      </dl>
+                      {offline.queued.length ? (
+                        <p className="fig mt-3 text-sm text-ink">
+                          Queueing {offline.queued.join(', ')}. The progress line reports
+                          when each is ready.
+                        </p>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={queueOffline}
+                          className="btn btn-primary mt-4 h-10 px-4 text-[0.8125rem]"
+                        >
+                          Process {offline.plans.length} module
+                          {offline.plans.length === 1 ? '' : 's'} offline
+                        </button>
+                      )}
+                      <p className="fig mt-2.5 text-[0.6875rem] text-ink-3">
+                        Times are estimates from the measured per-read cost, not
+                        guarantees. A coarser grid is a different kind of claim, so the
+                        resolution each module will use is listed rather than buried.
+                      </p>
+                    </div>
+                  )}
+                  {analysisWarnings.map((warning) => (
+                    <Alert key={warning.message} variant="caution" className="mb-4">
+                      <Satellite className="h-4 w-4" />
+                      <AlertDescription>
+                        <strong className="font-semibold">
+                          {warning.status === 'skipped'
+                            ? 'Vegetation analysis was skipped:'
+                            : 'Vegetation analysis note:'}
+                        </strong>{' '}
+                        {warning.message}
+                      </AlertDescription>
+                    </Alert>
+                  ))}
+
                   {isLoading ? (
-                    <div className="flex items-center justify-center h-48">
-                      <div className="text-center">
-                        <div className="relative">
-                          <Globe className="w-16 h-16 text-accent mx-auto animate-pulse" />
-                          <div className="absolute inset-0 flex items-center justify-center">
-                            <div className="w-6 h-6 border-2 border-blue-400 border-t-transparent rounded-full animate-spin"></div>
-                          </div>
-                        </div>
-                        <p className="text-ink-2 mt-4">Collecting selected geographic context...</p>
-                        <p className="text-ink-3 text-xs mt-2">Remote data sources can take a moment to respond.</p>
+                    /* A wait, described. The old interface put a spinning globe
+                       over a grey box; this states what is being read and draws a
+                       sweep across it, so the pause looks like an instrument
+                       working rather than a page that has stopped. */
+                    <div className="flex flex-col gap-5 py-8">
+                      <div className="flex items-center gap-3">
+                        <span className="beat h-2 w-2 rounded-full bg-signal" />
+                        <span className="label">Reading the sources</span>
                       </div>
+                      <div className="h-px w-full overflow-hidden bg-raised">
+                        <div className="scan h-px w-full" />
+                      </div>
+                      <ul className="grid gap-2.5 sm:grid-cols-2">
+                        {SOURCES.map((source) => (
+                          <li
+                            key={source.id}
+                            className="flex items-center gap-2.5 text-[0.8125rem] text-ink-3"
+                          >
+                            <span className="h-1 w-1 rounded-full bg-signal-dim" />
+                            {source.label}
+                            <span className="text-ink-3/60">— {source.role}</span>
+                          </li>
+                        ))}
+                      </ul>
+                      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
+                        Public satellite services take a moment on a cold cache. The
+                        first read of any area is slower than the ones after it.
+                      </p>
                     </div>
                   ) : response ? (
                     <>
-                      <div className="text-ink-2 whitespace-pre-wrap break-words text-base leading-relaxed">
+                      <div className="max-w-[68ch] text-[1.0625rem] leading-relaxed text-ink-2">
                         {responseIsError ? (
                           // An error used to render in the same paragraph style as
                           // a successful result, in the same panel, with the same
                           // weight. Reading "Error: Raster processing timed out" as
                           // a finding is exactly the failure this avoids.
-                          <div role="alert" className="rounded border border-red-300 bg-red-50 p-4">
-                            <p className="mb-2 flex items-center gap-2 text-sm font-medium text-red-800">
+                          <div
+                            role="alert"
+                            className="rounded-xl border border-bare/40 bg-bare/10 p-4"
+                          >
+                            <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-bare">
                               <span aria-hidden>!</span>
                               {errorHeadline}
                             </p>
                             {errorDetail && (
-                              <p className="text-sm text-red-700">{errorDetail}</p>
+                              <p className="text-sm text-bare/90">{errorDetail}</p>
                             )}
-                            <p className="mt-2 text-xs text-red-600">
+                            <p className="mt-2 text-xs text-bare/75">
                               Nothing was charged for a failed analysis. Try a smaller
-                              boundary, or press Analyze again.
+                              boundary, or press Read this area again.
                             </p>
                             <Button
                               size="sm"
                               variant="outline"
-                              className="mt-3"
+                              className="mt-3.5"
                               onClick={() => void handleAnalyze()}
                             >
                               Try again
@@ -1939,33 +2071,42 @@ export default function Home() {
                       </div>
 
                       {analysisSummary && (
-                        <div className="mt-6 border-t border-white/10 pt-5">
-                          <div className="mb-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-ink-2">
-                            <h3 className="font-semibold text-ink">Selected data details</h3>
-                            {analysisSummary.country && <span>Country: {analysisSummary.country}</span>}
+                        <div className="mt-8 border-t border-rule pt-7">
+                          <div className="mb-6 flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
+                            <h3 className="display display-md">Selected data</h3>
+                            {analysisSummary.country && (
+                              <span className="text-[0.9375rem] text-ink-2">
+                                {analysisSummary.country}
+                              </span>
+                            )}
                             {analysisSummary.analysis?.bbox_area_km2 != null && (
-                              <span>Bounding box: {formatNumber(analysisSummary.analysis.bbox_area_km2, 2)} km²</span>
+                              <span className="fig text-[0.8125rem] text-ink-3">
+                                bounding box{' '}
+                                {formatNumber(analysisSummary.analysis.bbox_area_km2, 2)} km²
+                              </span>
                             )}
                           </div>
                           {analysisSummary.caveats && analysisSummary.caveats.length > 0 && (
-                            <div className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
-                              <p className="text-xs font-medium text-amber-200">
+                            <div className="mb-6 rounded-xl border border-stressed/35 bg-stressed/10 p-4">
+                              <p className="label text-stressed">
                                 Before relying on these numbers
                               </p>
-                              <ul className="mt-1 list-disc pl-4 text-xs text-amber-100/80">
+                              <ul className="mt-2 space-y-1.5 pl-4 text-[0.8125rem] leading-relaxed text-ink-2 marker:text-stressed">
                                 {analysisSummary.caveats.map((caveat, i) => (
-                                  <li key={i}>{caveat}</li>
+                                  <li key={i} className="list-disc">{caveat}</li>
                                 ))}
                               </ul>
                             </div>
                           )}
-                          <div className="measure">
+                          <div className="grid gap-x-10 gap-y-2 xl:grid-cols-2">
                             {progress && (
-                              <JobProgressLine
-                                progress={progress}
-                                planned={plan}
-                                onDismiss={() => setProgress(null)}
-                              />
+                              <div className="xl:col-span-2">
+                                <JobProgressLine
+                                  progress={progress}
+                                  planned={plan}
+                                  onDismiss={() => setProgress(null)}
+                                />
+                              </div>
                             )}
                             {(analysisSummary.analysis?.datasets || selectedDatasets)
                               .filter(isDatasetId)
@@ -1977,9 +2118,6 @@ export default function Home() {
                                   submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                                   onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
                                   vegetationSeries={vegetationSeries}
-                                  onSubmitSeries={dataset === 'rainfall' ? () => submitIndicator('vegetation_series') : undefined}
-                                  pendingIndicator={pendingIndicator}
-                                  progress={progress}
                                 />
                               ))}
                           </div>
@@ -1987,19 +2125,73 @@ export default function Home() {
                       )}
                     </>
                   ) : (
-                    <div className="flex items-center justify-center h-48 text-ink-3">
-                      <div className="text-center">
-                        <Satellite className="w-12 h-12 mx-auto mb-3 opacity-50" />
-                        <p>Select an area on the map and click &quot;Analyze Area&quot; to see results</p>
-                      </div>
+                    /* The empty state is the first thing a stranger reads after
+                       the promise, so it confirms the promise instead of
+                       describing a control. */
+                    <div className="flex flex-col items-start gap-5 py-10">
+                      <div className="ramp w-28" aria-hidden />
+                      <p className="display display-md max-w-[24ch] text-ink">
+                        Nothing here yet. That is normal.
+                      </p>
+                      <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
+                        Draw a boundary on the map, or search for a place, and this
+                        fills in within a few seconds. You will get terrain, land
+                        cover, vegetation and rainfall — each with the source it came
+                        from attached.
+                      </p>
                     </div>
                   )}
                 </div>
-              </CardContent>
-            </Card>
+              </div>
+            </div>
           </div>
+
+          {/* The time section sits after the grid, not inside it.
+
+              It used to be the third child of a two-column grid, so it
+              auto-placed into column one, row two: the 380px rail column,
+              directly beneath the sticky rail rather than below the dossier.
+              The charts were rendered down there at 380px wide, which is where
+              they looked like something hidden behind the controls. A comment
+              here claimed it was full width for several deploys; only the
+              structure was wrong. */}
+          {response && !responseIsError && analysisSummary && (
+            <TimeSection
+              rain={(analysisSummary.rainfall?.series ?? []) as RainPoint[]}
+              vegetation={(vegetationSeries?.series ?? []) as VegPoint[]}
+              windowStart={windowStartISO()}
+              windowEnd={windowEndISO()}
+              vegetationSource={vegetationSeries?.source}
+              thinMonths={vegetationSeries?.thin_months}
+              onBuildVegetation={
+                activeCacheKey
+                  ? () => submitIndicator('vegetation_series')
+                  : undefined
+              }
+              buildingVegetation={pendingIndicator === 'vegetation_series'}
+              jobState={
+                progress?.indicator === 'vegetation_series' ? progress.state : null
+              }
+              jobMonths={progress?.months ?? null}
+              vegetationNotice={vegetationSeries?.caveat ?? null}
+            />
+          )}
+        </section>
+      </main>
+
+      {/* Not hidden in print. The four sources are the provenance for every
+          number below, which is exactly what belongs on the foot of a printed
+          report, and the line under them is the product's own standard. */}
+      <footer className="relative z-10 mt-24 border-t border-rule">
+        <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4 px-5 py-8 sm:px-8">
+          <p className="fig text-[0.75rem] text-ink-3">
+            NASADEM · ESA WorldCover · Sentinel-2 · ERA5
+          </p>
+          <p className="text-[0.75rem] text-ink-3">
+            Read, not estimated. Every figure keeps its provenance.
+          </p>
         </div>
-      </div>
+      </footer>
     </div>
   );
 }
