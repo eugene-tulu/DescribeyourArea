@@ -18,6 +18,7 @@ a valid-pixel count per month so a thin month is visible rather than plausible.
 from __future__ import annotations
 
 import datetime
+import os
 import math
 from typing import Any, Optional
 
@@ -34,13 +35,31 @@ CLIMATOLOGY_START = "1991-01-01"
 CLIMATOLOGY_END = "2020-12-31"
 DEFAULT_WORKERS = 4
 
-# Measured 2026-09-27 over a 5,505 km2 area: 1.42 s per month read sequentially,
-# 0.41 s at four-way concurrency. Eight-way was slower than four, which is
-# server-side contention, so the default is four. Cost here is dominated by request
-# latency, not by pixels -- a 60 km2 window and a 5,505 km2 one both read in about
-# 1.3 s -- so the estimate scales with months read and barely moves with area.
-SECONDS_PER_MONTH = 0.68
-ESTIMATE_OVERHEAD_SECONDS = 25
+# Cost here is request latency, not pixels: a 60 km2 window and a 5,505 km2 one
+# read in about the same time, so the estimate scales with months read and barely
+# moves with area. Eight-way concurrency measured slower than four, which is
+# server-side contention, so the default is four.
+#
+# The constant is per *read per worker*, and the estimate divides by the worker
+# count, because the figure it replaced (0.68 s per month) was a sequential rate
+# applied to a four-way parallel read. That overstatement is why the interface
+# promised "about 3 minutes" for jobs that finish in 27 seconds.
+#
+# SECONDS_PER_READ is the deployed host's own measured figure: seven completed
+# series on the droplet, 25-31 s wall clock, median 27, each reading 429 months
+# at four workers. Refitting gives 27 s * 4 / 429 = 0.25 s per read per worker,
+# rounded up, and the constant
+# is overridable because this is a property of the host, not of the algorithm.
+SECONDS_PER_READ = float(os.getenv("VEG_SECONDS_PER_READ", "0.25"))
+ESTIMATE_OVERHEAD_SECONDS = float(os.getenv("VEG_ESTIMATE_OVERHEAD_SECONDS", "6"))
+
+# The normal is a calendar-month mean, and a climatology needs years, not months.
+# It used to start in 1991 unconditionally, so a user asking for ten years paid
+# for thirty-five: 429 reads to return 196. The baseline is now a rolling window
+# of BASELINE_YEARS ending with the series, which is a standard normal period and
+# cuts the read by roughly 45%. It is reported in the artefact as
+# `normal_window`, because a normal nobody states is not a normal.
+BASELINE_YEARS = int(os.getenv("VEG_BASELINE_YEARS", "20"))
 
 # Shown to the reader under the chart. It is a load-bearing string: the product's
 # claim is that it says what kind of number something is, and a rainfall overlay
@@ -127,19 +146,36 @@ def _read_month(href, window_spec) -> Optional[np.ndarray]:
         return src.read(1, window=window, boundless=False)
 
 
-def estimate_seconds(months: int) -> int:
-    """Rough wall-clock for a series, from the measured per-month cost.
+def months_to_read(start: str, end: str) -> int:
+    """How many months a series actually reads, which is not how many it returns.
 
-    An estimate, not a promise, and labelled as one wherever it is shown.
+    The normal is computed from the same rows, so every series reads back to the
+    start of the baseline whether or not the user asked for that far. Estimating
+    on the returned count therefore understates the work by the length of the
+    baseline, which is most of it for a short request.
     """
-    return int(round(max(1, months) * SECONDS_PER_MONTH + ESTIMATE_OVERHEAD_SECONDS))
+    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    return len(_month_range(baseline_start, end))
+
+
+def estimate_seconds(months: int, workers: int = DEFAULT_WORKERS) -> int:
+    """Rough wall-clock for a series, from the measured per-read cost.
+
+    An estimate, not a promise, and labelled as one wherever it is shown. It
+    takes the number of months that will be *read*, not the number returned.
+    """
+    reads = max(1, months)
+    return int(round(reads / max(1, workers) * SECONDS_PER_READ
+                     + ESTIMATE_OVERHEAD_SECONDS))
 
 
 def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = None) -> dict:
     """What the worker will do for this area, and roughly how long it will take."""
     end = end or datetime.date.today().replace(day=1).isoformat()
     months = len(_month_range(start[:7] + "-01", end[:7] + "-01"))
-    seconds = estimate_seconds(months)
+    reads = months_to_read(start[:7] + "-01", end)
+    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    seconds = estimate_seconds(reads)
     return {
         "indicator": "vegetation_series",
         "source": "MODIS MOD13Q1 (250 m, 16-day) via Planetary Computer",
@@ -149,11 +185,15 @@ def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = N
             "cadence matches rainfall and no cloud decision is made here"
         ),
         "months": months,
+        "months_to_read": reads,
         "estimated_seconds": seconds,
+        "normal_window": {"start": baseline_start, "end": end},
         "estimate_basis": (
-            f"an estimate: {SECONDS_PER_MONTH} s per month measured at "
-            f"{DEFAULT_WORKERS}-way concurrency, plus overhead. Cost is request "
-            "latency, not pixels, so it barely moves with area."
+            f"an estimate: {reads} monthly reads at {SECONDS_PER_READ} s each across "
+            f"{DEFAULT_WORKERS} workers, plus {ESTIMATE_OVERHEAD_SECONDS:.0f} s overhead, "
+            "measured on this host. Cost is request latency, not pixels, so it barely "
+            "moves with area. The reads include the years used to form the normal, "
+            "which is why they exceed the months returned."
         ),
         "area_km2": round(bbox_area_km2, 2),
     }
@@ -183,7 +223,11 @@ def compute_monthly_series(
     # one pass and cannot disagree. MOD13Q1 begins 2000-02, so the years before it
     # return nothing; the baseline actually used is reported below rather than
     # claimed as 1991-2020.
-    months = _month_range(CLIMATOLOGY_START, end)
+    # Read back far enough to have a normal, and no further. This used to be an
+    # unconditional 1991 start, so a ten-year request paid for thirty-five years:
+    # 429 reads to return 196 months.
+    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    months = _month_range(baseline_start, end)
     found = _items_by_month(bbox, months)
 
     geom = shape(geojson_geom)
@@ -261,7 +305,7 @@ def compute_monthly_series(
 
     in_baseline = [
         row for row in rows
-        if CLIMATOLOGY_START[:4] <= row["month"][:4] <= CLIMATOLOGY_END[:4]
+        if baseline_start[:4] <= row["month"][:4] <= min(end[:4], CLIMATOLOGY_END[:4])
     ]
     baseline = {row["month"]: row["value"] for row in in_baseline}
     monthly_normal: dict[str, list[float]] = {}
