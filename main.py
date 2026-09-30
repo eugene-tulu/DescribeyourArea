@@ -2160,6 +2160,45 @@ async def forget_my_area(payload: ForgetRequest, http_request: Request = None):
     }
 
 
+@app.get("/areas/resolve")
+async def resolve_study_area(
+    id: Optional[str] = None,
+    level: Optional[int] = None,
+    country: Optional[str] = None,
+    admin1: Optional[str] = None,
+    admin2: Optional[str] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
+    bbox: Optional[str] = None,
+    simplify: Optional[float] = None,
+):
+    """Turn however the caller can name an area into one canonical geometry.
+
+    Four ways in, because that is how people arrive: an administrative id from
+    another system, a country and level from a report, a point from a phone, and
+    a box from a spreadsheet. Until now only the fourth worked, and only if the
+    caller had the file.
+
+    Kept separate from the product registry on purpose. A product yields a
+    Measure; this yields an Area. Putting an Area in the registry would blur the
+    one thing that makes the registry usable -- that every entry describes
+    something that produces a number.
+    """
+    import areas
+
+    try:
+        area = areas.resolve_area(
+            areas.GaulResolver(), id=id, level=level, country=country,
+            admin1=admin1, admin2=admin2, lat=lat, lon=lon, bbox=bbox,
+            simplify=simplify)
+    except areas.ResolverUnavailable as exc:
+        # The service is down, which is not the caller's fault and is not a 500.
+        raise HTTPException(status_code=503, detail=str(exc))
+    except areas.ResolverError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return area.describe()
+
+
 @app.get("/analytics/summary")
 async def analytics_summary(limit: int = 2000):
     """Aggregate view of recent usage, for whoever is looking after the service.

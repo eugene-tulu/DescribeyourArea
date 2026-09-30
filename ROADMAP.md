@@ -94,8 +94,13 @@ first means the foundation is not built on a layer with holes in it.
       inherited from the registry, so a result cannot disagree with its product.
       Proven generically: a synthetic product is registered and rendered in a
       test, which is acceptance test one executed rather than described.
-- [ ] **Area resolver.** gaul-api as a capability: admin id, name, point, bbox
-      behind one route. Removes the globe → download → re-upload round trip.
+- [x] **Area resolver** — `areas.py`, 18 tests. Admin id, country+level name,
+      point and bbox behind one route, all returning the same `Area` shape. Keeps
+      `validate_for_lookup` rather than the synchronous admission path, since
+      Kenya's admin0 is about 580,000 km² and would be refused outright. Tests run
+      on responses recorded from the live service, and the two live tests
+      confirmed the recordings are not stale. An unreachable service is reported
+      as 503 and a bad name as 404, because those demand different responses.
 - [ ] **Question layer.** `describe`, `compare`, `history`, `watch`; live versus
       computed routing derived from cost class, not per-dataset.
 - [ ] **Generic scale mechanics.** Ladder, pixel budget, admission, freshness
