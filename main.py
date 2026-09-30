@@ -2160,6 +2160,55 @@ async def forget_my_area(payload: ForgetRequest, http_request: Request = None):
     }
 
 
+@app.get("/questions")
+async def list_questions():
+    """The four questions, and what each one costs to answer.
+
+    Published so a client can offer the right control for the right persona
+    without hard-coding the answer: `compare` needs several areas, `history` and
+    `watch` need dates, and all four differ in whether they can be answered
+    inside a request.
+    """
+    import questions
+
+    return {
+        "questions": list(questions.QUESTIONS),
+        "needs": {k: list(v) for k, v in questions.QUESTION_NEEDS.items()},
+        "presets_years": list(questions.DEFAULT_PRESETS_YEARS),
+        "monthly_bin_limit": questions.MONTHLY_BIN_LIMIT,
+        "note": "dates are the primary input; the label, bin width, comparison "
+                "normal and routing are all derived from them",
+    }
+
+
+@app.get("/questions/plan")
+async def plan_a_question(
+    question: str,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    years: Optional[int] = None,
+    product: Optional[str] = None,
+):
+    """What answering this would fetch, and whether it can happen inside a request.
+
+    The plan without the work. It is what a client calls to decide between
+    showing a result now and offering the offline route, and it costs no raster
+    read -- so it stays fast enough to call before deciding what to show.
+    """
+    import questions
+
+    try:
+        window = questions.parse_window(start=start, end=end, years=years)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        plan = questions.plan_question(
+            question, window, products=(product,) if product else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return plan.describe()
+
+
 @app.get("/areas/resolve")
 async def resolve_study_area(
     id: Optional[str] = None,

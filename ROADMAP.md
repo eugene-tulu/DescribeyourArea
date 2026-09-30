@@ -101,8 +101,13 @@ first means the foundation is not built on a layer with holes in it.
       on responses recorded from the live service, and the two live tests
       confirmed the recordings are not stale. An unreachable service is reported
       as 503 and a bad name as 404, because those demand different responses.
-- [ ] **Question layer.** `describe`, `compare`, `history`, `watch`; live versus
-      computed routing derived from cost class, not per-dataset.
+- [x] **Question layer** — `questions.py`, 27 tests, two routes. Dates are the
+      primary input and the label, bin width, comparison normal, sensor coverage
+      and routing are all derived from them. Routing is read from the registry,
+      not a parallel table. `/questions/plan` returns the plan without doing the
+      work, so a client can choose between showing a result and offering the
+      offline route cheaply. Not yet: executing a plan still means calling
+      `/generate-context`, and `compare` is not implemented.
 - [ ] **Generic scale mechanics.** Ladder, pixel budget, admission, freshness
       routing, as one module over registry metadata.
 
