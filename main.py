@@ -25,6 +25,9 @@ import math
 import re
 import secrets
 import os
+import jobs
+import registry
+import sensors
 from dotenv import load_dotenv
 import sys
 import warnings
@@ -192,6 +195,13 @@ ANALYSIS_DRAIN_SECONDS = _env_float("ANALYSIS_DRAIN_SECONDS", 20.0, minimum=0.0)
 # Scenes averaged into a median composite. Four is a quality choice balancing a
 # longer window against cloud; the cost of more is latency, not failure.
 MAX_PC_SCENES = _env_int("MAX_PC_SCENES", 4)
+
+# Enforced timeouts, named so /version publishes the same numbers the request
+# path uses. They were inline literals at their three call sites, which meant
+# the only way to publish them honestly was to publish nothing.
+NDVI_TIMEOUT_SECONDS = _env_float("NDVI_TIMEOUT_SECONDS", 75.0, minimum=0.0)
+RASTER_TIMEOUT_SECONDS = _env_float("RASTER_TIMEOUT_SECONDS", 30.0, minimum=0.0)
+ASSET_SEARCH_SECONDS = _env_float("ASSET_SEARCH_SECONDS", 15.0, minimum=0.0)
 # Grid CRS for the vegetation composite. EPSG:6933 is equal-area in metres, so a
 # pixel is the same area everywhere. Valid to about 86 degrees latitude, so polar
 # areas fall back to a local UTM zone.
@@ -1251,7 +1261,7 @@ async def compute_vegetation_index(
                     _load_and_summarize_ndvi, items, bbox, geojson_geom, resolution_m,
                     sensor, reason, {"start": window_start, "end": window_end},
                 ),
-                timeout=75.0,
+                timeout=NDVI_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
             return {
@@ -1539,7 +1549,7 @@ async def generate_context(
                 need_dem="dem" in requested,
                 need_landcover="landcover" in requested,
             ),
-            timeout=15.0,
+            timeout=ASSET_SEARCH_SECONDS,
         )
 
         raster_tasks: dict[str, Any] = {}
@@ -1566,7 +1576,7 @@ async def generate_context(
         try:
             raster_values = await asyncio.wait_for(
                 asyncio.gather(*raster_tasks.values()),
-                timeout=30.0,
+                timeout=RASTER_TIMEOUT_SECONDS,
             ) if raster_tasks else []
         except asyncio.TimeoutError:
             raster_timer.__exit__(None, None, None)
@@ -2215,6 +2225,13 @@ async def get_version():
             "all_nodata_guard",
             "separate_ndvi_concurrency_guard",
         ],
+        # From the registry, so a partner reads one declaration rather than a
+        # list that can fall out of step with the code that serves the data. The
+        # previous hand-maintained `available_datasets` said nothing about
+        # resolution, latency or the area over which a measure means anything,
+        # which are the three things a reader needs in order to trust a number.
+        "products": registry.describe_all(),
+        "measures": registry.measures(),
         "available_datasets": sorted(AVAILABLE_DATASETS),
         "available_sensors": {
             sid: {
@@ -2234,6 +2251,34 @@ async def get_version():
         "max_pc_scenes": MAX_PC_SCENES,
         "max_concurrent_analyses": MAX_CONCURRENT_ANALYSES,
         "max_concurrent_ndvi": MAX_CONCURRENT_NDVI,
+        # The synchronous path reads the composite at 20 m. It is not a property
+        # of the service: the ladder reaches 60, 100 and 250 m for larger areas,
+        # and a MODIS 250 m product is read at 250 m whatever the target says,
+        # because a product cannot be resampled finer without inventing detail.
         "ndvi_resolution_m": 20,
-        "large_area_mode": "not available until a durable asynchronous worker is deployed",
+        "ndvi_resolution_steps": [
+            {"max_bbox_km2": 100.0, "resolution_m": 20},
+            {"max_bbox_km2": 1000.0, "resolution_m": 60},
+            {"max_bbox_km2": 10000.0, "resolution_m": 100},
+        ],
+        "coarsest_resolution_m": sensors.COARSEST_RESOLUTION_M,
+        # Previously published as "not available until a durable asynchronous
+        # worker is deployed". One is deployed, and it answers areas past the
+        # synchronous cap at a coarser resolution. A partner reading this file
+        # would have cited it.
+        "large_area_mode": {
+            "available": True,
+            "how": "queue the area; the worker reads it at a coarser resolution "
+                   "and records the resolution actually used",
+            "queue_max_pending": jobs.MAX_PENDING_JOBS,
+            "job_lease_seconds": jobs.JOB_LEASE_SECONDS,
+        },
+        # Enforced but previously unpublished, so a client could not know what
+        # the service would accept.
+        "max_geojson_bytes": MAX_GEOJSON_BYTES,
+        "max_aoi_vertices": MAX_AOI_VERTICES,
+        "analysis_raster_timeout_seconds": RASTER_TIMEOUT_SECONDS,
+        "ndvi_timeout_seconds": NDVI_TIMEOUT_SECONDS,
+        "asset_search_seconds": ASSET_SEARCH_SECONDS,
+        "worker_interval_seconds": float(os.getenv("RAINFALL_WORKER_INTERVAL", "15")),
     }

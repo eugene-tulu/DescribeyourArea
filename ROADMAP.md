@@ -81,10 +81,13 @@ first means the foundation is not built on a layer with holes in it.
 
 ## Phase 2 — the foundation
 
-- [ ] **Product registry.** Retire `27.8` hardcoded in `indicators.py` beside
-      `ERA5_GRID_DEGREES`; the landcover budget defined twice with different
-      defaults; `PIXEL_BUDGET` defined and never referenced; MODIS native
-      resolution as both 231.7 and 250.
+- [x] **Product registry** — `registry.py`, 20 tests. Five products declared
+      once, published through `/version`, and asserted against the code that
+      computes the numbers. Three inline timeouts named so they could be
+      published. `/version`'s false `large_area_mode` string replaced with the
+      real queue depth and lease. Still to retire: the landcover budget defined
+      twice, `PIXEL_BUDGET` unreferenced, and the 27.8 literal in
+      `indicators.py`.
 - [ ] **`Measure` envelope.** Requires `observed_through` and `extent`, which is
       what makes Phase 1's third item impossible to forget rather than merely
       done.
