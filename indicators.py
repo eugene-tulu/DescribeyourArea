@@ -15,6 +15,7 @@ import os
 import datetime
 from typing import Any, Optional
 
+import rainfall
 import sensors
 
 # How many years of vegetation history a series covers when the caller does not
@@ -36,9 +37,13 @@ def _synchronous_budget_km2(indicator: str) -> float:
     gets a larger budget than the rest. The figures come from measurement, not
     preference: WorldCover is 235 MB at 1,000 km2 and 1,205 MB at 5,500 km2.
     """
-    if indicator == "landcover":
-        return float(os.getenv("MAX_LANDCOVER_BBOX_KM2", "1000"))
-    return float(os.getenv("MAX_SYNC_BBOX_KM2", "100"))
+    # Read the definitions rather than re-deriving them from the environment.
+    # Both were read here independently, which meant the defaults lived in two
+    # places and could drift apart without anything failing.
+    import main
+
+    return (main.MAX_LANDCOVER_BBOX_KM2 if indicator == "landcover"
+            else main.MAX_SYNC_BBOX_KM2)
 
 
 async def compute_indicator(
@@ -137,7 +142,10 @@ def plan_indicator(
         # A cache read plus a known-width ERA5 aggregate; effectively instant.
         return {
             "indicator": "rainfall",
-            "resolution_km": 27.8,
+            # Derived, not restated. It was a literal here while
+            # rainfall.ERA5_GRID_DEGREES held the real value, which is the class
+            # of duplication the registry exists to stop.
+            "resolution_km": round(rainfall.ERA5_GRID_DEGREES * 111.32, 1),
             "reason": "a cached series, or one ERA5 read per year",
             "estimated_seconds": 60,
             "estimate_basis": "one annual ERA5 read per pass; cached areas are instant",

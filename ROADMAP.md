@@ -88,9 +88,12 @@ first means the foundation is not built on a layer with holes in it.
       real queue depth and lease. Still to retire: the landcover budget defined
       twice, `PIXEL_BUDGET` unreferenced, and the 27.8 literal in
       `indicators.py`.
-- [ ] **`Measure` envelope.** Requires `observed_through` and `extent`, which is
-      what makes Phase 1's third item impossible to forget rather than merely
-      done.
+- [x] **`Measure` envelope** — `measure.py`, 13 tests. A dynamic measure
+      cannot be built without `observed_through`, so Phase 1's freshness item is
+      now a constructor error rather than a habit. Evidence and caveats are
+      inherited from the registry, so a result cannot disagree with its product.
+      Proven generically: a synthetic product is registered and rendered in a
+      test, which is acceptance test one executed rather than described.
 - [ ] **Area resolver.** gaul-api as a capability: admin id, name, point, bbox
       behind one route. Removes the globe → download → re-upload round trip.
 - [ ] **Question layer.** `describe`, `compare`, `history`, `watch`; live versus

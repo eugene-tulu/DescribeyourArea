@@ -255,7 +255,14 @@ RESOLUTION_STEPS = (
     (10_000.0, 100, "10,000 km2 at 100 m is about 1M pixels; finer buys nothing a reader can see"),
 )
 COARSEST_RESOLUTION_M = 250
-PIXEL_BUDGET = 3_000_000
+
+# A PIXEL_BUDGET used to be defined here and never read. The resolution ladder
+# above replaced it as the policy: it asks what resolution the *reader* can
+# resolve at this size, which is a question about the claim, whereas a pixel
+# budget is a question about this server's memory. Those diverge -- the ladder
+# says 100 m for 10,000 km2, and a 3M pixel budget at 100 m would refuse far
+# smaller areas than that. Deleting it was the honest option; wiring it up would
+# have introduced a second policy that contradicts the first.
 
 
 def resolution_for_area(bbox_area_km2: float, *, native_m: int = 10) -> tuple[int, str]:
