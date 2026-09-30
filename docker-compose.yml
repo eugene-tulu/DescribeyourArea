@@ -3,6 +3,13 @@ services:
     build: .
     ports:
       - "127.0.0.1:8001:8000"
+    networks:
+      - default
+      # The boundary service (gaul-api) runs as a separate compose project on
+      # this host, so it is not on this project's network and neither container
+      # resolves by name. Joining its network is what makes /areas/resolve able
+      # to answer at all; without it every resolution is a connection refused.
+      - boundary
     volumes:
       # Shared with the worker. Without this the worker writes series into its
       # own filesystem where the backend never sees them.
@@ -39,6 +46,12 @@ services:
       RAINFALL_S3_ENDPOINT: ${RAINFALL_S3_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
       RAINFALL_S3_REGION: ${RAINFALL_S3_REGION:-nyc3}
       USAGE_EVENTS_PATH: ${USAGE_EVENTS_PATH:-/app/.usage/events.jsonl}
+      # The boundary service, by container name on the shared network. Left
+      # unset the resolver falls back to http://gaul-api:8000, which does not
+      # resolve on a host where that project is named differently -- and an
+      # unreachable resolver and a misspelled county both surface as an empty
+      # map, which is the ambiguity this separates.
+      GAUL_API_URL: ${GAUL_API_URL:-http://root-gaul-api-1:8000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
     healthcheck:
@@ -124,3 +137,13 @@ services:
 volumes:
   rainfall-cache:
   usage-events:
+
+networks:
+  default:
+    name: geocontextualize_default
+  boundary:
+    # External, so joining it does not create or take ownership of it. That
+    # matters: a `docker compose down` here must not be able to remove the
+    # network the other project is using.
+    external: true
+    name: root_default
