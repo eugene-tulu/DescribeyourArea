@@ -414,9 +414,18 @@ function overSpecified(rain: {
   bbox_area_km2?: number | null;
   label?: string | null;
 }): string | null {
-  if (!rain.grid_cells || rain.grid_cells < 2) return null;
   const cell = rain.resolution_km ?? 27.8;
-  return `One grid cell covers about ${Math.round((cell * cell) / 100) * 100} km², so this is the cell's figure and not this outline's.`;
+  const cellKm2 = cell * cell;
+  // The strongest case for this warning is exactly one cell standing for a small
+  // outline, and the first version of this function suppressed it by requiring
+  // two or more cells. Found by driving the page, not by reading it.
+  if (rain.bbox_area_km2 == null) {
+    return rain.grid_cells === 1
+      ? `One grid cell of about ${Math.round(cellKm2 / 100) * 100} km² covers this outline, so the figure is the cell's and not the outline's.`
+      : null;
+  }
+  if (rain.bbox_area_km2 >= cellKm2 * 0.7) return null;
+  return `This outline is about ${Math.round(rain.bbox_area_km2).toLocaleString()} km² and one grid cell is about ${Math.round(cellKm2 / 100) * 100} km², so the figure is the cell's rather than the outline's.`;
 }
 
 function stamp(value?: string | null): string | null {

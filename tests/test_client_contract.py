@@ -447,6 +447,13 @@ class CardHonestyTests(unittest.TestCase):
         self.assertIn("overSpecified", self.source,
                       "a single ERA5 cell says the same thing about 10 km2 and "
                       "600 km2, and the reader is not told")
+        # The first version required two or more cells, so the strongest case for
+        # the warning -- one cell, a small outline -- suppressed it. The condition
+        # is now about the ratio of the outline to the cell, not the cell count.
+        body = self.source.split("function overSpecified")[1][:900]
+        self.assertIn("bbox_area_km2", body)
+        self.assertNotIn("rain.grid_cells < 2", body,
+                         "a single cell is the case that most needs saying")
 
     def test_the_two_reference_periods_are_distinguished(self):
         # Rainfall uses the published WMO 1991-2020 normal; the MODIS series forms
