@@ -110,8 +110,11 @@ first means the foundation is not built on a layer with holes in it.
       work, so a client can choose between showing a result and offering the
       offline route cheaply. Not yet: executing a plan still means calling
       `/generate-context`, and `compare` is not implemented.
-- [ ] **Generic scale mechanics.** Ladder, pixel budget, admission, freshness
-      routing, as one module over registry metadata.
+- [x] **Generic scale mechanics** — `scale.py`, 14 tests. Admission answers two
+      questions separately: may we read this (a property of this server) and does
+      the number mean anything (a property of the product). ERA5 is allowed
+      everywhere and meaningful from one cell up, so a small area is *allowed and
+      flagged*, which is the case the old caps conflated.
 
 ## Phase 3 — the temporal model
 

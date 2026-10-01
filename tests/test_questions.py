@@ -15,7 +15,7 @@ import unittest
 import questions
 import registry
 import sensors
-from questions import Window, parse_window, plan_question
+from questions import Window, parse_window, plan_comparison, plan_question
 
 # A fixed "today" so a test never fails because the clock moved. The windows below
 # are absolute dates precisely so they do not need one.
@@ -222,3 +222,50 @@ class FourQuestionsTests(unittest.TestCase):
         self.assertEqual(described["routing"], "computed")
         self.assertIn("rainfall", described["normals"])
         self.assertEqual(described["window"]["bin_months"], 12)
+
+
+class ComparisonTests(unittest.TestCase):
+    """The planner's question, which the layer previously only claimed to serve.
+
+    "Which of my wards is worst" is not N independent numbers. For a product
+    coarser than the outlines, two nearby areas can resolve to the same grid
+    cell and produce the identical figure, and a ranking between them is noise
+    dressed as a finding. So the plan carries the cell count, which is what lets a
+    caller notice.
+    """
+
+    def test_it_carries_every_area_it_was_given(self):
+        window = parse_window(years=1, end=END)
+        plan = plan_comparison(
+            [{"id": "137:1:1", "name": "Narok", "area_km2": 35_694},
+             {"id": "137:1:2", "name": "Ndia", "area_km2": 1_540}], window)
+        self.assertEqual([a["name"] for a in plan["areas"]], ["Narok", "Ndia"])
+
+    def test_it_says_two_areas_in_one_cell_are_one_measurement(self):
+        plan = plan_comparison([{"name": "a"}, {"name": "b"}],
+                               parse_window(years=1, end=END))
+        joined = " ".join(plan["notes"])
+        self.assertIn("774 km2 cell", joined)
+        self.assertIn("identical number", joined)
+
+    def test_it_separates_products_that_rank_places_from_products_that_rank_times(self):
+        plan = plan_comparison([{"name": "a"}], parse_window(years=1, end=END))
+        joined = " ".join(plan["notes"])
+        self.assertIn("single-date", joined)
+
+    def test_it_refuses_more_areas_than_one_comparison_carries(self):
+        # Twenty synchronous raster reads is a different service from one, and
+        # the limit belongs to the question rather than to the route.
+        with self.assertRaises(ValueError) as caught:
+            plan_comparison([{"name": f"a{i}"} for i in range(
+                questions.MAX_COMPARE_AREAS + 1)],
+                parse_window(years=1, end=END))
+        self.assertIn("batches", str(caught.exception))
+
+    def test_it_refuses_an_empty_comparison(self):
+        with self.assertRaises(ValueError):
+            plan_comparison([], parse_window(years=1, end=END))
+
+    def test_an_unnamed_area_is_still_identifiable(self):
+        plan = plan_comparison([{"id": "137:1:9"}], parse_window(years=1, end=END))
+        self.assertTrue(plan["areas"][0]["name"])

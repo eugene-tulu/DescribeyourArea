@@ -197,6 +197,12 @@ def normal_window_for(product_key: str, window: Window) -> dict:
 # be served by one of them -- which is the test of whether this is a layer.
 QUESTIONS = ("describe", "compare", "history", "watch")
 
+# How many areas one comparison may carry. A planner's question is "which of my
+# twenty wards is worst", and twenty synchronous raster reads is a different
+# service from one. The cap is here rather than in the route so the question layer
+# is the thing that decides, and so a client can ask what the limit is.
+MAX_COMPARE_AREAS = 12
+
 # What each question needs, and therefore what it costs. A question that can be
 # answered from a cache is cheap regardless of which products it wants; one that
 # needs a fresh raster read is not. This is the routing decision, made once,
@@ -284,3 +290,56 @@ def plan_question(question: str, window: Window,
 
     return QuestionPlan(question=question, window=window, products=wanted,
                         routing=routing, sensors=covering, notes=tuple(notes))
+
+
+def plan_comparison(areas: list[dict], window: Window) -> dict:
+    """A comparison plan, including the thing that makes comparison honest.
+
+    Comparing areas is not comparing N independent numbers. For any product
+    coarser than the outlines -- ERA5 above all -- two nearby areas can resolve to
+    the *same* grid cell and therefore to the identical figure, and a ranking
+    that puts one above the other is ranking noise. So the plan reports the cell
+    count per area, which is what lets a caller notice when two entries are the
+    same measurement rather than two measurements.
+
+    It also states plainly which products can rank at all. A ranking is only
+    meaningful across areas where the same measure, over the same ground, at the
+    same resolution -- and ERA5 over small areas fails the second of those for
+    reasons no amount of care here can fix.
+    """
+    if not areas:
+        raise ValueError("a comparison needs at least one area")
+    if len(areas) > MAX_COMPARE_AREAS:
+        raise ValueError(
+            f"{len(areas)} areas is more than one comparison carries "
+            f"({MAX_COMPARE_AREAS}); narrow it or ask again in batches")
+
+    products = QUESTION_NEEDS["compare"]
+    rows = []
+    for index, area in enumerate(areas):
+        rows.append({
+            "index": index,
+            "id": area.get("id"),
+            "name": area.get("name") or area.get("label") or f"area {index + 1}",
+            "level": area.get("level"),
+            "bbox_area_km2": area.get("area_km2"),
+            "source": area.get("source"),
+        })
+
+    notes = [
+        f"A comparison ranks {len(areas)} areas on the same products "
+        f"({', '.join(products)}), over the window {window.label}.",
+        "Elevation and land cover are single-date products, so a ranking across "
+        "them compares places rather than times. Precipitation is a 0.25 degree "
+        "reanalysis: two areas inside one 774 km2 cell produce the identical "
+        "number, and the cell count below is how you can tell.",
+    ]
+    return {
+        "question": "compare",
+        "window": window.describe(),
+        "products": list(products),
+        "routing": "mixed",
+        "areas": rows,
+        "rankable_by": list(products),
+        "notes": notes,
+    }

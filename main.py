@@ -2219,6 +2219,71 @@ async def forget_my_area(payload: ForgetRequest, http_request: Request = None):
     }
 
 
+@app.post("/questions/compare")
+async def compare_areas(request: Request):
+    """Rank several areas on the same measures. The planner's question.
+
+    Areas may be given as geometry, or by anything the resolver understands --
+    an administrative id, a country and level, a point, a box -- so "these
+    twenty wards" does not require twenty files. Resolution is per area and the
+    resolver's own failures are reported per area rather than failing the batch:
+    one misspelled ward out of twenty should not lose the other nineteen.
+
+    The cell count travels with every area, because for precipitation two areas
+    inside one grid cell are the same measurement and a ranking between them is
+    noise dressed as a finding.
+    """
+    import areas as areas_module
+    import questions as questions_module
+
+    body = await request.json()
+    specs = body.get("areas") or []
+    if not isinstance(specs, list) or not specs:
+        raise HTTPException(status_code=422, detail="supply a non-empty list of areas")
+
+    try:
+        window = questions_module.parse_window(start=body.get("start"),
+                                               end=body.get("end"),
+                                               years=body.get("years"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    resolver = areas_module.GaulResolver()
+    resolved, failures = [], []
+    for index, spec in enumerate(specs):
+        spec = spec if isinstance(spec, dict) else {"geojson": spec}
+        try:
+            if spec.get("geojson"):
+                aoi = validate_for_lookup(spec["geojson"])
+                area = areas_module.Area(
+                    geometry={"type": "Feature", "properties": {},
+                              "geometry": aoi["feature"]["geometry"]},
+                    bbox=tuple(aoi["bbox"]), area_km2=aoi["bbox_area_km2"],
+                    name=spec.get("name"), source="supplied")
+            else:
+                area = areas_module.resolve_area(
+                    resolver, id=spec.get("id"), level=spec.get("level"),
+                    country=spec.get("country"), admin1=spec.get("admin1"),
+                    admin2=spec.get("admin2"), lat=spec.get("lat"),
+                    lon=spec.get("lon"), bbox=spec.get("bbox"))
+        except areas_module.ResolverError as exc:
+            failures.append({"index": index, "name": spec.get("name"),
+                             "reason": exc.reason, "detail": str(exc)})
+            continue
+        resolved.append(area)
+
+    if not resolved:
+        raise HTTPException(status_code=404,
+                            detail="none of those areas could be resolved")
+
+    plan = questions_module.plan_comparison([a.describe() for a in resolved], window)
+    return {
+        "plan": plan,
+        "areas": [a.describe() for a in resolved],
+        "unresolved": failures,
+    }
+
+
 @app.get("/questions")
 async def list_questions():
     """The four questions, and what each one costs to answer.
