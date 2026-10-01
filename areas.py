@@ -161,6 +161,48 @@ class GaulResolver:
         return self.get("containing", {"lat": lat, "lon": lon})
 
 
+def resolve_by_name(resolver, query: str, *,
+                    simplify: Optional[float] = None) -> Area:
+    """Resolve whatever a person types into a boundary.
+
+    The boundary service narrows from a country: ``country=137&admin1=Narok``.
+    Handing it a bare area name as the country finds nothing, so a caller that
+    simply says "Narok" gets a silent miss. The translation belongs here rather
+    than in a client, so that "Narok", "Kenya, Narok" and "137, Narok" all mean
+    the same thing to every caller.
+
+    Two forms are accepted, and the second is the one worth documenting: a bare
+    name is ambiguous across ~200 countries, so it is matched against country
+    names first and otherwise refused with the form that would work.
+    """
+    query = (query or "").strip()
+    if not query:
+        raise ResolverError("name an area", reason="malformed_request")
+
+    parts = [p.strip() for p in query.split(",") if p.strip()]
+    country, name = (parts[0], parts[1]) if len(parts) > 1 else (None, parts[0])
+
+    if country is None:
+        # A bare name: it may be a country in its own right.
+        try:
+            return _area_from_feature(
+                resolver.by_name(name, 0, simplify=simplify),
+                source="name", resolver=getattr(resolver, "name", "gaul"))
+        except ResolverError:
+            pass
+        raise ResolverError(
+            f"no country named {name!r}. Administrative areas are named "
+            f"'Country, Area' -- try 'Kenya, {name}'.",
+            reason="needs_country")
+
+    feature = resolver.by_name(country, 1, admin1=name, simplify=simplify)
+    return _area_from_feature(feature, source="name",
+                              resolver=getattr(resolver, "name", "gaul"),
+                              notes=(f"Resolved as the {name} administrative area "
+                                     f"of {country}; its outline is the whole unit.",
+                                     ))
+
+
 def _area_from_feature(feature: dict, *, source: str, resolver: str,
                        notes: tuple[str, ...] = ()) -> Area:
     import main

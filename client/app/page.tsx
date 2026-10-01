@@ -959,7 +959,9 @@ export default function Home() {
     if (!query) return;
     setAdminBusy(true);
     try {
-      const response = await fetch(`/api/areas/resolve?country=${encodeURIComponent(query)}&level=1`);
+      // Free text. The server translates 'Narok' or 'Kenya, Narok' into the
+      // country-plus-area form the boundary service needs.
+      const response = await fetch(`/api/areas/resolve?name=${encodeURIComponent(query)}`);
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
         throw new Error(failure?.detail || `no administrative area named ${query}`);

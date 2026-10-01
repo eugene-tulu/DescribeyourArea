@@ -212,3 +212,54 @@ class LiveServiceTests(unittest.TestCase):
         resolver = GaulResolver(os.getenv("GAUL_API_URL", "http://127.0.0.1:8002"))
         area = resolve_area(resolver, id="137:1:1385")
         self.assertEqual(area.name, "Narok")
+
+
+class FreeTextTests(unittest.TestCase):
+    """What a person types, which is not what the boundary service takes.
+
+    Driving the real page found this: the input said "Or name the area", the user
+    typed "Narok", and nothing happened. The service narrows from a country --
+    `country=137&admin1=Narok` -- so a bare area name handed to it as the country
+    finds nothing and returns an empty list, which is a silent miss. The
+    translation belongs in the resolver so every caller gets it.
+    """
+
+    class ByName(RecordedResolver):
+        def by_name(self, country, level, admin1=None, admin2=None, simplify=None):
+            if level == 0:
+                if country.lower() in ("atlantis",):
+                    raise ResolverError(f"no country named {country!r}", reason="not_found")
+                return {"type": "Feature", "id": "999:0:1", "geometry": {
+                    "type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
+                    "properties": {"gaul0_name": country}}
+            return {"type": "Feature", "id": f"137:1:{abs(hash(admin1)) % 9999}",
+                    "geometry": {"type": "Polygon", "coordinates": [
+                        [[36.5, -1.5], [38.5, -1.5], [38.5, 2.5], [36.5, 2.5], [36.5, -1.5]]]},
+                    "properties": {"gaul0_name": country, "gaul1_name": admin1,
+                                   "gaul1_code": 1385}}
+
+    def test_a_country_name_alone_resolves(self):
+        area = areas.resolve_by_name(self.ByName(), "Kenya")
+        self.assertEqual(area.level, 0)
+        self.assertEqual(area.country, "Kenya")
+
+    def test_country_and_area_resolves_to_the_area(self):
+        area = areas.resolve_by_name(self.ByName(), "Kenya, Narok")
+        self.assertEqual(area.name, "Narok")
+        self.assertEqual(area.level, 1)
+
+    def test_a_bare_area_name_says_what_form_would_work(self):
+        # Better than a silent empty map: the reader is told the shape of the
+        # answer, because "Narok" is genuinely ambiguous across 200 countries.
+        with self.assertRaises(ResolverError) as caught:
+            areas.resolve_by_name(self.ByName(), "Atlantis")
+        self.assertEqual(caught.exception.reason, "needs_country")
+        self.assertIn("'Country, Area'", str(caught.exception))
+
+    def test_a_resolved_named_area_says_it_is_the_whole_unit(self):
+        area = areas.resolve_by_name(self.ByName(), "Kenya, Narok")
+        self.assertTrue(any("whole unit" in n for n in area.notes))
+
+    def test_an_empty_query_is_refused(self):
+        with self.assertRaises(ResolverError):
+            areas.resolve_by_name(self.ByName(), "   ")

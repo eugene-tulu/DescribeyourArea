@@ -2340,6 +2340,7 @@ async def resolve_study_area(
     country: Optional[str] = None,
     admin1: Optional[str] = None,
     admin2: Optional[str] = None,
+    name: Optional[str] = None,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
     bbox: Optional[str] = None,
@@ -2360,10 +2361,18 @@ async def resolve_study_area(
     import areas
 
     try:
-        area = areas.resolve_area(
-            areas.GaulResolver(), id=id, level=level, country=country,
-            admin1=admin1, admin2=admin2, lat=lat, lon=lon, bbox=bbox,
-            simplify=simplify)
+        resolver = areas.GaulResolver()
+        # A single free-text name is the common case from the interface, and it
+        # is not the shape the boundary service takes -- so it goes through the
+        # translator rather than being passed through and silently missing.
+        if country is None and not (id or lat is not None or bbox
+                                    or (admin1 and admin2)):
+            area = areas.resolve_by_name(resolver, name, simplify=simplify)
+        else:
+            area = areas.resolve_area(
+                resolver, id=id, level=level, country=country,
+                admin1=admin1, admin2=admin2, lat=lat, lon=lon, bbox=bbox,
+                simplify=simplify)
     except areas.ResolverUnavailable as exc:
         # The service is down, which is not the caller's fault and is not a 500.
         raise HTTPException(status_code=503, detail=str(exc))
