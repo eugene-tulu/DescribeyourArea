@@ -414,3 +414,48 @@ def _handler_source(name: str) -> str:
         encoding="utf-8")
     start = source.index(f"async def {name}(")
     return source[start:source.index("\n@app", start)]
+
+
+class CardHonestyTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """The two fields that were computed and then filed away.
+
+    Both were already in every payload and both were inside a collapsed
+    "show your working", which is where a number goes to stop being read. Four
+    products sit in one row and can be six months apart, and an ERA5 area mean
+    over a small paddock is one 28 km cell. Asserted on the card, not in the
+    disclosure.
+    """
+
+    def test_the_card_states_the_series_end(self):
+        self.assertIn("series ends", self.source,
+                      "freshness is computed and then hidden; the rainfall data is "
+                      "months older than the vegetation beside it")
+
+    def test_the_card_states_the_grid_the_number_came_from(self):
+        self.assertIn("grid cell", self.source)
+        self.assertIn("resolution_km", self.source)
+
+    def test_it_warns_when_one_cell_stands_for_the_whole_outline(self):
+        self.assertIn("overSpecified", self.source,
+                      "a single ERA5 cell says the same thing about 10 km2 and "
+                      "600 km2, and the reader is not told")
+
+    def test_the_two_reference_periods_are_distinguished(self):
+        # Rainfall uses the published WMO 1991-2020 normal; the MODIS series forms
+        # its own from the years it has, which begin in 2000. Both are correct and
+        # they sit in the same section, so a reader comparing the panels needs to
+        # know they are not against the same baseline.
+        chart = (CLIENT_ROOT / "components" / "TimeSection.tsx").read_text(encoding="utf-8")
+        self.assertIn("1991–2020 normal", chart)
+        self.assertIn("from 2000", chart,
+                      "the vegetation normal is not 1991-2020 and the chart says so")
+
+    def test_the_disclosure_is_still_available_for_the_rest(self):
+        # The point is not to delete the detail, only to stop burying the two
+        # fields a reader needs in order to trust the number above them.
+        self.assertIn("Working", self.source)
+        self.assertIn("['series ends'", self.source)

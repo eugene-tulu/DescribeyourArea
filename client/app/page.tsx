@@ -401,6 +401,24 @@ const STATUS_COPY: Record<ModuleStatus, string> = {
   busy: 'busy',
 };
 
+/** The sentence a rainfall figure needs when the grid is coarser than the outline.
+ *
+ * An ERA5 "area mean" over a small paddock is one 28 km cell, which says the same
+ * thing about 10 km2 and about 600 km2. Saying so is cheap; leaving it in a
+ * collapsed disclosure is how a reader ends up trusting four square kilometres of
+ * precision that is not there.
+ */
+function overSpecified(rain: {
+  grid_cells?: number | null;
+  resolution_km?: number | null;
+  bbox_area_km2?: number | null;
+  label?: string | null;
+}): string | null {
+  if (!rain.grid_cells || rain.grid_cells < 2) return null;
+  const cell = rain.resolution_km ?? 27.8;
+  return `One grid cell covers about ${Math.round((cell * cell) / 100) * 100} km², so this is the cell's figure and not this outline's.`;
+}
+
 function stamp(value?: string | null): string | null {
   return value ? value.replace('T', ' ').slice(0, 19) : null;
 }
@@ -714,6 +732,23 @@ function DatasetResultCard({
             {suspect.length} month{suspect.length === 1 ? '' : 's'} reported near-zero totals
             and are worth review: {suspect.slice(0, 3).join(', ')}
             {suspect.length > 3 ? ' …' : ''}
+          </p>
+        )}
+        {/* Extent and freshness, on the card rather than inside a disclosure.
+            Both were already computed and then filed under "show your working",
+            which is where a number goes to stop being read. Four products sit in
+            one row and can be six months apart; a reader deserves to see that
+            without opening anything. */}
+        <p className="fig mt-2 text-xs text-ink-2">
+          {rain.grid_cells != null
+            ? `${rain.grid_cells} ERA5 grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? 27.8} km`
+            : `ERA5 grid of ${rain.resolution_km ?? 27.8} km`}
+          {rain.window?.end ? ` · series ends ${rain.window.end.slice(0, 7)}` : ''}
+          {rain.label ? ` · ${rain.label}` : ''}
+        </p>
+        {overSpecified(rain) && (
+          <p className="fig mt-1 text-xs text-caution">
+            {overSpecified(rain)}
           </p>
         )}
         <EvidenceLine evidence={rain.evidence} status={rain.status} />

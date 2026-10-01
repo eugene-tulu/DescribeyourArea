@@ -319,7 +319,16 @@ function RainChart({ data }: { data: RainPoint[] }) {
       <header className="chart-head">
         <div>
           <h3 className="chart-title">Rainfall</h3>
-          <p className="chart-sub">Monthly total, against the 1991–2020 normal for that month</p>
+          {/* Stating the period, because the vegetation plot beside it is
+              compared against a different one. Rainfall uses the published
+              WMO 1991–2020 normal; the MODIS series forms its own from the
+              years MOD13Q1 actually has, which begin in 2000. Both are correct
+              and a reader comparing the two panels deserves to know. */}
+          <p className="chart-sub">
+            Monthly total, against the 1991–2020 normal for that month. The
+            vegetation plot below is compared against the years MODIS covers
+            (from 2000), not 1991–2020.
+          </p>
         </div>
         <Readout
           month={active?.month ?? null}
