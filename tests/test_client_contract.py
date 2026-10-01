@@ -143,9 +143,13 @@ class ClientServerContractTests(unittest.TestCase):
         keys.discard("area")  # written across the two blocks below
         keys.update(re.findall(r"(\w+):", "".join(re.findall(
             r"URLSearchParams\(\{(.*?)\}\)", source, re.S))))
-        self.assertTrue({"area", "datasets", "sensor", "years"} <= keys,
-                        f"the share link no longer encodes the expected keys: {keys}")
-        for key in ("area", "datasets", "sensor", "years"):
+        # Dates, not a preset count: the link carries the same window the reader
+        # was looking at, which is what makes it reproduce the result rather than
+        # approximately the result. `admin` is the handoff from another system.
+        for expected in ("area", "datasets", "sensor", "window_start", "window_end"):
+            self.assertIn(expected, keys,
+                          f"the share link no longer encodes {expected!r}: {keys}")
+        for key in ("area", "datasets", "sensor", "window_start", "window_end"):
             self.assertIn(
                 f"get('{key}')", source,
                 f"the share link encodes {key!r} and nothing reads it back, so "
@@ -459,3 +463,41 @@ class CardHonestyTests(unittest.TestCase):
         # fields a reader needs in order to trust the number above them.
         self.assertIn("Working", self.source)
         self.assertIn("['series ends'", self.source)
+
+
+class HandoffTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """An administrative id, in and out.
+
+    The handoff is the point of the resolver. globe holds canonical ids from the
+    boundary service, and a link carrying one is small, stable, and resolvable
+    without shipping geometry in a URL -- which a 10,000-vertex boundary cannot do
+    inside the 8,000 characters a pasted link survives.
+    """
+
+    def test_the_resolver_is_called_by_the_client(self):
+        self.assertIn("/areas/resolve", self.source,
+                      "the resolver exists as an API with no path from the page")
+
+    def test_a_share_link_carries_the_administrative_id(self):
+        self.assertIn("admin:", self.source,
+                      "a link should carry the id another system already holds, "
+                      "not a megabyte of coordinates")
+        self.assertIn("adminArea?.id", self.source)
+
+    def test_a_link_carrying_an_id_resolves_rather_than_needing_geometry(self):
+        self.assertIn("params.get('admin')", self.source)
+        self.assertIn("setAdminArea", self.source)
+
+    def test_the_resolved_area_says_it_is_the_whole_unit(self):
+        # A named administrative boundary is not something the user drew, and the
+        # figures describe the unit. Saying so is the difference between a named
+        # area and a precise-looking one.
+        self.assertIn("not something you drew", self.source)
+
+    def test_a_failed_resolution_offers_the_ways_that_still_work(self):
+        self.assertIn("Could not resolve that area", self.source)
+        self.assertIn("draw it on the map or upload a file", self.source)

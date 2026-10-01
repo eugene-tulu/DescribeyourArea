@@ -846,6 +846,24 @@ export default function Home() {
   // ever decoded any of it, so a colleague opened a blank page.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const adminId = params.get('admin');
+    if (adminId) {
+      // Resolve the id rather than carrying the geometry, so a link from another
+      // system stays small and stays correct if the boundary service updates.
+      void (async () => {
+        try {
+          const response = await fetch(
+            `/api/areas/resolve?id=${encodeURIComponent(adminId)}&level=${params.get('level') ?? '1'}`);
+          if (!response.ok) return;
+          const area = await response.json();
+          setUploadedGeojson(area.geometry as GeoJsonObject);
+          setAdminArea({ id: area.id ?? adminId, name: area.name ?? null, level: area.level ?? null });
+        } catch {
+          // A stale or unreachable boundary service must not leave a blank page;
+          // the drawn and uploaded paths still work.
+        }
+      })();
+    }
     const area = params.get('area');
     if (!area) return;
     try {
@@ -862,9 +880,18 @@ export default function Home() {
     if (datasets.length) setSelectedDatasets(datasets);
     const sensor = params.get('sensor');
     if (sensor) setSelectedSensor(sensor);
-    const years = Number(params.get('years'));
-    if (years === 1 || years === 3 || years === 10 || years === 30) {
-      setWindowYears(years);
+    // Prefer the dates the link was built with. `years` is still honoured for a
+    // link made before the switch, so an older shared link keeps working.
+    const start = params.get('window_start');
+    const end = params.get('window_end');
+    if (start && end) {
+      setCustomStart(start);
+      setCustomEnd(end);
+    } else {
+      const years = Number(params.get('years'));
+      if (years === 1 || years === 3 || years === 10 || years === 30) {
+        setWindowYears(years);
+      }
     }
   }, []);
 
@@ -889,6 +916,12 @@ export default function Home() {
   const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const searchTimeout = useRef<NodeJS.Timeout | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
+  // An administrative boundary, named rather than drawn. The planner thinks in
+  // wards and sub-counties and does not have the file; before this the only ways
+  // in were drawing it or uploading it.
+  const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
+  const [adminQuery, setAdminQuery] = useState('');
+  const [adminBusy, setAdminBusy] = useState(false);
 
 
   // Search for places using Nominatim
@@ -917,6 +950,38 @@ export default function Home() {
       });
     } finally {
       setIsSearching(false);
+    }
+  };
+
+  /** Resolve a place name to an administrative boundary and use it as the area. */
+  const resolveAdminArea = async () => {
+    const query = adminQuery.trim();
+    if (!query) return;
+    setAdminBusy(true);
+    try {
+      const response = await fetch(`/api/areas/resolve?country=${encodeURIComponent(query)}&level=1`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || `no administrative area named ${query}`);
+      }
+      const area = await response.json();
+      setUploadedGeojson(area.geometry as GeoJsonObject);
+      setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
+      setAdminQuery('');
+      toast({
+        title: 'Area set',
+        description: `${area.name} — administrative level ${area.level ?? '?'}, from the boundary service.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not resolve that area',
+        description: error instanceof Error
+          ? `${error.message} You can still draw it on the map or upload a file.`
+          : 'You can still draw it on the map or upload a file.',
+        variant: 'destructive',
+      });
+    } finally {
+      setAdminBusy(false);
     }
   };
 
@@ -1354,9 +1419,18 @@ export default function Home() {
     try {
       const q = new URLSearchParams({
         area: encodeURIComponent(JSON.stringify(geojson)),
+        // An administrative id is stable, short, and is what another system
+        // already holds -- so a link from globe or a colleague's bookmark
+        // resolves rather than carrying a megabyte of coordinates.
+        ...(adminArea?.id ? { admin: adminArea.id, level: String(adminArea.level ?? 1) } : {}),
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
-        years: String(windowYears),
+        // The window that was actually analysed, not the preset it came from. A
+        // link encoded `years` while the reader could be looking at a custom
+        // range, so a shared link reproduced an approximation of what the sender
+        // saw rather than the thing itself.
+        window_start: windowStartISO(),
+        window_end: windowEndISO(),
       });
       const link = `${window.location.origin}${window.location.pathname}?${q.toString()}`;
       // A detailed boundary is a megabyte of coordinates and the link silently
@@ -1679,6 +1753,37 @@ export default function Home() {
                       </button>
                     ))}
                   </div>
+                )}
+              </div>
+
+              {/* Administrative area by name */}
+              <div className="rule-t px-5 py-5">
+                <Label htmlFor="admin-area" className="label mb-2.5 block">
+                  Or name the area
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="admin-area"
+                    type="text"
+                    placeholder="Narok, Isiolo, Kajiado…"
+                    value={adminQuery}
+                    onChange={(e) => setAdminQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={adminBusy || adminQuery.trim().length === 0}
+                    onClick={() => void resolveAdminArea()}
+                  >
+                    {adminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Find'}
+                  </Button>
+                </div>
+                {adminArea && (
+                  <p className="fig mt-2 text-xs text-ink-2">
+                    Using {adminArea.name}, administrative level {adminArea.level}.
+                    Its outline is the whole unit, not something you drew.
+                  </p>
                 )}
               </div>
 

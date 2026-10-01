@@ -126,8 +126,10 @@ first means the foundation is not built on a layer with holes in it.
 
 ## Phase 4 — connect
 
-- [ ] **globe → geocontextualize handoff.** A selected ADM1/ADM2 becomes a study
-      area by id, with no file transfer. Not gated — see Phase 0.
+- [x] **globe → geocontextualize handoff.** The share link carries an
+      administrative id alongside the geometry and restores from the id when one is
+      present, so a link from another system is small, stable and resolvable
+      without shipping coordinates. An older link carrying `years` still works.
 - [ ] **Reverse.** Offer to snap a drawn area to its containing admin unit, via
       `/containing`.
 
