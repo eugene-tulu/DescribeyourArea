@@ -152,9 +152,15 @@ MAX_AOI_VERTICES = _env_int("MAX_AOI_VERTICES", 10_000)
 # so an irregular outline is penalised by its own rectangle. Derived from
 # measurement; see README "Measured limits" and the reasoning above each value.
 #
-# Only WorldCover has a genuinely area-driven memory curve, which is why it has
-# its own budget. DEM is flat to 5,500 km2 (69 MB), and the vegetation index is
-# bounded by time rather than area, so one synchronous cap covers both.
+# One synchronous cap covers DEM and vegetation, and WorldCover gets a larger one
+# because it is the only product whose memory genuinely grows with area.
+#
+# This used to read "DEM is flat to 5,500 km2 (69 MB) ... so one synchronous cap
+# covers both", which argued for a 5,500 km2 cap while the line beneath it set
+# 100. The measurement is right and the inference was not: the cap is a
+# *whole-request* budget set by the most expensive product in the request, not a
+# per-product memory claim. DEM could be read at 5,500 km2 today and is refused at
+# 100 anyway, because the request may also have asked for land cover.
 MAX_SYNC_BBOX_KM2 = _env_float("MAX_SYNC_BBOX_KM2", 100.0)
 # 1,000 km2 measures 235 MB; 5,500 km2 measures 1,205 MB and would starve the
 # vegetation path inside a 1.8 GB container.
@@ -1561,7 +1567,11 @@ async def generate_context(
                 # Land cover is the one module whose memory grows with area, so it
                 # reports an explicit skip instead of risking the whole request.
                 landcover_over_limit = {
-                    "error": "landcover_area_exceeded",
+                    # The contract's declared status, which nothing used to emit. A
+            # caller switching on it got a silent miss and fell through to a
+            # generic error, which is how "too large" and "it broke" looked alike.
+            "status": "area_exceeded",
+            "error": "landcover_area_exceeded",
                     "bbox_area_km2": round(aoi["bbox_area_km2"], 2),
                     "limit_km2": MAX_LANDCOVER_BBOX_KM2,
                 }
@@ -1643,6 +1653,16 @@ async def generate_context(
             "dem": _with_dem_evidence(dem),
             "ndvi": _with_vegetation_evidence(ndvi_stats),
             "landcover": _with_landcover_evidence(landcover),
+            # The resolution actually read, next to the one asked for. The
+            # contract has declared this field since it was added and only the
+            # worker populated it, so a synchronous caller had no way to tell a
+            # 20 m composite from a 250 m one. Both readers take native
+            # resolution today, which is also what makes the numbers equal.
+            "applied_resolution_m": {
+                "dem": 30.0,
+                "landcover": 10.0,
+                "ndvi": (ndvi_stats or {}).get("resolution_m"),
+            },
             "rainfall": _with_rainfall_evidence(rainfall_context),
             "country": country,
             "scene_dates": scene_dates,

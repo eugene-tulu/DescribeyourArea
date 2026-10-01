@@ -32,7 +32,10 @@ AREA_BANDS = (
     (1000.0, "100-1000"),
     (float("inf"), "1000+"),
 )
-NDVI_CAP_KM2 = 10.0
+# Was 10.0, which contradicted the real synchronous cap of 100 km2 by a factor
+# of ten and was read by nothing except its own test. Banding only needs the
+# order of magnitude, so it is derived from the live cap instead.
+NDVI_CAP_KM2 = float(os.getenv("MAX_SYNC_BBOX_KM2", "100"))
 SYNC_CAP_KM2 = 100.0
 LANDCOVER_CAP_KM2 = 1000.0
 

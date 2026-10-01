@@ -177,6 +177,12 @@ LANDCOVER = Product(
         "A single-date classification, so it reflects the scene, not a year.",
         "At 10 m this is the only module whose memory genuinely grows with area, "
         "so it has the largest budget of the four.",
+        "Known gap: this reader takes its tiles at native resolution and does not "
+        "decimate, so a large area queued for land cover is still read at 10 m. "
+        "The resolution ladder applies to vegetation and not to this, and the "
+        "interface says so rather than offering a coarser read that does not "
+        "happen. Measured: 1,205 MB at 5,500 km2, which is why it is the product "
+        "that sets the request budget.",
     ),
     fails_with=(
         ("landcover_unavailable", "No land-cover data covers this area."),

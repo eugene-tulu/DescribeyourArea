@@ -166,6 +166,13 @@ def select_sensor(
 ) -> tuple[Sensor, str]:
     """Choose a sensor, returning it with the reason it was chosen.
 
+    Note that the MODIS step is unreachable from the synchronous path, where it
+    looks like dead code and is not: ``select_sensor`` runs inside the vegetation
+    handler, and the synchronous area cap has already refused everything past
+    100 km2 by then. It is reachable through the worker and by naming the sensor.
+    A reader comparing the ladder with the cap will find the third step
+    unreachable and should not conclude the ladder is wrong.
+
     Sentinel-2 for recent windows: finest resolution and shortest revisit.
     Landsat for anything older: 30 m back to 1982, and the only source that can
     answer a pre-2015 question. MODIS beyond the synchronous area budget, where

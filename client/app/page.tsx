@@ -350,7 +350,11 @@ const ERROR_COPY: Record<string, string> = {
   no_valid_landcover_pixels:
     'Land-cover data exists for this region but not inside the boundary.',
   landcover_area_exceeded:
-    'This area is too large for land cover, which is read at 10 m. Draw a smaller boundary, or process this area offline at a coarser resolution.',
+    // Promised a coarser offline read that the async path does not implement:
+    // both the DEM and the land-cover readers take their tiles at native
+    // resolution, so a large area queued for them still reads 10 m. Saying so is
+    // better than offering a remedy that does not exist.
+    'Land cover is read at 10 m and a large area still is, so drawing a smaller boundary is the only way to get it. Elevation and vegetation answer large areas at a coarser resolution.',
 };
 
 /** An untranslated code is a defect, so never render one. */

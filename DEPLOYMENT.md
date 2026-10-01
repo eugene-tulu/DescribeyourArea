@@ -120,7 +120,10 @@ only recomputable derived data, and the API is loopback-bound.
 
 `docker compose up -d` starts a `worker` alongside the backend. It drains the
 submission queue, checks every published series against the alert rules, and sleeps
-`RAINFALL_WORKER_INTERVAL` seconds (default 300). It shares the
+`RAINFALL_WORKER_INTERVAL` seconds (default 15 — measured: a 237-read series
+spent 155 s waiting to be picked up against 24 s computing, because the poll
+interval was 300 s and a job sat in a directory while nobody looked; an idle
+sweep is a local listing, so polling often costs nothing). It shares the
 `rainfall-cache` volume with the backend, so a series it writes is one the API
 serves.
 

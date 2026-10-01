@@ -21,9 +21,16 @@ class AreaBandTests(unittest.TestCase):
         # The edges are the product's caps, so a band's population reads as
         # something about the product rather than only about its users.
         self.assertEqual(usage.AREA_BANDS[0][1], "0-10")
-        self.assertEqual(usage.NDVI_CAP_KM2, 10.0)
-        self.assertEqual(usage.SYNC_CAP_KM2, 100.0)
-        self.assertEqual(usage.LANDCOVER_CAP_KM2, 1000.0)
+        # Asserted against the live constants rather than literals. These were
+        # literals once and one of them -- NDVI_CAP_KM2 at 10 -- had been wrong
+        # by a factor of ten for a long time, contradicting the 100 km2 cap it
+        # sat beside, and the test passed the whole time.
+        import main
+
+        self.assertEqual(usage.NDVI_CAP_KM2, main.MAX_SYNC_BBOX_KM2)
+        self.assertEqual(usage.SYNC_CAP_KM2, main.MAX_SYNC_BBOX_KM2)
+        self.assertEqual(usage.LANDCOVER_CAP_KM2, main.MAX_LANDCOVER_BBOX_KM2)
+        self.assertEqual(usage.AREA_BANDS[0][1], "0-10")
 
     def test_area_is_bucketed_not_carried(self):
         self.assertEqual(usage.area_band(0.5), "0-10")
