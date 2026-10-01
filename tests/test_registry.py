@@ -249,3 +249,73 @@ class PublishedLimitTests(unittest.TestCase):
         self.assertEqual(published, from_ladder)
         self.assertEqual(version["coarsest_resolution_m"],
                          sensors.COARSEST_RESOLUTION_M)
+
+
+class EvidenceEverywhereTests(unittest.TestCase):
+    """An evidence block on every path, or the claim is decoration.
+
+    ``contract.py`` has declared ``evidence`` required on every module for some
+    time, and it was only ever emitted by ``/generate-context``. A rainfall series
+    fetched by key, or one served from a worker artefact, arrived with no
+    statement of what kind of number it was -- which is the one thing the product
+    is for.
+    """
+
+    def test_every_returning_path_routes_through_the_wrapper(self):
+        import inspect
+
+        import main
+
+        source = inspect.getsource(main)
+        # The geometry-keyed read used to hand the payload straight back.
+        self.assertNotIn("        result = rainfall.cached_context(", source)
+        self.assertIn("result = _with_rainfall_evidence(", source)
+
+    def test_a_failure_is_unconfirmed_whatever_the_product_declares(self):
+        import main
+
+        for key in ("rainfall", "dem", "landcover", "ndvi"):
+            with self.subTest(product=key):
+                built = main.with_evidence(key, {"status": "not_computed",
+                                                 "reason": "nothing here"})
+                self.assertEqual(built["evidence"]["status"], "unconfirmed")
+                self.assertEqual(built["evidence"]["note"], "nothing here",
+                                 "a machine reason tells the reader more than a "
+                                 "restated status would")
+
+    def test_a_success_carries_the_products_leading_caveat_as_its_note(self):
+        import main
+
+        for key in ("rainfall", "dem", "landcover", "ndvi"):
+            with self.subTest(product=key):
+                built = main.with_evidence(key, {"status": "ok"})
+                self.assertEqual(built["evidence"]["note"],
+                                 registry.get(key).caveats[0])
+
+    def test_the_class_is_the_registrys_not_the_callers(self):
+        import main
+
+        for key, expected in (("dem", "observed"), ("ndvi", "derived"),
+                              ("rainfall", "modelled")):
+            with self.subTest(product=key):
+                built = main.with_evidence(key, {"status": "ok"})
+                self.assertEqual(built["evidence"]["status"],
+                                 registry.get(key).evidence)
+                self.assertEqual(built["evidence"]["status"], expected)
+
+    def test_evidence_ships_the_whole_caveat_list_not_only_the_note(self):
+        import main
+
+        built = main.with_evidence("rainfall", {"status": "ok"})
+        self.assertEqual(built["evidence"]["caveats"],
+                         list(registry.RAINFALL.caveats))
+
+    def test_the_worker_writes_evidence_into_its_artefact(self):
+        import inspect
+
+        import jobs
+
+        source = inspect.getsource(jobs.run_pending)
+        self.assertIn("with_evidence", source,
+                      "a queued series is read back through /rainfall, so an "
+                      "artefact without evidence returns without evidence")

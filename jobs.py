@@ -400,7 +400,9 @@ async def run_pending(
                                 f"publishes a finished {applied} m product, so that is what was read. "
                                 "A product cannot be resampled finer without inventing detail."
                             )
-                payload = {
+                import main
+
+                payload = main.with_evidence(indicator, {
                     **payload,
                     "indicator": indicator,
                     "status": payload.get("status") or ("error" if payload.get("error") else "ok"),
@@ -411,7 +413,7 @@ async def run_pending(
                     "resolution_note": note,
                     "pixels_analysed": indicators.pixels_for(area, applied),
                     "bbox": bbox,
-                }
+                })
                 write_artefact(key, indicator, payload)
             record = complete(key, payload, indicator)
             if indicator == "rainfall":

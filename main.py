@@ -1679,56 +1679,87 @@ def _evidence(status, source, method, note=None, **extra):
     return {"status": status, "source": source, "method": method, "note": note, **extra}
 
 
-def _with_dem_evidence(dem):
-    if dem is None:
+# Ordered: the first present key explains a failure most specifically, and a
+# machine reason beats a restated status. "no_precomputed_series" tells a reader
+# what to do; "status not_computed" only tells them what happened.
+_FAILURE_KEYS = ("error", "warning", "reason", "message")
+_OK_STATUSES = ("ok", "computed", "ready")
+
+
+def with_evidence(product_key: str, payload: Optional[dict], *,
+                  source: Optional[str] = None,
+                  method: Optional[str] = None) -> Optional[dict]:
+    """Attach the evidence block to any product payload, from the registry.
+
+    The four bespoke wrappers this replaces each decided on their own what counts
+    as success, and each was only ever called from one place -- so ``/rainfall``
+    and every worker artefact shipped without an evidence block while
+    ``contract.py`` declared one required. One function, called from every path,
+    cannot be forgotten at the next one.
+    """
+    import registry
+
+    if payload is None:
         return None
-    if dem.get("error"):
-        return {**dem, "status": "error", "evidence": _evidence(
-            "unconfirmed", "NASADEM", "30 m elevation product", note=dem["error"])}
-    return {**dem, "status": "ok", "evidence": _evidence(
-        "observed", "NASADEM", "area mean of 30 m surface elevation",
-        note="An observed product, not a field measurement of this polygon.")}
+    product = registry.get(product_key)
+    declared_status = payload.get("status")
+
+    failure = next((payload[k] for k in _FAILURE_KEYS if payload.get(k)), None)
+    if failure is None and declared_status not in (None, *_OK_STATUSES):
+        failure = f"status {declared_status}"
+    ok = failure is None
+
+    # The note is the one line a reader is most likely to actually read, so it is
+    # the product's leading caveat rather than a separate string. That removes
+    # four copies of the same sentences that could drift from the registry.
+    note = (product.caveats[0] if product and product.caveats else None) if ok else str(failure)
+
+    # A payload that produced no number is unconfirmed whatever the product's
+    # declared class is. Reporting "modelled" beside a series that does not exist
+    # is the failure this block exists to prevent.
+    evidence = _evidence(
+        (product.evidence if product else "unconfirmed") if ok else "unconfirmed",
+        source or (product.source if product else None),
+        method,
+        note=note,
+        doi=payload.get("doi") or (product.doi if product else None),
+        license=payload.get("license"),
+        retrieved=payload.get("retrieved"),
+    )
+    if product is not None:
+        evidence["caveats"] = list(product.caveats)
+    return {**payload, "status": declared_status or ("ok" if ok else "error"),
+            "evidence": evidence}
+
+
+def _with_dem_evidence(dem):
+    return with_evidence("dem", dem, method="area mean of 30 m surface elevation")
 
 
 def _with_landcover_evidence(landcover):
-    if landcover is None:
-        return None
-    if landcover.get("error"):
-        return {**landcover, "status": "error", "evidence": _evidence(
-            "unconfirmed", "ESA WorldCover", "10 m land-cover classification",
-            note=landcover["error"])}
-    return {**landcover, "status": "ok", "evidence": _evidence(
-        "observed", "ESA WorldCover", "area share of 10 m land-cover classes",
-        note="A single-date classification, so it reflects the scene, not a year.")}
+    return with_evidence("landcover", landcover,
+                         method="area share of 10 m land-cover classes")
 
 
 def _with_vegetation_evidence(result):
+    # The one wrapper that still has something to say the registry does not: which
+    # sensor the ladder actually picked. Everything else -- the class, the
+    # caveats, the failure path -- comes from the registry.
     if result is None:
         return None
-    if result.get("status") == "ok":
-        sensor = (result.get("sensor") or {}).get("label") or "a satellite source"
-        return {**result, "evidence": _evidence(
-            "derived", sensor, result.get("method") or "median NDVI composite",
-            note="An index derived from a surface-reflectance product, not a direct "
-                 "measurement of vegetation.")}
-    return {**result, "evidence": _evidence(
-        "unconfirmed", None, None, note=result.get("warning") or result.get("error"))}
+    sensor = (result.get("sensor") or {}).get("label") or "a satellite source"
+    return with_evidence(
+        "ndvi" if "series" not in result else "vegetation_series", result,
+        source=sensor,
+        method=result.get("method") or "median NDVI composite")
 
 
 def _with_rainfall_evidence(result):
     if result is None:
         return None
-    if result.get("status") == "ok":
-        return {**result, "evidence": _evidence(
-            "modelled", result.get("source"),
-            "monthly totals against the 1991-2020 normal",
-            note="A reanalysis: modelled output that assimilates observations, not a "
-                 "gauge reading. Treat a value near a threshold as uncertain.",
-            doi=result.get("doi"), license=result.get("license"),
-            retrieved=result.get("retrieved"))}
-    return {**result, "evidence": _evidence(
-        "unconfirmed", None, None,
-        note=result.get("message") or result.get("reason") or "not computed")}
+    return with_evidence(
+        "rainfall", result, source=result.get("source"),
+        method="monthly totals against the 1991-2020 normal")
 
 
 def _caveats(aoi, dem, landcover, ndvi, rain):
@@ -1802,7 +1833,14 @@ class ForgetRequest(BaseModel):
 
 
 def _rainfall_by_key(key: str, indicator: str) -> dict:
-    """Read a precomputed artefact by cache key, for either transport."""
+    """Read a precomputed artefact by cache key, for either transport.
+
+    Attaches evidence here, at the single place both verbs read through.
+    ``contract.py`` has declared an evidence block required on every module for
+    some time, and it was only ever emitted by ``/generate-context`` -- so a
+    rainfall series fetched by key, or a series served from a worker artefact,
+    arrived with no statement of what kind of number it was.
+    """
     import jobs
     import rainfall
 
@@ -1819,7 +1857,7 @@ def _rainfall_by_key(key: str, indicator: str) -> dict:
             "message": f"No {name} has been computed for this area yet.",
             "cache_key": key,
         }
-    return rainfall.cached_context_by_key(key)
+    return _with_rainfall_evidence(rainfall.cached_context_by_key(key))
 
 
 @app.get("/rainfall")
@@ -1869,7 +1907,8 @@ async def rainfall_lookup(request: RainfallLookupRequest):
             raise HTTPException(status_code=422, detail="supply geojson or cache_key")
         area = validate_for_lookup(request.geojson)
         key = rainfall.geometry_hash(area["feature"]["geometry"])
-        result = rainfall.cached_context(area["feature"]["geometry"])
+        result = _with_rainfall_evidence(
+            rainfall.cached_context(area["feature"]["geometry"]))
         bbox_area = round(area["bbox_area_km2"], 2)
     return {
         "rainfall": result,
