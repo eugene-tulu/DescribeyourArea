@@ -74,10 +74,12 @@ first means the foundation is not built on a layer with holes in it.
 - [ ] **One reference period.** The vegetation normal is a rolling 20 years; the
       rainfall card says 1991–2020. Both correct, both on screen together, and a
       reader comparing the two panels is comparing against different periods.
-- [ ] **Pin the live-network flake.** `test_contract.CaveatTests` hits live
-      Planetary Computer search and has failed in about half of full-suite runs
-      for several sessions. Six isolated runs pass. A flake is worse than a
-      failure because it teaches you to ignore red.
+- [x] **Pin the flake** — it was never a network flake. It asserted that a module
+      was *never computed* over `SMALL`, a geometry other tests share and at
+      least one writes a series for, so the premise depended on what ran before
+      it. Isolated runs always passed, which is why it read as live data for
+      sessions. Fixed by giving those assertions their own geometry and cache.
+      521 tests, zero failures.
 
 ## Phase 2 — the foundation
 

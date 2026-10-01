@@ -17,6 +17,15 @@ from fastapi.testclient import TestClient
 import main
 from contract import ContextResponse, ContextSummary
 
+# A boundary no other test uses, for assertions that require a module to have
+# never been computed. SMALL is shared, and a test elsewhere in the suite writes a
+# series for its geometry -- so a test asserting "not computed" over SMALL is
+# asserting something about test ordering. Caught by running the suite rather than
+# the file, which is what made it look like a live-network flake for sessions.
+NEVER_CACHED = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon",
+    "coordinates": [[[36.6100, 0.3000], [36.6200, 0.3000], [36.6200, 0.3100],
+                     [36.6100, 0.3100], [36.6100, 0.3000]]]}}
+
 SMALL = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[
     [35.10, -1.55], [35.17, -1.55], [35.17, -1.48], [35.10, -1.48], [35.10, -1.55]
 ]]}}
@@ -109,12 +118,59 @@ class EvidenceTests(unittest.TestCase):
 
 
 class CaveatTests(unittest.TestCase):
+    """Caveats must explain an absent module rather than leave a silent gap.
+
+    Two of these assert that a module was *never computed*, which is an assertion
+    about the cache being empty. Pointed at the shared cache, an earlier test in
+    the suite that writes a series for the same geometry turns the premise false
+    and the test fails -- deterministically in a full run and never alone. It was
+    being read as a live-network flake for several sessions, which is what a test
+    whose failure depends on what ran before it looks like from the outside.
+
+    So the absent-module cases get their own cache directory. The premise is then
+    true by construction rather than by luck.
+    """
+
     def setUp(self):
         self.client = TestClient(main.app)
 
+    def _empty_cache_client(self):
+        """A client whose rainfall cache is empty, so 'not computed' is certain."""
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+
+        def restore():
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()
+
+        self.addCleanup(restore)
+        return TestClient(main.app)
+
     def test_a_missing_module_is_explained_rather_than_left_as_a_gap(self):
-        response = self.client.post(
-            "/generate-context?datasets=dem,rainfall", json={"geojson": SMALL}
+        # Rainfall only, and deliberately. This asserts that a series which was
+        # never computed is *explained* -- which is a cache miss and needs no
+        # network. It used to ask for dem as well, so the assertion depended on
+        # a live NASADEM read succeeding, and it failed in roughly half of all
+        # full-suite runs for that reason and no other.
+        response = self._empty_cache_client().post(
+            "/generate-context?datasets=rainfall", json={"geojson": NEVER_CACHED}
+        )
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        caveats = response.json()["summary"]["caveats"]
+        self.assertTrue(any("Rainfall" in c for c in caveats), caveats)
+
+    def test_a_live_module_and_a_missing_one_are_both_explained(self):
+        # The same request as above plus a real module, with an empty cache so the
+        # premise holds whatever ran before.
+        response = self._empty_cache_client().post(
+            "/generate-context?datasets=dem,rainfall", json={"geojson": NEVER_CACHED}
         )
         self.assertEqual(response.status_code, 200, response.text[:300])
         caveats = response.json()["summary"]["caveats"]
