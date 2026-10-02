@@ -395,11 +395,18 @@ async def run_pending(
                 if product == "rainfall":
                     union_source = source or rainfall.UnionReader(rainfall.union_grid([geometry]))
                 else:
-                    union_source = rainfall.reader_for(product)
+                    # The *name* is passed through, not the reader it resolves
+                    # to. Resolving here lost the identity: build_and_cache works
+                    # out which cache slot to write from what it is given, so a
+                    # callable arrived as "rainfall" and a CHIRPS series was
+                    # written into the ERA5 slot -- the job reported ready and the
+                    # reader found nothing.
+                    union_source = source
                 payload = rainfall.build_and_cache(
                     geometry,
                     start=job.get("start", "2010-01-01"),
                     source=union_source,
+                    product=product,
                     upload=publish,
                     label=job.get("label"),
                 )

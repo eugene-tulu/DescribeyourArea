@@ -725,6 +725,7 @@ def build_and_cache(
     source=None,
     upload: bool = False,
     label: Optional[str] = None,
+    product: Optional[str] = None,
     **kwargs,
 ) -> dict:
     """Compute and store a series, returning the cached payload.
@@ -737,11 +738,16 @@ def build_and_cache(
     bool, which only fails on the upload path.
     """
     key = geometry_hash(geojson_geom)
-    product = "rainfall"
-    if isinstance(source, str):
-        product = source.strip().lower()
-    elif source is not None:
-        product = "rainfall"
+    # The product can arrive three ways: named, as a reader callable, or not at
+    # all. A callable carries no name, so it is treated as the default rather
+    # than guessed at -- guessing here wrote one product's series into the
+    # other's slot, which is a wrong answer wearing a correct-looking label.
+    named = (product or "").strip().lower()
+    if not named and isinstance(source, str):
+        named = source.strip().lower()
+    product = named or "rainfall"
+    if not named and source is not None:
+        source = None
     payload = compute_series(geojson_geom, start=start, source=source, label=label, **kwargs)
     payload["product"] = product
     write_cache(key, payload, product)

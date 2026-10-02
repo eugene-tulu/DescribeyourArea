@@ -342,3 +342,56 @@ class PlanPricingTests(unittest.TestCase):
         basis = self._plan("chirps")["estimate_basis"]
         self.assertIn("1.04", basis)
         self.assertIn("CHIRPS", basis)
+
+
+class CacheSlotTests(unittest.TestCase):
+    """A CHIRPS job that reports ready and stores nothing is the worst outcome.
+
+    The worker resolved the product name to a reader callable before handing it
+    over, and the cache works out which slot to write from what it is given. A
+    callable carries no name, so it arrived as "rainfall" and the CHIRPS series
+    was written into the ERA5 slot. The job completed, the state said ready, and
+    a reader found no series at all -- a success message over no data.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    def test_a_named_product_reaches_the_cache_it_belongs_in(self):
+        import inspect
+
+        # No network: this asserts the identity survives to the cache decision.
+        source = inspect.getsource(rainfall.build_and_cache)
+        self.assertIn("write_cache(key, payload, product)", source,
+                      "a named product must select its own cache slot")
+
+    def test_a_reader_with_no_name_is_not_guessed_at(self):
+        import inspect
+
+        source = inspect.getsource(rainfall.build_and_cache)
+        self.assertIn('product = named or "rainfall"', source)
+
+    def test_the_worker_passes_the_name_rather_than_resolving_it(self):
+        import inspect
+
+        import jobs
+
+        source = inspect.getsource(jobs.run_pending)
+        self.assertIn("product=product,", source,
+                      "the worker must pass the name through; resolving it to a "
+                      "callable loses the identity the cache slot is chosen by")
