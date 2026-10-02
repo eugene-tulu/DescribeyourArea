@@ -58,22 +58,17 @@ Nothing here is foundation, and all of it is small.
 Each is a real defect found in review, and none needs the foundation. Doing them
 first means the foundation is not built on a layer with holes in it.
 
-- [ ] **Evidence label on every path.** `contract.py` declares it required;
-      `/generate-context` is the only place it is emitted. `POST /rainfall`,
-      `GET /rainfall` and every worker artefact return payloads with no `evidence`
-      key.
-- [ ] **`/version` tells the truth.** It publishes
-      `"large_area_mode": "not available until a durable asynchronous worker is
-      deployed"` — the worker is deployed. It publishes `ndvi_resolution_m: 20`,
-      true only on the synchronous path. `DEPLOYMENT.md` says the worker sleeps
-      300 s; it deploys at 15 s. A partner reading this file would cite a
-      falsehood.
-- [ ] **Extent and freshness on the card.** `grid_cells` and the series end date
-      exist and are both buried in a collapsed "Show the working". Four products
-      currently sit side by side six months apart with nothing saying so.
-- [ ] **One reference period.** The vegetation normal is a rolling 20 years; the
-      rainfall card says 1991–2020. Both correct, both on screen together, and a
-      reader comparing the two panels is comparing against different periods.
+- [x] **Evidence label on every path.** `with_evidence()` in `main.py`, called from
+      `/generate-context`, both `/rainfall` verbs and the worker artefact write.
+      A failure is `unconfirmed` whatever the product's declared class is, and the
+      note is a machine reason where one exists.
+- [x] **`/version` tells the truth.** It publishes the registry, the measures map,
+      the enforced limits that were invisible, and a `large_area_mode` object with
+      the real queue depth and job lease.
+- [x] **Extent and freshness on the card.** Grid cells, resolution and the month the
+      data actually stops — not the end of the window that was asked for.
+- [x] **One reference period, stated.** The chart says the vegetation panel is
+      compared against the years MODIS covers, not 1991–2020.
 - [x] **Pin the flake** — it was never a network flake. It asserted that a module
       was *never computed* over `SMALL`, a geometry other tests share and at
       least one writes a series for, so the premise depended on what ran before
