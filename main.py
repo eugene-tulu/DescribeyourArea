@@ -297,7 +297,7 @@ STAC_URL = "https://planetarycomputer.microsoft.com/api/stac/v1    ".strip()
 
 # Single source of truth: /health and /version previously each hard-coded this
 # and had already drifted apart (1.2.0 vs 1.3.0).
-APP_VERSION = "1.20.0"
+APP_VERSION = "1.21.0"
 
 
 @app.middleware("http")
@@ -1669,6 +1669,11 @@ async def generate_context(
             "scene_ids": scene_ids,
             "analysis": {
                 "bbox_area_km2": round(aoi["bbox_area_km2"], 2),
+                # The box, so a client can ask the boundary service what this
+                # outline sits inside without re-deriving the same geometry. The
+                # area was published without it, which meant the question could
+                # only be answered by measuring it again in the browser.
+                "bbox": [round(v, 6) for v in aoi["bbox"]],
                 "datasets": sorted(requested),
                 "mode": "synchronous",
             },

@@ -113,7 +113,11 @@ first means the foundation is not built on a layer with holes in it.
 
 ## Phase 3 — the temporal model
 
-- [ ] **Dates primary, windows derived.** The user names two dates; the display
+- [x] **Dates primary, windows derived.** The date fields now lead the control and
+      the presets are the alternative, choosing a preset clears the dates, and the
+      control says what the window means — including the two consequences a reader
+      can act on: a window before Landsat has no vegetation answer, and a long one
+      is binned yearly. The user names two dates; the display
       label, bin width (3 months → monthly bars, 40 years → annual), comparison
       normal, alert horizon and sensor validity are all derived from them.
       Presets `1y/3y/10y/30y` cannot express "the 2019/20 drought" or "since the
@@ -125,8 +129,10 @@ first means the foundation is not built on a layer with holes in it.
       administrative id alongside the geometry and restores from the id when one is
       present, so a link from another system is small, stable and resolvable
       without shipping coordinates. An older link carrying `years` still works.
-- [ ] **Reverse.** Offer to snap a drawn area to its containing admin unit, via
-      `/containing`.
+- [x] **Reverse.** "Which unit is this in?" asks the boundary service about the
+      outline's centroid and offers to adopt the unit, stating both areas — offered
+      rather than automatic, since snapping replaces the outline the person drew.
+      `/generate-context` publishes the box so the browser need not measure it again.
 
 ## Deferred by decision
 

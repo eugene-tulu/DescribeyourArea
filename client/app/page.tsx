@@ -814,6 +814,19 @@ function DatasetResultCard({
         <Figure term="scenes" value={ndvi.scene_count == null ? '—' : `${ndvi.scene_count}`} />
         <Figure term="grid" value={ndvi.resolution_m == null ? '—' : `${ndvi.resolution_m} m`} />
       </dl>
+      {/* A persistently cloudy area reads low. That is documented in the README
+          and reachable through the product registry, and a reader of the number
+          never sees it -- because the coverage figure describes how much of the
+          outline was measured, not how much cloud was in it. A low index over a
+          thin composite is the case most likely to be quoted wrongly, so it is
+          stated here rather than filed under show-your-working. */}
+      {(ndvi.mean ?? 1) < 0.2 && (
+        <p className="fig mt-2 text-[0.75rem] leading-relaxed text-caution">
+          A figure below about 0.2 is worth reading as uncertain rather than as bare
+          ground. Cloud and thin cover depress the index, and the coverage figure
+          below describes the outline rather than the cloud in it.
+        </p>
+      )}
       <EvidenceLine evidence={ndvi.evidence} status={ndvi.status} />
       <Working
         rows={[
@@ -938,6 +951,13 @@ export default function Home() {
   const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
   const [adminQuery, setAdminQuery] = useState('');
   const [adminBusy, setAdminBusy] = useState(false);
+  // "Which administrative unit is this in?", asked once the user has drawn
+  // something. Answered for a point at the outline's centroid, and offered
+  // rather than automatic: snapping replaces the outline the person drew, and
+  // that has to be their choice.
+  const [drawnInfo, setDrawnInfo] = useState<{ areaKm2: number; lon: number; lat: number } | null>(null);
+  const [containingArea, setContainingArea] = useState<{ name: string; level: number; id: string | null; area_km2: number } | null>(null);
+  const [containingBusy, setContainingBusy] = useState(false);
 
 
   // Search for places using Nominatim
@@ -966,6 +986,60 @@ export default function Home() {
       });
     } finally {
       setIsSearching(false);
+    }
+  };
+
+  /** Ask the boundary service what this outline sits inside, and offer to use it. */
+  const findContainingArea = async () => {
+    if (!drawnInfo) return;
+    setContainingBusy(true);
+    try {
+      const response = await fetch(
+        `/api/areas/resolve?lat=${drawnInfo.lat}&lon=${drawnInfo.lon}`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || 'no administrative unit contains that point');
+      }
+      const area = await response.json();
+      setContainingArea({ name: area.name ?? 'that area', level: area.level ?? 0,
+                          id: area.id ?? null, area_km2: area.area_km2 ?? 0 });
+    } catch (error) {
+      setContainingArea(null);
+      toast({
+        title: 'Could not find a containing area',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setContainingBusy(false);
+    }
+  };
+
+  /** Adopt the containing unit, replacing the drawn outline with it. */
+  const useContainingArea = async () => {
+    if (!containingArea?.id) return;
+    setContainingBusy(true);
+    try {
+      const response = await fetch(
+        `/api/areas/resolve?id=${encodeURIComponent(containingArea.id)}&level=${containingArea.level}`);
+      if (!response.ok) throw new Error('could not fetch that boundary');
+      const area = await response.json();
+      setUploadedGeojson(area.geometry as GeoJsonObject);
+      setAdminArea({ id: area.id ?? containingArea.id, name: area.name ?? containingArea.name,
+                     level: area.level ?? containingArea.level });
+      setContainingArea(null);
+      toast({
+        title: 'Area replaced',
+        description: `Now using ${area.name}. Its outline is the whole administrative unit, which covers ${Math.round(area.area_km2).toLocaleString()} km² rather than the ${Math.round(drawnInfo!.areaKm2).toLocaleString()} km² you drew.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not use that area',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setContainingBusy(false);
     }
   };
 
@@ -1004,6 +1078,33 @@ export default function Home() {
   };
 
   // Handle search input changes with debouncing
+  /** What the chosen window means, in the words the person chose it with.
+   *
+   * A window is more than a pair of dates: a bar every month and a bar every year
+   * are different claims, and a sensor that does not reach back to the start is a
+   * refusal rather than a thin answer. All three are consequences of the dates
+   * rather than choices offered beside them, so they are stated here.
+   */
+  const windowExplanation = (() => {
+    const start = customStart || windowStartISO();
+    const end = customEnd || windowEndISO();
+    const months = Math.max(1, (Number(end.slice(0, 4)) - Number(start.slice(0, 4))) * 12
+      + Number(end.slice(5, 7)) - Number(start.slice(5, 7)) + 1);
+    const parts: string[] = [];
+    parts.push(customStart && customEnd ? ' — dates you set' : ` — ${windowYears}-year preset`);
+    // Landsat is the archive that reaches furthest back; if it cannot answer then
+    // nothing can.
+    const reaches = new Date('1982-08-22');
+    if (new Date(start) < reaches) {
+      parts.push(' — no sensor archive reaches back this far, so there will be no vegetation value');
+    } else {
+      parts.push(months > 120
+        ? ` — ${months} months, so the charts bin it yearly; one bar a month would not be readable`
+        : ` — ${months} month${months === 1 ? '' : 's'}`);
+    }
+    return parts.join('');
+  })();
+
   const handleSearchChange = (value: string) => {
     setSearchQuery(value);
     
@@ -1045,6 +1146,7 @@ export default function Home() {
     setSubmission({});
     setActiveCacheKey(null);
     setVegetationSeries(null);
+    setContainingArea(null);
   }, []);
 
   const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
@@ -1584,7 +1686,18 @@ export default function Home() {
         throw new Error(failure?.detail || `Analysis request failed (${response.status}).`);
       }
 
-      const data = await response.json() as { summary?: Summary };
+      const data = await response.json() as { summary?: Summary; analysis?: { bbox?: number[]; bbox_area_km2?: number } };
+      // Remember where this outline is, so "which administrative unit is this?"
+      // can be asked from the server's own figure rather than a second estimate
+      // of the same outline made in the browser.
+      const box = data.analysis?.bbox;
+      if (Array.isArray(box) && box.length === 4 && data.analysis?.bbox_area_km2 != null) {
+        setDrawnInfo({
+          areaKm2: data.analysis.bbox_area_km2,
+          lon: (Number(box[0]) + Number(box[2])) / 2,
+          lat: (Number(box[1]) + Number(box[3])) / 2,
+        });
+      }
       setActiveCacheKey(
         (data.summary?.rainfall as { cache_key?: string } | undefined)?.cache_key ?? null
       );
@@ -1803,6 +1916,45 @@ export default function Home() {
                     Its outline is the whole unit, not something you drew.
                   </p>
                 )}
+
+                {/* The other direction. Having drawn something, it is worth
+                    knowing which administrative unit it sits in -- and worth
+                    being able to adopt that unit, because a conservancy's
+                    drought is a question about the whole unit rather than about
+                    the 60 km2 someone circled. Offered, never automatic:
+                    snapping replaces the outline the person drew. */}
+                {drawnInfo && !adminArea && (
+                  <div className="mt-3 rule-t pt-3">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={containingBusy}
+                      onClick={() => void findContainingArea()}
+                    >
+                      {containingBusy
+                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        : 'Which unit is this in?'}
+                    </Button>
+                    {containingArea && (
+                      <div className="mt-2">
+                        <p className="fig text-xs text-ink-2">
+                          Your {formatNumber(drawnInfo.areaKm2, 0)} km² outline sits
+                          inside {containingArea.name}, which covers{' '}
+                          {formatNumber(containingArea.area_km2, 0)} km².
+                        </p>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="mt-1.5"
+                          disabled={containingBusy}
+                          onClick={() => void useContainingArea()}
+                        >
+                          Use the whole {containingArea.name} instead
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Upload */}
@@ -1830,7 +1982,9 @@ export default function Home() {
                 </label>
                 <p className="mt-2.5 text-[0.75rem] leading-relaxed text-ink-3">
                   A <span className="fig">.geojson</span> Polygon, MultiPolygon or
-                  FeatureCollection, up to 500 KB.
+                  FeatureCollection, up to 4 MB. The server and the proxy were raised
+                  together, so a large conservancy boundary can be posted rather than
+                  refused at the door.
                 </p>
               </div>
 
@@ -1840,16 +1994,42 @@ export default function Home() {
 
                 <div className="space-y-5">
                   <div>
-                    <div className="mb-2.5 flex flex-wrap items-center gap-2">
-                      <Label className="text-[0.8125rem] text-ink-2">Vegetation window</Label>
+                    {/* Dates first and presets second, because the dates are the
+                        question. The preset row used to lead, which made "the 2019/20
+                        drought" and "since the last rains" -- the ranger's and the NRT
+                        manager's actual questions -- inexpressible without finding a
+                        date field second. */}
+                    <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
+                      <Label className="mr-1 text-[0.8125rem] text-ink-2">Window</Label>
+                      <input
+                        type="date"
+                        value={customStart}
+                        max={customEnd || windowEndISO()}
+                        onChange={(e) => setCustomStart(e.target.value)}
+                        aria-label="Window start"
+                        className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
+                      />
+                      <span className="text-[0.75rem] text-ink-3">to</span>
+                      <input
+                        type="date"
+                        value={customEnd}
+                        min={customStart || undefined}
+                        onChange={(e) => setCustomEnd(e.target.value)}
+                        aria-label="Window end"
+                        className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
+                      />
+                    </div>
+
+                    <div className="fig mb-2.5 flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
+                      <span>or</span>
                       {([1, 3, 10, 30] as const).map((years) => (
                         <button
                           key={years}
                           type="button"
-                          aria-pressed={windowYears === years}
-                          onClick={() => setWindowYears(years)}
-                          className={`fig h-7 rounded-lg border px-2.5 text-[0.75rem] transition-colors duration-200 ${
-                            windowYears === years
+                          aria-pressed={!customStart && windowYears === years}
+                          onClick={() => { setWindowYears(years); setCustomStart(''); setCustomEnd(''); }}
+                          className={`fig h-7 rounded-lg border px-2.5 transition-colors duration-200 ${
+                            !customStart && windowYears === years
                               ? 'border-signal bg-signal/12 text-signal'
                               : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
                           }`}
@@ -1859,29 +2039,9 @@ export default function Home() {
                       ))}
                     </div>
 
-                    <div className="fig flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
-                      <input
-                        type="date"
-                        value={customStart}
-                        max={customEnd || windowEndISO()}
-                        onChange={(e) => setCustomStart(e.target.value)}
-                        aria-label="Window start"
-                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
-                      />
-                      <span>to</span>
-                      <input
-                        type="date"
-                        value={customEnd}
-                        min={customStart || undefined}
-                        onChange={(e) => setCustomEnd(e.target.value)}
-                        aria-label="Window end"
-                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
-                      />
-                    </div>
-
                     <p className="fig mt-2.5 text-[0.75rem] text-ink-2">
                       {windowStartISO()} → {windowEndISO()}
-                      {customStart && customEnd ? ' (set)' : ` (${windowYears}y preset)`}
+                      <span className="text-ink-3">{windowExplanation}</span>
                     </p>
                     {!customRangeValid && (
                       <p className="mt-1.5 text-[0.75rem] text-stressed">

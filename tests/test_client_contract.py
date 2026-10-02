@@ -260,10 +260,16 @@ class TemporalScopeTests(unittest.TestCase):
     about the backend, which is the load-bearing half.
     """
 
-    def test_the_window_control_names_what_it_governs(self):
-        source = (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
-        self.assertIn("Vegetation window", source,
-                      "the window control must name the one dataset it governs")
+    def test_the_window_control_says_which_datasets_it_moves(self):
+        # The label became "Window" when the date fields moved above the presets,
+        # because naming one dataset on a control the dates now drive would
+        # misdescribe it. The scope moved to the paragraph beneath instead, which
+        # is where a reader goes to learn what the control does.
+        flat = " ".join(
+            (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8").split())
+        self.assertIn("This window selects the vegetation period", flat,
+                      "the control must still say which datasets it moves")
+        self.assertIn("Elevation and land cover have no time dimension", flat)
 
     def test_the_window_control_says_what_it_does_not_govern(self):
         # JSX wraps prose across lines, so the copy is read with whitespace
@@ -518,3 +524,92 @@ class HandoffTests(unittest.TestCase):
     def test_a_failed_resolution_offers_the_ways_that_still_work(self):
         self.assertIn("Could not resolve that area", self.source)
         self.assertIn("draw it on the map or upload a file", self.source)
+
+
+class DatesPrimaryTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """The window control must lead with the dates.
+
+    The question layer has answered "the 2019/20 drought" and "since the last
+    rains" since it was written, and the interface still offered 1/3/10/30 years
+    with the date fields second -- so the ranger's and the NRT manager's actual
+    questions needed a hunt for a secondary field.
+    """
+
+    def test_the_date_fields_come_before_the_presets(self):
+        # Scoped to the control itself: the same attribute appears in the link
+        # restore, so searching the whole file compared two unrelated places.
+        source = self.source
+        control = source[source.index('aria-label="Window start"') - 1200:
+                         source.index('aria-label="Window start"') + 1200]
+        self.assertLess(control.index('type="date"'), control.index("windowYears === years"),
+                        "dates are the question; presets are a convenience")
+
+    def test_choosing_a_preset_clears_the_dates(self):
+        self.assertIn("setCustomStart('')", self.source,
+                      "a preset and a custom range cannot both be active, and "
+                      "silently preferring one is how a shared link stops "
+                      "reproducing what the sender saw")
+
+    def test_the_window_says_what_it_means(self):
+        # Bar width and sensor reach are consequences of the dates, and the only
+        # reader who can act on them is the one who chose them.
+        self.assertIn("windowExplanation", self.source)
+        body = self.source.split("const windowExplanation")[1][:900]
+        self.assertIn("no sensor archive reaches back", body,
+                      "a window before Landsat has no vegetation answer and the "
+                      "control should say so before the request is made")
+        self.assertIn("bin it yearly", body,
+                      "361 monthly bars is a different claim from 32 annual ones")
+
+
+class ContainingUnitTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """The other direction: having drawn something, which unit is it in?"""
+
+    def test_the_containing_unit_can_be_found_from_a_drawn_outline(self):
+        self.assertIn("findContainingArea", self.source)
+        self.assertIn("/areas/resolve?lat=", self.source,
+                      "the boundary service answers a point, and the outline's "
+                      "centroid is the honest point to ask with")
+
+    def test_adopting_a_unit_is_offered_rather_than_done(self):
+        # Snapping replaces the outline the person drew. Doing that unasked would
+        # be the resolver overwriting a decision the reader made.
+        self.assertIn("useContainingArea", self.source)
+        self.assertIn("Which unit is this in?", self.source)
+
+    def test_it_states_both_sizes_when_offering(self):
+        self.assertIn("outline sits", self.source)
+        self.assertIn("which covers", self.source,
+                      "a reader deciding whether to swap a 60 km2 outline for a "
+                      "774 km2 unit needs to see both numbers")
+
+    def test_the_server_publishes_the_box_so_the_browser_need_not_measure_it(self):
+        import main
+
+        source = (Path(__file__).resolve().parent.parent / "main.py").read_text()
+        self.assertIn('"bbox": [round(v, 6) for v in aoi["bbox"]]', source,
+                      "the area was published without the box, so the client had "
+                      "to measure the outline again to ask the question")
+
+
+class LowVegetationTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    def test_a_low_index_says_it_may_be_cloud(self):
+        # Documented in the README and reachable through the registry, and shown
+        # to nobody: a persistently cloudy area reads low, and that figure is the
+        # one most likely to be quoted as bare ground.
+        # Whitespace collapsed: the formatter wraps this sentence across lines, and
+        # a literal search for it fails on the wrap rather than on the copy.
+        self.assertIn("reading as uncertain rather than as bare",
+                      " ".join(self.source.split()))
