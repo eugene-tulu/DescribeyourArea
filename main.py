@@ -338,8 +338,13 @@ class RainfallLookupRequest(BaseModel):
 
 
 class SubmitRequest(RainfallLookupRequest):
-    """A submission may name which indicator it wants computed."""
+    """A submission may name which indicator, and which product for it."""
     indicator: str = "rainfall"
+    # Two products now provide precipitation_total, so which one is part of what
+    # was asked for. It travels with the job: a request that chooses CHIRPS and a
+    # worker that computes ERA5 would answer a different question from the one
+    # queued, and the reader would have no way to tell.
+    product: str = "rainfall"
 
 
 # The published response contract lives in contract.py. It used to be
@@ -1817,11 +1822,17 @@ def _with_vegetation_evidence(result):
         method=result.get("method") or "median NDVI composite")
 
 
-def _with_rainfall_evidence(result):
+def _with_rainfall_evidence(result, product: str = "rainfall"):
+    """Evidence for a precipitation series, whichever product produced it.
+
+    The product is named because the two differ in class: ERA5 is modelled and
+    CHIRPS is a satellite-gauge blend. Labelling a CHIRPS series "modelled"
+    understates it, and the label is the one thing a reader has to go on.
+    """
     if result is None:
         return None
     return with_evidence(
-        "rainfall", result, source=result.get("source"),
+        product, result, source=result.get("source"),
         method="monthly totals against the 1991-2020 normal")
 
 
@@ -1913,6 +1924,11 @@ def _rainfall_by_key(key: str, indicator: str) -> dict:
             detail="cache_key must be 32 lowercase hex characters",
         )
     name = (indicator or "rainfall").strip().lower()
+    if name in ("chirps", "rainfall"):
+        # Two products for one measure, so the key alone is not the identity.
+        return _with_rainfall_evidence(
+            rainfall.cached_context_by_key(key, name), name)
+
     if name in jobs.RUNTIME_INDICATORS:
         return jobs.read_artefact(key, name) or {
             "status": "not_computed",
@@ -1920,7 +1936,9 @@ def _rainfall_by_key(key: str, indicator: str) -> dict:
             "message": f"No {name} has been computed for this area yet.",
             "cache_key": key,
         }
-    return _with_rainfall_evidence(rainfall.cached_context_by_key(key))
+    raise HTTPException(
+        status_code=422,
+        detail=f"{indicator!r} is not a rainfall product or a runtime indicator")
 
 
 @app.get("/rainfall")
@@ -2056,11 +2074,21 @@ async def submit_rainfall(
             detail=f"unknown indicator {indicator!r}; choose from {list(jobs.INDICATORS)}",
         )
 
+    product = (payload.product or "rainfall").strip().lower()
+    if indicator == "rainfall":
+        import rainfall
+
+        try:
+            rainfall.reader_for(product)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+
     state = jobs.submit(
         area["feature"]["geometry"],
         indicator=indicator,
         label=(area["feature"].get("properties") or {}).get("NAME"),
         submitted_by=_client_host(http_request),
+        product=product if indicator == "rainfall" else None,
     )
 
     if state.get("state") == jobs.PENDING and RAINFALL_AUTORUN:
@@ -2080,6 +2108,7 @@ async def submit_rainfall(
         "submission": state,
         "cache_key": key,
         "indicator": indicator,
+        "product": product if indicator == "rainfall" else None,
         "planned": planned,
         "analysis": {
             "bbox_area_km2": round(area["bbox_area_km2"], 2),
@@ -2122,7 +2151,8 @@ def _autorun_jobs() -> None:
 
 
 @app.get("/rainfall/status")
-async def rainfall_status(cache_key: str, indicator: str = "rainfall"):
+async def rainfall_status(cache_key: str, indicator: str = "rainfall",
+                       product: str = "rainfall"):
     """State of one area's submission, without resending its polygon."""
     if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
         raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
@@ -2134,7 +2164,10 @@ async def rainfall_status(cache_key: str, indicator: str = "rainfall"):
         # reported the wrong module -- "not_submitted" when no rainfall series
         # existed, and a false "ready" when one did.
         "submission": jobs.status_for(cache_key, indicator.strip().lower() or "rainfall"),
-        "computed": rainfall_hash and rainfall_cache_present(cache_key),
+        "product": product.strip().lower() or "rainfall",
+        # Present for the product actually asked about. Asking about ERA5 while a
+        # CHIRPS job runs reports "computed" off the wrong series.
+        "computed": jobs._product_ready(cache_key, product.strip().lower() or "rainfall"),
     }
 
 

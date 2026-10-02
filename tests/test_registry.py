@@ -159,7 +159,10 @@ class SubstitutabilityTests(unittest.TestCase):
             "two products that measure the same thing must be listed under one "
             "measure, or swapping one for the other is not a registry change",
         )
-        self.assertEqual(by_measure["precipitation_total"], ["rainfall"])
+        # Two products now provide precipitation_total, which is the property the
+        # whole design exists for: choosing between them is a selection rather
+        # than a rewrite.
+        self.assertEqual(by_measure["precipitation_total"], ["chirps", "rainfall"])
 
     def test_every_product_has_a_measure_and_evidence(self):
         for product in registry.PRODUCTS.values():

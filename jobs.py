@@ -161,7 +161,7 @@ def status_for(key: str, indicator: str = "rainfall") -> dict:
     job record says, because a runner may have completed without updating the
     record.
     """
-    if indicator == "rainfall" and rainfall.read_cache(key) is not None:
+    if indicator == "rainfall" and _product_ready(key, _job_product(key)):
         return {"state": READY, "cache_key": key, "source": "cache"}
     if indicator != "rainfall" and read_artefact(key, indicator) is not None:
         return {"state": READY, "cache_key": key, "indicator": indicator,
@@ -185,6 +185,28 @@ def status_for(key: str, indicator: str = "rainfall") -> dict:
     }
 
 
+def _product_ready(key: str, product: Optional[str]) -> bool:
+    """Whether a series for this area *and product* exists.
+
+    Reading the ERA5 cache for a CHIRPS job reports ready off the wrong series,
+    and the reader is then handed a reanalysis while its evidence label claims a
+    satellite-gauge blend.
+    """
+    payload = rainfall.read_cache(key, product or "rainfall")
+    if not payload:
+        return False
+    stored = payload.get("product")
+    if stored is not None and (product or "rainfall") != stored:
+        return False
+    return True
+
+
+def _job_product(key: str) -> Optional[str]:
+    """Which product the existing job for this area was for, if any."""
+    record = read_job(key, "rainfall")
+    return (record or {}).get("product")
+
+
 def submit(
     geojson_geom: dict,
     *,
@@ -192,6 +214,7 @@ def submit(
     start: str = "2010-01-01",
     label: Optional[str] = None,
     submitted_by: Optional[str] = None,
+    product: Optional[str] = None,
 ) -> dict:
     """Record a request to compute one area. Idempotent, and never blocks.
 
@@ -202,9 +225,15 @@ def submit(
     if indicator not in INDICATORS:
         raise ValueError(f"unknown indicator {indicator!r}; choose from {INDICATORS}")
     key = rainfall.geometry_hash(geojson_geom)
+    product = (product or "rainfall").strip().lower()
     current = status_for(key, indicator=indicator)
     if current["state"] in {READY, RUNNING, PENDING}:
-        return current
+        # Two products now provide precipitation_total, so "already done" is a
+        # question about this product and not about the area. Without this, asking
+        # for CHIRPS on an area with an ERA5 series reported ready and queued
+        # nothing, and the reader was silently given ERA5.
+        if indicator != "rainfall" or _job_product(key) in (None, product):
+            return current
 
     outstanding = pending_count()
     if outstanding >= MAX_PENDING_JOBS:
@@ -226,6 +255,7 @@ def submit(
         "start": start,
         "label": label,
         "submitted_by_prefix": submitted_by,
+        "product": product,
         "attempts": 0,
     }
     # The geometry is kept so a runner can compute without the caller. It is the
@@ -338,7 +368,7 @@ async def run_pending(
             fail(key, "job record has no geometry; resubmit the area", indicator)
             failed += 1
             continue
-        if indicator == "rainfall" and rainfall.read_cache(key) is not None:
+        if indicator == "rainfall" and _product_ready(key, _job_product(key)):
             complete(key, rainfall.read_cache(key), indicator)
             skipped += 1
             continue
@@ -358,7 +388,14 @@ async def run_pending(
             progress(f"computing {indicator} for {job.get('label') or key[:12]}")
         try:
             if indicator == "rainfall":
-                union_source = source or rainfall.UnionReader(rainfall.union_grid([geometry]))
+                # Which product was asked for. A job that chose CHIRPS and got
+                # ERA5 would answer a different question from the one queued, and
+                # nothing downstream would notice because both are "rainfall".
+                product = (job.get("product") or "rainfall").strip().lower()
+                if product == "rainfall":
+                    union_source = source or rainfall.UnionReader(rainfall.union_grid([geometry]))
+                else:
+                    union_source = rainfall.reader_for(product)
                 payload = rainfall.build_and_cache(
                     geometry,
                     start=job.get("start", "2010-01-01"),

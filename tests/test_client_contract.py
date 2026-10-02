@@ -705,3 +705,56 @@ class QueuedAreaIsShownTests(unittest.TestCase):
         self.assertNotIn("void analyzeRef.current();", self.source,
                          "re-running the computation cannot work for an area that "
                          "was refused synchronously in the first place")
+
+
+class AreaEntryTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """Four ways in, ordered by how much work each saves the reader.
+
+    Naming an area was the third control in the rail, behind a place search that
+    only zooms the map and does not set an area at all. So the one input that
+    produces a ready-made boundary -- and the one a county planner or conservancy
+    manager actually types -- was the hardest to find, and finding it was three
+    controls deep in a column.
+    """
+
+    def test_naming_an_area_comes_before_the_place_search(self):
+        self.assertLess(self.source.index('id="admin-area"'),
+                        self.source.index('id="place-search"'),
+                        "the control that produces a boundary must not sit "
+                        "behind one that only zooms")
+
+    def test_it_says_what_kind_of_area_it_found(self):
+        # A county is about 780 km2 and needs the queue; a sub-county may not.
+        # Learning that from a 100 km2 limit and an "offline" panel is a worse
+        # way to find out than being told at the moment of naming it.
+        self.assertIn("toLocaleString()} km²", self.source)
+        self.assertIn("too large to read live", self.source,
+                      "a county is an obvious oversized case and should not be "
+                      "presented as a limit to reason about")
+
+    def test_the_rainfall_product_is_a_choice_with_a_reason(self):
+        # ERA5 and CHIRPS differ in resolution, freshness and evidence class, so
+        # the selector has to say which is which rather than list two names.
+        self.assertIn('id="rain-product"', self.source)
+        for phrase in ("ERA5 · 28 km · modelled", "CHIRPS · 5.6 km · observed"):
+            self.assertIn(phrase, self.source)
+
+    def test_choosing_chirps_explains_what_it_costs_and_gains(self):
+        self.assertIn("satellite-and-gauge blend", self.source)
+        self.assertIn("five months fresher", self.source)
+        self.assertIn("reads 0–24% higher", self.source,
+                      "the measured difference is the reason to offer both")
+
+    def test_every_rainfall_call_carries_the_product(self):
+        # A request that chose CHIRPS and a worker that computed ERA5 would answer
+        # a different question from the one queued.
+        body = self.source
+        self.assertGreaterEqual(
+            body.count("product: rainProduct"), 4,
+            "submit, plan, the in-card submit and the status poll must all carry "
+            "the product; a missing one means a reader is served the other "
+            "product's series")

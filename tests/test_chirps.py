@@ -1,0 +1,227 @@
+"""CHIRPS, as a second product for the same measure.
+
+Two things this file exists to prevent, both of which fail silently:
+
+**Two products, one cache key.** A cache keyed on the area hash alone means ERA5
+and CHIRPS for the same area collide, and a reader who asked for CHIRPS is served
+whichever was written first. That is the worst shape of wrong answer: the number
+looks right, the evidence label says "observed", and it is a 0.25 degree reanalysis.
+
+**A gap read as a drought.** The published DEA archive is missing 2023-12,
+2024-07 and 2024-08 -- verified by direct probe, each returning 404. A reader
+that absorbs a hole produces a series with a zero in it, and a zero in a rainfall
+series is a drought that never happened.
+"""
+
+import json
+import unittest
+
+import rainfall
+import registry
+
+
+class CacheIdentityTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    KEY = "a" * 32
+    V = rainfall.RAINFALL_PROCESSING_VERSION
+
+    def test_the_two_products_do_not_collide(self):
+        rainfall.write_cache(self.KEY, {"product": "rainfall",
+                                         "processing_version": self.V, "series": []})
+        rainfall.write_cache(self.KEY, {"product": "chirps",
+                                         "processing_version": self.V,
+                                         "series": [{"month": "2026-01"}]},
+                             product="chirps")
+        self.assertEqual(rainfall.read_cache(self.KEY)["product"], "rainfall")
+        self.assertEqual(rainfall.read_cache(self.KEY, "chirps")["product"], "chirps")
+
+    def test_the_default_product_keeps_its_original_filename(self):
+        # An existing portfolio must not be orphaned by a layout change nobody
+        # asked for.
+        self.assertEqual(rainfall.cache_path(self.KEY).name, f"{self.KEY}.json")
+        self.assertEqual(rainfall.cache_path(self.KEY, "chirps").name,
+                         f"{self.KEY}-chirps.json")
+
+    def test_an_older_file_without_a_product_tag_still_reads_as_era5(self):
+        rainfall.cache_path(self.KEY).write_text(
+            json.dumps({"processing_version": self.V, "series": []}))
+        self.assertIsNotNone(rainfall.read_cache(self.KEY))
+        self.assertIsNone(rainfall.read_cache(self.KEY, "chirps"),
+                          "an ERA5 file must not be served to someone who asked "
+                          "for CHIRPS")
+
+
+class SourceTests(unittest.TestCase):
+    def test_a_source_is_named_rather_than_passed_as_a_callable(self):
+        # Call sites -- a request, a job, the precompute -- would each decide
+        # which product to read, and that is how a request ends up answering a
+        # different question from the one a job was queued for.
+        self.assertIsNone(rainfall.reader_for("rainfall"))
+        self.assertEqual(rainfall.reader_for("chirps").__name__,
+                         "chirps_cell_monthly")
+
+    def test_an_unknown_source_names_the_ones_that_exist(self):
+        with self.assertRaises(ValueError) as caught:
+            rainfall.reader_for("smoke-signals")
+        self.assertIn("rainfall, chirps", str(caught.exception))
+
+
+class RegistryTests(unittest.TestCase):
+    def test_it_is_a_second_producer_of_the_same_measure(self):
+        # This is the substitutability the registry was built for: two products,
+        # one measure, so choosing between them is a selection rather than a
+        # rewrite.
+        self.assertEqual(registry.measures()["precipitation_total"],
+                         ["chirps", "rainfall"])
+
+    def test_it_earns_observed_where_era5_is_modelled(self):
+        # It is a satellite-and-gauge blend, not a model output. Calling it
+        # modelled would understate it; calling ERA5 observed would overstate it.
+        self.assertEqual(registry.RAINFALL_CHIRPS.evidence, registry.OBSERVED)
+        self.assertEqual(registry.RAINFALL.evidence, registry.MODELLED)
+
+    def test_it_is_meaningful_where_era5_is_not(self):
+        # 0.05 deg against 0.25. ERA5's meaningful floor is one 774 km2 cell;
+        # CHIRPS at 31 km2 is about a small area, which is the case most study
+        # areas are.
+        self.assertLess(registry.RAINFALL_CHIRPS.meaningful_min_km2,
+                        registry.RAINFALL.meaningful_min_km2)
+
+    def test_the_archive_holes_are_stated_on_the_product(self):
+        # A caveat a reader never sees is not a caveat.
+        caveats = " ".join(registry.RAINFALL_CHIRPS.caveats)
+        self.assertIn("2023-12", caveats)
+        self.assertIn("missing month is not a dry month", caveats.lower()
+                      .replace("a missing", "missing"))
+
+    def test_the_measured_difference_from_era5_is_stated(self):
+        caveats = " ".join(registry.RAINFALL_CHIRPS.caveats)
+        self.assertIn("92%", caveats)
+        self.assertIn("24%", caveats)
+
+
+class GapReportingTests(unittest.TestCase):
+    def test_unreadable_months_are_returned_not_absorbed(self):
+        # The reader is exercised against the published gaps by asking for a span
+        # that includes one. It is slow, so it is skipped without network access.
+        import os
+
+        if os.getenv("CHIRPS_LIVE") != "1":
+            self.skipTest("set CHIRPS_LIVE=1 to read the published archive")
+        grid = {"longitudes": [37.75], "latitudes": [1.25],
+                "lon_step": 0.25, "lat_step": 0.25}
+        _, _, coverage = rainfall.chirps_cell_monthly(grid, "2024-06-01", "2024-09-01")
+        self.assertEqual(coverage["source"], "chirps-v2.0")
+        self.assertIn("2024-07-01", coverage["unreadable_months"])
+        self.assertIn("2024-08-01", coverage["unreadable_months"])
+
+
+class ApiPlumbingTests(unittest.TestCase):
+    """The product has to survive the whole path, or the choice is decorative.
+
+    Request to job record to worker to cache to reader. A break anywhere leaves a
+    reader who asked for CHIRPS being served ERA5, which is the one outcome this
+    work exists to prevent.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.client = _client()
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    KEY = "a" * 32
+    AOI = {"type": "Feature", "properties": {},
+           "geometry": {"type": "Polygon",
+                        "coordinates": [[[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+                                         [37.70, 1.30], [37.70, 1.20]]]}}
+
+    def test_each_product_gets_its_own_evidence_class(self):
+        import main
+
+        rainfall.write_cache(self.KEY, {
+            "product": "chirps",
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2026-01", "precip_mm": 10.0}]}, product="chirps")
+        rainfall.write_cache(self.KEY, {
+            "product": "rainfall",
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2026-01", "precip_mm": 1.0}]})
+        self.assertEqual(main._rainfall_by_key(self.KEY, "chirps")["evidence"]["status"],
+                         "observed")
+        self.assertEqual(main._rainfall_by_key(self.KEY, "rainfall")["evidence"]["status"],
+                         "modelled")
+
+    def test_a_submission_records_the_product_it_was_given(self):
+        import os
+
+        os.environ["RAINFALL_AUTORUN"] = "0"
+        response = self.client.post(
+            "/rainfall/submit", json={"geojson": self.AOI, "product": "chirps"})
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        self.assertEqual(response.json()["product"], "chirps")
+        import jobs
+
+        self.assertEqual(jobs._job_product(response.json()["cache_key"]), "chirps")
+
+    def test_an_unknown_product_is_refused_with_the_ones_that_exist(self):
+        response = self.client.post(
+            "/rainfall/submit", json={"geojson": self.AOI, "product": "smoke-signals"})
+        self.assertEqual(response.status_code, 422)
+        self.assertIn("rainfall, chirps", response.json()["detail"])
+
+    def test_the_status_route_reports_the_product_asked_about(self):
+        import jobs
+
+        jobs.write_job({"cache_key": self.KEY, "indicator": "rainfall",
+                        "product": "chirps", "state": "pending",
+                        "submitted_at": "2026-09-28T00:00:00+00:00"})
+        body = self.client.get(
+            f"/rainfall/status?cache_key={self.KEY}&product=chirps").json()
+        self.assertEqual(body["product"], "chirps")
+        # An ERA5 series must not make a CHIRPS job look finished.
+        rainfall.write_cache(self.KEY, {
+            "product": "rainfall",
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": []})
+        self.assertFalse(
+            self.client.get(f"/rainfall/status?cache_key={self.KEY}&product=chirps")
+            .json()["computed"])
+
+
+def _client():
+    from fastapi.testclient import TestClient
+
+    import main
+
+    return TestClient(main.app)

@@ -287,9 +287,46 @@ VEGETATION_SERIES = Product(
     ),
 )
 
+# The second producer of `precipitation_total`. Two products in one measure is
+# what makes the choice meaningful rather than a preference: a reader can see
+# both, and the difference between them is the useful part.
+RAINFALL_CHIRPS = Product(
+    key="chirps",
+    label="Rainfall (CHIRPS)",
+    measure="precipitation_total",
+    units="mm",
+    native_grid_degrees=0.05,
+    # 0.05 deg is about 31 km2 at this latitude, so unlike ERA5 the measure is
+    # about a small area rather than about a cell that happens to contain one.
+    meaningful_min_km2=1.0,
+    meaningful_max_km2=None,
+    latency_days="30-60",
+    evidence=OBSERVED,
+    cost=COMPUTED,
+    source="CHIRPS v2.0 (satellite and gauge, 0.05 degrees), via Digital Earth Africa",
+    doi="10.1038/sdata.2015.66",
+    caveats=(
+        "A satellite-and-gauge blend rather than a reanalysis, so it earns an "
+        "observed class where ERA5 is modelled.",
+        "0.05 degrees, against ERA5's 0.25. A small study area is described by "
+        "one CHIRPS cell rather than by a cell covering about 774 km2.",
+        "The published archive has holes -- 2023-12, 2024-07 and 2024-08 are "
+        "absent -- so months that could not be read are listed rather than "
+        "omitted. A missing month is not a dry month.",
+        "Measured against ERA5 over three Kenyan cells across 120 months, "
+        "CHIRPS reads 0%, 16% and 24% higher, the difference growing as the land "
+        "gets drier, while 92% of months agree on the sign of the anomaly. The "
+        "two are complementary, not interchangeable.",
+    ),
+    fails_with=(
+        ("not_computed", "No CHIRPS series has been processed for this boundary yet."),
+    ),
+)
+
 PRODUCTS: dict[str, Product] = {
     p.key: p for p in (
-        ELEVATION, LANDCOVER, VEGETATION, RAINFALL, VEGETATION_SERIES,
+        ELEVATION, LANDCOVER, VEGETATION, RAINFALL, RAINFALL_CHIRPS,
+        VEGETATION_SERIES,
     )
 }
 

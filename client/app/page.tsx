@@ -868,6 +868,10 @@ export default function Home() {
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
   const [selectedSensor, setSelectedSensor] = useState('auto');
+  // Which precipitation product. Two providers for one measure, differing in
+  // resolution, freshness and evidence class -- so it is a choice with a reason,
+  // not a preference, and the reader is told what the choice costs.
+  const [rainProduct, setRainProduct] = useState<'rainfall' | 'chirps'>('rainfall');
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
@@ -1062,9 +1066,19 @@ export default function Home() {
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
       setAdminQuery('');
+      // Say what kind of thing this is while the reader is still looking at the
+      // control that chose it. A county is about 780 km2 and needs the queue;
+      // a sub-county may not. Finding that out from a 100 km2 limit and an
+      // "offline" panel is a worse way to learn it than being told.
+      const km2 = Math.round(area.area_km2 ?? 0);
+      const level = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
+        ?? `level ${area.level ?? '?'}`;
       toast({
-        title: 'Area set',
-        description: `${area.name} — administrative level ${area.level ?? '?'}, from the boundary service.`,
+        title: `${area.name} — ${km2.toLocaleString()} km²`,
+        description: km2 > (syncLimitKm2 ?? 100)
+          ? `That is the whole ${level}, too large to read live, so it is read offline at a coarser resolution and you will be told which. The map has moved to it.`
+          : `A ${level}, small enough to read live. The map has moved to it.`,
+        duration: 9000,
       });
     } catch (error) {
       toast({
@@ -1294,7 +1308,7 @@ export default function Home() {
       const response = await fetch(`${backendUrl}/rainfall/submit?${query.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ geojson, indicator }),
+        body: JSON.stringify({ geojson, indicator, product: rainProduct }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -1337,7 +1351,11 @@ export default function Home() {
       const response = await fetch(`${backendUrl}/rainfall/plan?${query.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ geojson, indicator: selectedDatasets.join(',') }),
+        body: JSON.stringify({
+          geojson,
+          indicator: selectedDatasets.join(','),
+          product: rainProduct,
+        }),
       });
       if (!response.ok) return;
       const body = await response.json();
@@ -1440,7 +1458,7 @@ export default function Home() {
       let data: { submission?: Record<string, unknown> } = {};
       try {
         const response = await fetch(
-          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}`,
+          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}&product=${rainProduct}`,
         );
         if (response.ok) data = await response.json();
       } catch {
@@ -1643,7 +1661,7 @@ export default function Home() {
       const response = await fetch(`${backendUrl}/rainfall/submit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ geojson }),
+        body: JSON.stringify({ geojson, product: rainProduct }),
       });
       const data = await response.json();
       if (!response.ok) {
@@ -1706,7 +1724,7 @@ export default function Home() {
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ geojson }),
+        body: JSON.stringify({ geojson, product: rainProduct }),
       });
 
       if (!response.ok) {
@@ -1885,14 +1903,56 @@ export default function Home() {
                   Choose your area
                 </h2>
                 <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">
-                  Search a place, draw on the map, or bring your own boundary.
+                  Name it, find a place, draw on the map, or bring your own
+                  boundary.
                 </p>
               </div>
 
+              {/* Naming an area leads. It is what a county planner, a
+                  conservancy manager and anyone with a boundary already knows
+                  their area by name actually types, and it was the third control
+                  in the rail behind a place search that only zooms -- so the one
+                  input that produces a ready-made boundary was the hardest to
+                  find. The four ways in are now ordered by how much work they save
+                  the reader. */}
+              <div className="px-5 pt-5">
+                <Label htmlFor="admin-area" className="label mb-2.5 block">
+                  Name your area
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="admin-area"
+                    type="text"
+                    placeholder="Narok, Isiolo, Meru…"
+                    value={adminQuery}
+                    onChange={(e) => setAdminQuery(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }}
+                  />
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={adminBusy || adminQuery.trim().length === 0}
+                    onClick={() => void resolveAdminArea()}
+                  >
+                    {adminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Find'}
+                  </Button>
+                </div>
+                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                  A county, district or region. You get its exact boundary and
+                  the map moves to it.
+                </p>
+                {adminArea && (
+                  <p className="fig mt-2 text-xs text-ink-2">
+                    Using {adminArea.name}, administrative level {adminArea.level}.
+                    Its outline is the whole unit, not something you drew.
+                  </p>
+                )}
+              </div>
+
               {/* Search */}
-              <div className="px-5 py-5">
+              <div className="rule-t px-5 py-5">
                 <Label htmlFor="place-search" className="label mb-2.5 block">
-                  Find a place
+                  Or find a place
                 </Label>
                 <div className="relative">
                   <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
@@ -1929,44 +1989,15 @@ export default function Home() {
                 )}
               </div>
 
-              {/* Administrative area by name */}
+              {/* The other direction. Having drawn something, it is worth knowing
+                  which administrative unit it sits in -- and worth being able to
+                  adopt that unit, because a conservancy's drought is a question
+                  about the whole unit rather than about the 60 km2 someone
+                  circled. Offered, never automatic: snapping replaces the outline
+                  the person drew. */}
               <div className="rule-t px-5 py-5">
-                <Label htmlFor="admin-area" className="label mb-2.5 block">
-                  Or name the area
-                </Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="admin-area"
-                    type="text"
-                    placeholder="Narok, Isiolo, Kajiado…"
-                    value={adminQuery}
-                    onChange={(e) => setAdminQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }}
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={adminBusy || adminQuery.trim().length === 0}
-                    onClick={() => void resolveAdminArea()}
-                  >
-                    {adminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Find'}
-                  </Button>
-                </div>
-                {adminArea && (
-                  <p className="fig mt-2 text-xs text-ink-2">
-                    Using {adminArea.name}, administrative level {adminArea.level}.
-                    Its outline is the whole unit, not something you drew.
-                  </p>
-                )}
-
-                {/* The other direction. Having drawn something, it is worth
-                    knowing which administrative unit it sits in -- and worth
-                    being able to adopt that unit, because a conservancy's
-                    drought is a question about the whole unit rather than about
-                    the 60 km2 someone circled. Offered, never automatic:
-                    snapping replaces the outline the person drew. */}
                 {drawnInfo && !adminArea && (
-                  <div className="mt-3 rule-t pt-3">
+                  <div>
                     <Button
                       size="sm"
                       variant="outline"
@@ -2100,9 +2131,34 @@ export default function Home() {
                   </div>
 
                   <div>
+                    {/* Which precipitation product. Not a preference: they differ
+                        in resolution, freshness and evidence class, and the reader
+                        is told what choosing costs. */}
+                    <div className="mb-2.5 flex items-center gap-2">
+                      <Label htmlFor="rain-product" className="text-[0.8125rem] text-ink-2">
+                        Rainfall source
+                      </Label>
+                      <select
+                        id="rain-product"
+                        value={rainProduct}
+                        onChange={(e) => setRainProduct(e.target.value as 'rainfall' | 'chirps')}
+                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+                      >
+                        <option value="rainfall">ERA5 · 28 km · modelled</option>
+                        <option value="chirps">CHIRPS · 5.6 km · observed</option>
+                      </select>
+                    </div>
+                    <p className="text-[0.75rem] leading-relaxed text-ink-3">
+                      {rainProduct === 'chirps'
+                        ? 'CHIRPS is a satellite-and-gauge blend at 0.05°, so a small area is described by one 5.6 km cell rather than by a cell covering about 780 km². It is about five months fresher than ERA5. Measured against ERA5 here it reads 0–24% higher, the difference growing as the land gets drier.'
+                        : 'ERA5 is a reanalysis at 0.25°. It is modelled output, not a gauge reading, and below about 780 km² the figure is one grid cell rather than this outline. CHIRPS is finer, fresher and classified observed — switch above if your area is small.'}
+                    </p>
+                  </div>
+
+                  <div>
                     <div className="mb-2.5 flex items-center gap-2">
                       <Label htmlFor="vegetation-source" className="text-[0.8125rem] text-ink-2">
-                        Source
+                        Vegetation source
                       </Label>
                       <select
                         id="vegetation-source"
