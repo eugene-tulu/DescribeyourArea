@@ -14,6 +14,8 @@ from rasterio.windows import Window, transform as window_transform
 import numpy as np
 import planetary_computer
 import datetime
+import threading
+import time
 from collections import Counter
 import pystac_client
 import asyncio
@@ -1390,6 +1392,42 @@ async def _timed(timer, coroutine):
         timer.__exit__(None, None, None)
 
 
+# A rate limit on the resolver, which is the one public endpoint that costs us a
+# round trip to somebody else's service. Free and unauthenticated, a single
+# unknown person could otherwise drive it all day. Counting by the caller's own
+# prefix -- not by the proxy -- so a forged header cannot buy extra calls.
+#
+# In-process and fixed-window, which is enough for a single-worker guard against
+# a script and useless against a distributed one. It is a speed bump, not a
+# defence, and is described that way rather than as protection.
+RESOLVE_RATE_LIMIT = _env_int("RESOLVE_RATE_LIMIT", 30)
+RESOLVE_RATE_WINDOW_SECONDS = _env_int("RESOLVE_RATE_WINDOW_SECONDS", 60)
+_resolve_hits: dict[str, list[float]] = {}
+_resolve_lock = threading.Lock()
+
+
+def _rate_limit_resolve(client: Optional[str]) -> None:
+    """Refuse the caller who is asking too often, and say when they may retry."""
+    key = client or "unknown"
+    now = time.time()
+    with _resolve_lock:
+        recent = [t for t in _resolve_hits.get(key, []) if now - t < RESOLVE_RATE_WINDOW_SECONDS]
+        if len(recent) >= RESOLVE_RATE_LIMIT:
+            retry = max(1, int(RESOLVE_RATE_WINDOW_SECONDS - (now - recent[0]))) if recent else RESOLVE_RATE_WINDOW_SECONDS
+            raise HTTPException(
+                status_code=429,
+                detail=f"too many lookups; try again in {retry} seconds",
+                headers={"Retry-After": str(retry)})
+        recent.append(now)
+        _resolve_hits[key] = recent
+        # Bound the table so a long-running process cannot accumulate a key per
+        # address that ever called.
+        if len(_resolve_hits) > 4096:
+            for stale in [k for k, v in _resolve_hits.items()
+                          if not v or now - v[-1] > RESOLVE_RATE_WINDOW_SECONDS]:
+                _resolve_hits.pop(stale, None)
+
+
 def _client_host(http_request) -> Optional[str]:
     """The caller's address, not the proxy's.
 
@@ -2340,6 +2378,7 @@ async def plan_a_question(
 
 @app.get("/areas/resolve")
 async def resolve_study_area(
+    http_request: Request,
     id: Optional[str] = None,
     level: Optional[int] = None,
     country: Optional[str] = None,
@@ -2365,6 +2404,7 @@ async def resolve_study_area(
     """
     import areas
 
+    _rate_limit_resolve(_client_host(http_request))
     try:
         resolver = areas.GaulResolver()
         # A single free-text name is the common case from the interface, and it
@@ -2384,6 +2424,61 @@ async def resolve_study_area(
     except areas.ResolverError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return area.describe()
+
+
+@app.get("/context")
+async def context_for_key(cache_key: str, indicators: Optional[str] = None):
+    """A completed area's reading, assembled from the artefacts the worker wrote.
+
+    `/generate-context` computes, and refuses anything past the synchronous cap --
+    correctly, because a live read of 14,000 km2 takes minutes. So a queued area
+    had no way to be *shown* once its jobs finished: the page re-ran the
+    computation, got the same refusal, and displayed an error over four completed
+    results. Queueing a large area produced work and no output.
+
+    This reads what the worker already stored and assembles the same summary
+    shape, so the interface is identical whether an area was read live or queued.
+    Nothing is computed here; a missing artefact is reported as missing rather
+    than fetched.
+    """
+    import jobs
+    import rainfall
+
+    if not re.fullmatch(r"[0-9a-f]{32}", (cache_key or "").strip()):
+        raise HTTPException(status_code=422,
+                            detail="cache_key must be 32 hexadecimal characters")
+    key = cache_key.strip()
+    wanted = [p.strip() for p in (indicators or "dem,landcover,ndvi,rainfall").split(",")
+              if p.strip()]
+
+    modules: dict = {}
+    missing: list[str] = []
+    for name in wanted:
+        artefact = jobs.read_artefact(key, name)
+        if not artefact or artefact.get("status") not in ("ok", "ready"):
+            missing.append(name)
+            continue
+        modules[name] = with_evidence(name, artefact)
+
+    if not modules:
+        raise HTTPException(
+            status_code=404,
+            detail=f"nothing has been computed for this area yet "
+                   f"(missing or incomplete: {', '.join(missing) or 'unknown'})")
+
+    summary = {
+        **modules,
+        "analysis": {"mode": "from computed artefacts", "datasets": sorted(modules)},
+        "caveats": _caveats({"feature": {}}, modules.get("dem"),
+                             modules.get("landcover"), modules.get("ndvi"),
+                             modules.get("rainfall")),
+    }
+    if missing:
+        summary["caveats"].append(
+            f"Not yet available: {', '.join(missing)}. The rest of the reading is "
+            f"shown; the rest is still being computed.")
+    return ContextResponse(summary=summary).model_dump(
+        exclude_none=True, exclude_defaults=False)
 
 
 @app.get("/analytics/summary")

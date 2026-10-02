@@ -34,12 +34,54 @@ interface MapComponentProps {
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
 }
 
+/** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
+ *
+ * Handles the shapes a study area can actually be -- Polygon, MultiPolygon and
+ * FeatureCollection of either -- because a named administrative boundary may
+ * arrive as any of the three, and a fit that silently does nothing for two of them
+ * is the same defect as no fit at all.
+ */
+function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, number]] | null {
+  const positions: number[][] = [];
+  const walk = (node: unknown): void => {
+    if (!Array.isArray(node)) return;
+    if (typeof node[0] === "number" && typeof node[1] === "number") {
+      positions.push(node as number[]);
+      return;
+    }
+    node.forEach(walk);
+  };
+  const collect = (g: unknown): void => {
+    if (!g || typeof g !== "object") return;
+    const geo = g as { type?: string; coordinates?: unknown; geometries?: unknown[] };
+    if (geo.type === "FeatureCollection" && Array.isArray(geo.geometries)) {
+      geo.geometries.forEach(collect);
+      return;
+    }
+    const geometry = (g as { geometry?: unknown }).geometry;
+    if (geo.type === "Feature" && geometry) {
+      collect(geometry);
+      return;
+    }
+    walk(geo.coordinates);
+  };
+  collect(geojson);
+  if (!positions.length) return null;
+  const lats = positions.map((p) => p[1]);
+  const lngs = positions.map((p) => p[0]);
+  return [
+    [Math.min(...lats), Math.min(...lngs)],
+    [Math.max(...lats), Math.max(...lngs)],
+  ];
+}
+
 function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Created {
   return "layer" in event && "layerType" in event;
 }
 
 function MapController({
   selectedLocation,
+  uploadedGeoJSON,
   onBoundingBoxCreated,
   onSaveFeatures,
 }: MapComponentProps) {
@@ -126,6 +168,20 @@ function MapController({
       map.setView([selectedLocation.lat, selectedLocation.lng], 12);
     }
   }, [selectedLocation, map]);
+
+  // Move the map to an area that was named rather than drawn.
+  //
+  // Naming "Meru" set the outline and nothing else, so a county appeared
+  // somewhere on the globe and the reader was left to find it -- on the one
+  // place they had just asked about by name, which is the last thing anyone
+  // should be expected to do. It also meant the offline offer, the size and the
+  // boundary were all true and all off-screen.
+  useEffect(() => {
+    if (!uploadedGeoJSON) return;
+    const bounds = boundsOf(uploadedGeoJSON);
+    if (!bounds) return;
+    map.fitBounds(bounds, { padding: [36, 36], maxZoom: 11 });
+  }, [uploadedGeoJSON, map]);
 
   useEffect(() => {
     // Graticule lives in its own effect with no handler dependencies. It used to be
@@ -241,6 +297,7 @@ export default function MapComponent({
 
         <MapController
           selectedLocation={selectedLocation}
+          uploadedGeoJSON={uploadedGeoJSON}
           onBoundingBoxCreated={onBoundingBoxCreated}
           onSaveFeatures={onSaveFeatures}
         />

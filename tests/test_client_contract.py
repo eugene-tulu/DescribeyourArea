@@ -375,7 +375,10 @@ class UserFacingSurfaceTests(unittest.TestCase):
     def test_a_finished_job_fetches_its_result(self):
         # The progress line said "Done" while the card still said no series had
         # been processed, and only pressing Analyze again showed the work.
-        self.assertIn("analyzeRef.current()", self.source,
+        # It used to re-run /generate-context, which is refused for any area
+        # past the synchronous cap -- so a queued large area produced completed
+        # work and an error on screen. It now reads the stored result.
+        self.assertIn("showComputedResult", self.source,
                       "a job that reaches ready does not load its result")
 
     def test_errors_render_as_errors(self):
@@ -648,3 +651,57 @@ class AnalysisBlockTests(unittest.TestCase):
 
     def test_the_type_carries_it(self):
         self.assertIn("bbox?: number[];", self.source)
+
+
+class MapFitTests(unittest.TestCase):
+    """Naming an area has to move the map to it.
+
+    Naming "Meru" set the outline and nothing else, so a county appeared
+    somewhere on the globe and the reader was left to find it -- on the one place
+    they had just asked about by name. The size, the boundary and the offline
+    offer were all true and all off-screen.
+    """
+
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "components" / "MapComponent.tsx").read_text(
+            encoding="utf-8")
+
+    def test_the_map_fits_a_named_boundary(self):
+        self.assertIn("fitBounds", self.source,
+                      "a named area renders as an outline the map never moves to")
+
+    def test_it_handles_the_shapes_an_admin_boundary_arrives_as(self):
+        # Polygon, MultiPolygon and FeatureCollection. A fit that silently does
+        # nothing for two of the three is the same defect as no fit at all.
+        self.assertIn("MultiPolygon", self.source)
+        self.assertIn("FeatureCollection", self.source)
+
+    def test_the_boundary_reaches_the_component_that_has_the_map(self):
+        # useMap lives in the inner controller, so the prop has to be threaded to
+        # it rather than used by the outer component.
+        self.assertIn("uploadedGeoJSON={uploadedGeoJSON}", self.source)
+
+    def test_it_does_not_zoom_to_the_point_layer(self):
+        # Search zooms to a place; a named area zooms to its extent. Confusing
+        # the two makes a county land at street zoom.
+        self.assertIn("maxZoom: 11", self.source)
+
+
+class QueuedAreaIsShownTests(unittest.TestCase):
+    """A queued area must be able to display its results.
+
+    The re-fetch on ready re-ran /generate-context, which refuses anything past
+    the synchronous cap -- so queueing Meru produced four completed modules and an
+    error. Found by the person who tried it.
+    """
+
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    def test_a_ready_job_reads_the_stored_result_rather_than_recomputing(self):
+        self.assertIn("showComputedResult", self.source)
+        self.assertNotIn("void analyzeRef.current();", self.source,
+                         "re-running the computation cannot work for an area that "
+                         "was refused synchronously in the first place")

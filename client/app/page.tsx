@@ -1367,6 +1367,38 @@ export default function Home() {
 
   // The monthly vegetation series lives in its own artefact, keyed by area, so it
   // is fetched after the summary rather than returned inside it.
+  /** Show a finished reading from the artefacts the worker wrote.
+   *
+   * `/generate-context` refuses anything past the synchronous cap, and it always
+   * will -- so re-running it to display a queued area's results returned the same
+   * refusal and the page showed an error over four completed modules. This reads
+   * what exists, which is the same summary the synchronous path returns, so the
+   * interface does not need to know how the area was read.
+   */
+  async function showComputedResult(cacheKey: string | null) {
+    if (!cacheKey) return;
+    try {
+      const response = await fetch(
+        `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || `could not read the stored result (${response.status}).`);
+      }
+      const data = await response.json() as { summary?: Summary };
+      const summary = data.summary || {};
+      setAnalysisSummary(summary);
+      setAnalysisWarnings([]);
+      const result = summarizeData(summary);
+      setResponse(result);
+      setSummaryText(result);
+      setActiveCacheKey(cacheKey);
+      void loadVegetationSeries(cacheKey);
+    } catch (error) {
+      setResponse('Error: ' + (error instanceof Error ? error.message : 'could not read the stored result.'));
+      setSummaryText(response);
+    }
+  }
+
   async function loadVegetationSeries(cacheKey: string) {
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     try {
@@ -1435,7 +1467,11 @@ export default function Home() {
           // and press Analyze again. The work is already done; showing it is the
           // last step, and skipping it is the difference between a queue and a
           // black hole.
-          void analyzeRef.current();
+          // Show the finished reading. A queued area cannot be re-computed --
+          // it was refused synchronously and would be refused again -- so the
+          // artefacts the worker just wrote are assembled instead. Before this
+          // a large area could be queued, completed, and still shown an error.
+          void showComputedResult(activeCacheKey);
         }
         return;
       }
