@@ -439,6 +439,16 @@ class CardHonestyTests(unittest.TestCase):
                       "freshness is computed and then hidden; the rainfall data is "
                       "months older than the vegetation beside it")
 
+    def test_the_series_end_is_where_the_data_stops_not_where_the_window_ends(self):
+        # The first version read window.end, so a window ending this month claimed
+        # the series ran to this month when the newest ERA5 month is six months
+        # behind. That is the same overstatement the line was added to remove,
+        # introduced by the fix for it. Found by reading the browser output.
+        body = self.source.split("series ends")[0][-400:]
+        self.assertNotIn("rain.window?.end.slice", body,
+                         "the card must not report the requested window as the "
+                         "end of the data")
+
     def test_the_card_states_the_grid_the_number_came_from(self):
         self.assertIn("grid cell", self.source)
         self.assertIn("resolution_km", self.source)

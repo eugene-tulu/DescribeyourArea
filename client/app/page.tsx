@@ -752,7 +752,14 @@ function DatasetResultCard({
           {rain.grid_cells != null
             ? `${rain.grid_cells} ERA5 grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? 27.8} km`
             : `ERA5 grid of ${rain.resolution_km ?? 27.8} km`}
-          {rain.window?.end ? ` · series ends ${rain.window.end.slice(0, 7)}` : ''}
+          {(() => {
+            // The month the data actually stops, not the end of the window that
+            // was asked for. Reading window.end claimed a series ran to today
+            // when the newest ERA5 month is six months behind -- which is the
+            // exact confusion this line exists to remove.
+            const last = (rain.series || []).at(-1)?.month;
+            return last ? ` · series ends ${last.slice(0, 7)}` : '';
+          })()}
           {rain.label ? ` · ${rain.label}` : ''}
         </p>
         {overSpecified(rain) && (
