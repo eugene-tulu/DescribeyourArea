@@ -162,6 +162,11 @@ class RainfallResult(BaseModel):
 
 class AnalysisMetadata(BaseModel):
     bbox_area_km2: Optional[float] = None
+    # The box itself, so a client can ask a boundary service what this outline
+    # sits inside without measuring it a second time. Declared here because the
+    # response is typed and Pydantic drops fields the model does not declare --
+    # so adding it to the payload alone put it nowhere.
+    bbox: Optional[List[float]] = None
     datasets: List[str] = Field(default_factory=list)
     mode: str = "synchronous"
     # The resolution actually used, which for a large area is not the native one.

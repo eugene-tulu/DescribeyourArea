@@ -582,7 +582,7 @@ class ContainingUnitTests(unittest.TestCase):
     def test_adopting_a_unit_is_offered_rather_than_done(self):
         # Snapping replaces the outline the person drew. Doing that unasked would
         # be the resolver overwriting a decision the reader made.
-        self.assertIn("useContainingArea", self.source)
+        self.assertIn("adoptContainingArea", self.source)
         self.assertIn("Which unit is this in?", self.source)
 
     def test_it_states_both_sizes_when_offering(self):
@@ -613,3 +613,38 @@ class LowVegetationTests(unittest.TestCase):
         # a literal search for it fails on the wrap rather than on the copy.
         self.assertIn("reading as uncertain rather than as bare",
                       " ".join(self.source.split()))
+
+
+class AnalysisBlockTests(unittest.TestCase):
+    @property
+    def source(self) -> str:
+        return (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+
+    """The box has to survive two layers that both drop it silently.
+
+    It is added to the payload, and it is declared on a typed response model. Add
+    it to only one and it goes nowhere: Pydantic drops undeclared fields, so the
+    payload carried it and the client never saw it. Both layers are checked here
+    because either can regress alone and the symptom is identical -- a value that
+    is computed, published, and absent.
+    """
+
+    def test_the_contract_declares_the_box(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent / "contract.py").read_text()
+        self.assertIn("bbox: Optional[List[float]] = None", source,
+                      "the response is typed and Pydantic drops undeclared "
+                      "fields, so a payload-only change publishes nothing")
+
+    def test_the_client_reads_it_from_inside_summary(self):
+        # It was read at the top level of the response for a while, where the
+        # analysis block has never lived, so the containing-unit offer never
+        # appeared. Found by driving the page.
+        body = self.source.split("const analysis = data.summary?.analysis")[1][:400] \
+            if "const analysis = data.summary?.analysis" in self.source else ""
+        self.assertTrue(body, "the client must read the analysis block from summary")
+        self.assertIn("analysis?.bbox", body)
+
+    def test_the_type_carries_it(self):
+        self.assertIn("bbox?: number[];", self.source)

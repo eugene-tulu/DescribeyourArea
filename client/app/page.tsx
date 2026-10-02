@@ -273,6 +273,8 @@ interface RainfallResult {
 
 interface AnalysisMetadata {
   bbox_area_km2?: number;
+  /** The box, so "which unit is this in?" needs no second measurement. */
+  bbox?: number[];
   datasets?: string[];
   mode?: string;
   applied_resolution_m?: Record<string, number>;
@@ -1016,7 +1018,7 @@ export default function Home() {
   };
 
   /** Adopt the containing unit, replacing the drawn outline with it. */
-  const useContainingArea = async () => {
+  const adoptContainingArea = async () => {
     if (!containingArea?.id) return;
     setContainingBusy(true);
     try {
@@ -1686,14 +1688,18 @@ export default function Home() {
         throw new Error(failure?.detail || `Analysis request failed (${response.status}).`);
       }
 
-      const data = await response.json() as { summary?: Summary; analysis?: { bbox?: number[]; bbox_area_km2?: number } };
+      const data = await response.json() as { summary?: Summary };
+      // The analysis block lives *inside* summary. Read at the top level it was
+      // always undefined, which is why the containing-unit offer never appeared
+      // -- found by driving the page rather than by reading the payload shape.
       // Remember where this outline is, so "which administrative unit is this?"
       // can be asked from the server's own figure rather than a second estimate
       // of the same outline made in the browser.
-      const box = data.analysis?.bbox;
-      if (Array.isArray(box) && box.length === 4 && data.analysis?.bbox_area_km2 != null) {
+      const analysis = data.summary?.analysis;
+      const box = analysis?.bbox;
+      if (Array.isArray(box) && box.length === 4 && analysis?.bbox_area_km2 != null) {
         setDrawnInfo({
-          areaKm2: data.analysis.bbox_area_km2,
+          areaKm2: analysis.bbox_area_km2,
           lon: (Number(box[0]) + Number(box[2])) / 2,
           lat: (Number(box[1]) + Number(box[3])) / 2,
         });
@@ -1947,7 +1953,7 @@ export default function Home() {
                           variant="ghost"
                           className="mt-1.5"
                           disabled={containingBusy}
-                          onClick={() => void useContainingArea()}
+                          onClick={() => void adoptContainingArea()}
                         >
                           Use the whole {containingArea.name} instead
                         </Button>
