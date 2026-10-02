@@ -132,7 +132,15 @@ first means the foundation is not built on a layer with holes in it.
 - [x] **Reverse.** "Which unit is this in?" asks the boundary service about the
       outline's centroid and offers to adopt the unit, stating both areas — offered
       rather than automatic, since snapping replaces the outline the person drew.
-      `/generate-context` publishes the box so the browser need not measure it again.
+      Verified live: "outline sits inside Kilimani, which covers 44 km². Use the
+      whole Kilimani instead."
+
+      The box is published by `/generate-context`, and publishing it took three
+      attempts: added to the payload (dropped — the response is typed and Pydantic
+      discards undeclared fields), declared on `AnalysisMetadata`, and read by the
+      client from `summary.analysis` rather than the top level. All three are
+      checked, because either can regress alone and the symptom is always the same
+      value: computed, published, absent.
 
 ## Deferred by decision
 
