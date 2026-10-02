@@ -2030,6 +2030,10 @@ async def plan_rainfall(
         plan = indicators.plan_indicator(
             indicator, area["bbox_area_km2"],
             start=window_start or None, end=window_end or None,
+            # Named here too: a preview that prices a CHIRPS job with ERA5's
+            # cost tells the reader to wait 24 seconds for three minutes of work,
+            # and the preview is what they decide on.
+            product=(payload.product or "rainfall").strip().lower(),
         )
         plan["already_computed"] = (
             jobs.status_for(
@@ -2098,11 +2102,15 @@ async def submit_rainfall(
     # know which they are getting.
     import indicators
 
+    # The product is named here too. A plan that prices a CHIRPS job with ERA5's
+    # cost tells the reader to wait 24 seconds for three minutes of work, which is
+    # the estimate the interface puts in front of them.
     planned = indicators.plan_indicator(
         indicator,
         area["bbox_area_km2"],
         start=window_start or None,
         end=window_end or None,
+        product=(payload.product or "rainfall").strip().lower(),
     )
     return {
         "submission": state,

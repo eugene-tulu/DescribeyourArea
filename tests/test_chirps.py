@@ -297,3 +297,48 @@ class CostTests(unittest.TestCase):
 
         self.assertEqual(registry.get("vegetation_series").seconds_per_month,
                          vegetation_series.SECONDS_PER_READ)
+
+
+class PlanPricingTests(unittest.TestCase):
+    """The preview has to be priced for the product too.
+
+    A preview that prices a CHIRPS job with ERA5's cost is the number the reader
+    decides on, so getting it wrong there is worse than getting it wrong on the
+    job itself. Found by reading the route's own output: it returned 27.8 km and
+    24 seconds for a CHIRPS request because the plan route never passed the
+    product through.
+    """
+
+    def setUp(self):
+        from fastapi.testclient import TestClient
+
+        import main
+
+        self.client = TestClient(main.app)
+        self.aoi = {"type": "Feature", "properties": {}, "geometry": {
+            "type": "Polygon", "coordinates": [[[37.60, -0.40], [37.70, -0.40],
+                                                [37.70, -0.32], [37.60, -0.32],
+                                                [37.60, -0.40]]]}}
+
+    def _plan(self, product):
+        response = self.client.post("/rainfall/plan", json={
+            "geojson": self.aoi, "indicator": "rainfall", "product": product})
+        self.assertEqual(response.status_code, 200, response.text[:200])
+        return next(p for p in response.json()["plans"] if p["indicator"] == "rainfall")
+
+    def test_the_preview_prices_the_product_asked_for(self):
+        chirps, era5 = self._plan("chirps"), self._plan("rainfall")
+        self.assertEqual(chirps["product"], "chirps")
+        self.assertEqual(era5["product"], "rainfall")
+
+    def test_the_preview_states_the_resolution_and_the_wait(self):
+        chirps = self._plan("chirps")
+        self.assertLess(chirps["resolution_km"], 10.0,
+                        "a CHIRPS preview priced at ERA5's resolution is the "
+                        "wrong answer twice over")
+        self.assertGreater(chirps["estimated_seconds"], 120)
+
+    def test_the_basis_names_the_product_it_was_measured_on(self):
+        basis = self._plan("chirps")["estimate_basis"]
+        self.assertIn("1.04", basis)
+        self.assertIn("CHIRPS", basis)
