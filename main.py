@@ -2454,6 +2454,16 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None):
     modules: dict = {}
     missing: list[str] = []
     for name in wanted:
+        if name == "rainfall":
+            # Rainfall does not use the artefact store. The worker writes it to
+            # the ERA5 cache, which is why reading artefacts alone silently
+            # dropped the headline module from the assembled reading.
+            context = _rainfall_by_key(key, "rainfall")
+            if context.get("status") != "ok":
+                missing.append(name)
+                continue
+            modules[name] = context
+            continue
         artefact = jobs.read_artefact(key, name)
         if not artefact or artefact.get("status") not in ("ok", "ready"):
             missing.append(name)

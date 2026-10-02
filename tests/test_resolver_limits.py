@@ -133,3 +133,52 @@ class StoredContextTests(unittest.TestCase):
         caveats = " ".join(response.json()["summary"]["caveats"])
         self.assertIn("ndvi", caveats)
         self.assertIn("still being computed", caveats)
+
+
+class RainfallIsNotAnArtefactTests(unittest.TestCase):
+    """Rainfall does not live in the artefact store, and pretending it does
+    silently drops the headline module from an assembled reading.
+
+    The worker writes rainfall to the ERA5 cache; the artefact store holds the
+    raster products. A first version of `/context` read artefacts only, so a
+    queued area came back with elevation, land cover and vegetation and no
+    rainfall at all -- and named it as "still being computed" rather than
+    admitting it had looked in the wrong place.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+        self.client = TestClient(main.app)
+        self.addCleanup(self._restore)
+        self.addCleanup(self.tmp.cleanup)
+
+    def _restore(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+
+    def test_rainfall_is_read_from_its_own_cache(self):
+        import rainfall
+
+        geom = {"type": "Polygon", "coordinates": [[[37.70, 1.20], [37.80, 1.20],
+                                                    [37.80, 1.30], [37.70, 1.30],
+                                                    [37.70, 1.20]]]}
+        key = rainfall.geometry_hash(geom)
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2026-01", "precip_mm": 10.0}],
+            "grid_cells": 1,
+        })
+        summary = self.client.get(f"/context?cache_key={key}").json()["summary"]
+        self.assertIn("rainfall", summary,
+                      "the headline module vanished from the assembled reading")
+        self.assertEqual(len(summary["rainfall"]["series"]), 1)
+        self.assertNotIn("Not yet available: rainfall", " ".join(summary["caveats"]))
