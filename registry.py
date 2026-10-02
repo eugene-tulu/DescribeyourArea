@@ -86,6 +86,18 @@ class Product:
 
     evidence: str = OBSERVED
     cost: tuple[str, ...] = (LIVE,)
+    seconds_per_month: Optional[float] = None
+    """Measured wall-clock per month read for a queued series, on this host's
+    predecessor. None where the product is answered live and has no series to
+    wait for. This is a property of the product and the host, not of the area --
+    cost here is request latency, not pixels -- so it belongs beside the rest of
+    the declaration rather than in a cost table kept separately.
+
+    ERA5 reads a whole time series from one asset and is fast per month.
+    CHIRPS is a separate object per month and is not: measured at 1.04 s a month
+    with eight concurrent reads, against ERA5's fraction of that. A CHIRPS job
+    shown with ERA5's estimate promised 24 seconds and took 17 minutes.
+    """
     source: str = ""
     doi: Optional[str] = None
     caveats: tuple[str, ...] = field(default_factory=tuple)
@@ -120,6 +132,7 @@ class Product:
             "latency_days": self.latency_days,
             "evidence": self.evidence,
             "cost": list(self.costs()),
+            "seconds_per_month": self.seconds_per_month,
             "source": self.source,
             "doi": self.doi,
             "caveats": list(self.caveats),
@@ -242,6 +255,8 @@ RAINFALL = Product(
     latency_days="45-90",
     evidence=MODELLED,
     cost=COMPUTED,
+    # 24 s for 195 months, one asset read for the whole series.
+    seconds_per_month=0.12,
     source="ERA5 monthly precipitation, 0.25 degrees",
     doi="10.24381/cds.adbb2d47",
     caveats=(
@@ -270,7 +285,10 @@ VEGETATION_SERIES = Product(
     meaningful_max_km2=None,
     latency_days="30-60",
     evidence=DERIVED,
-    cost=COMPUTED,
+    cost=(COMPUTED,),
+    # Read from the series module rather than restated, so the published cost and
+    # the one an estimate uses cannot drift apart.
+    seconds_per_month=__import__("vegetation_series").SECONDS_PER_READ,
     source="MODIS MOD13Q1 (250 m label, 231.7 m grid), 16-day",
     doi="10.5067/MODIS/MOD13Q1.061",
     caveats=(
@@ -302,7 +320,9 @@ RAINFALL_CHIRPS = Product(
     meaningful_max_km2=None,
     latency_days="30-60",
     evidence=OBSERVED,
-    cost=COMPUTED,
+    cost=(COMPUTED,),
+    # 1.04 s a month with eight concurrent reads, each month a separate object.
+    seconds_per_month=1.04,
     source="CHIRPS v2.0 (satellite and gauge, 0.05 degrees), via Digital Earth Africa",
     doi="10.1038/sdata.2015.66",
     caveats=(

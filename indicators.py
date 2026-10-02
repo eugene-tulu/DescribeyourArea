@@ -131,25 +131,23 @@ def plan_indicator(
     *,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    product: Optional[str] = None,
 ) -> Optional[dict]:
     """What the worker will do for this area, and how long it should take.
 
     Cost drivers differ per indicator, so the plan differs: the raster modules are
-    bounded by pixels at a policy resolution, while a vegetation series is bounded
-    by the number of months it has to read, which barely moves with area.
+    bounded by pixels at a policy resolution, while a series is bounded by the
+    number of months it has to read, which barely moves with area.
+
+    ``product`` selects which precipitation product is being planned for, because
+    the two are not remotely the same cost: ERA5 reads its whole series from one
+    asset, CHIRPS is a separate object per month. A CHIRPS job planned with
+    ERA5's cost promised 24 seconds and took 17 minutes.
     """
     if indicator == "rainfall":
-        # A cache read plus a known-width ERA5 aggregate; effectively instant.
-        return {
-            "indicator": "rainfall",
-            # Derived, not restated. It was a literal here while
-            # rainfall.ERA5_GRID_DEGREES held the real value, which is the class
-            # of duplication the registry exists to stop.
-            "resolution_km": round(rainfall.ERA5_GRID_DEGREES * 111.32, 1),
-            "reason": "a cached series, or one ERA5 read per year",
-            "estimated_seconds": 60,
-            "estimate_basis": "one annual ERA5 read per pass; cached areas are instant",
-        }
+        return _plan_rainfall(indicator, start, end, product)
+    if indicator == "chirps":
+        return _plan_rainfall(indicator, start, end, product)
     if indicator == "vegetation_series":
         import vegetation_series
 
@@ -167,6 +165,58 @@ def plan_indicator(
         "estimated_seconds": seconds,
         "estimate_basis": "measured raster pass; cost tracks window reads, not pixels",
     }
+
+
+def _plan_rainfall(indicator: str, start: Optional[str], end: Optional[str],
+                   product: Optional[str]) -> dict:
+    """The plan for a precipitation series, at the cost of the product asked for."""
+    import registry
+
+    # Two things can name the product -- the indicator and an explicit argument --
+    # and they can disagree. The indicator wins when it *is* a product, because a
+    # caller that asks for "chirps" plainly means CHIRPS.
+    named = (product or "").strip().lower()
+    if indicator in ("chirps",):
+        named = indicator
+    key = named or "rainfall"
+    entry = registry.get(key) or registry.RAINFALL
+    if entry is None:
+        entry = registry.RAINFALL
+    per_month = entry.seconds_per_month or 0.12
+    months = len(_months_between(start or "2010-01-01", end or _this_month()))
+
+    if key == "rainfall":
+        resolution_km = round(rainfall.ERA5_GRID_DEGREES * 111.32, 1)
+        reason = "a cached series, or one ERA5 read for the whole period"
+    else:
+        resolution_km = entry.resolution_km()
+        reason = f"a cached series, or one CHIRPS object per month at 0.05°"
+
+    return {
+        "indicator": indicator,
+        "product": entry.key,
+        "resolution_km": resolution_km,
+        "reason": reason,
+        "months": months,
+        "estimated_seconds": int(round(months * per_month)),
+        "estimate_basis": (
+            f"{months} months at {per_month:g} s each, measured for {entry.label}. "
+            f"Cached areas are instant."
+        ),
+    }
+
+
+def _this_month() -> str:
+    import datetime
+
+    today = datetime.datetime.now(datetime.UTC).date()
+    return today.replace(day=1).isoformat()
+
+
+def _months_between(start: str, end: str) -> list:
+    import vegetation_series
+
+    return vegetation_series._month_range(start[:7] + "-01", end)
 
 
 def pixels_for(area_km2: float, resolution_m: int) -> int:

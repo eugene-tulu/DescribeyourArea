@@ -225,3 +225,75 @@ def _client():
     import main
 
     return TestClient(main.app)
+
+
+class CostTests(unittest.TestCase):
+    """The estimate a user waits against has to belong to the product they chose.
+
+    CHIRPS is a separate object per month; ERA5 reads its whole series from one
+    asset. Measured on this host: 1.04 s a month against ERA5's 0.12. A CHIRPS job
+    planned with ERA5's number promised 24 seconds and took 17 minutes -- so the
+    cost now travels with the product declaration rather than in a table kept
+    somewhere else, which is the same duplication the registry was built to end.
+    """
+
+    def test_each_queued_product_declares_its_own_cost(self):
+        for key in ("rainfall", "chirps", "vegetation_series"):
+            with self.subTest(product=key):
+                self.assertIsNotNone(registry.get(key).seconds_per_month,
+                                     f"{key} is queued and needs a cost")
+
+    def test_the_two_products_are_not_reported_as_the_same_cost(self):
+        import indicators
+
+        plan = indicators.plan_indicator("rainfall", 5_000,
+                                          start="2010-01-01", end="2026-03-01",
+                                          product="chirps")
+        era5 = indicators.plan_indicator("rainfall", 5_000,
+                                         start="2010-01-01", end="2026-03-01")
+        self.assertGreater(plan["estimated_seconds"], era5["estimated_seconds"] * 4)
+        self.assertEqual(plan["product"], "chirps")
+
+    def test_the_estimate_follows_the_window(self):
+        import indicators
+
+        short = indicators.plan_indicator("rainfall", 5_000,
+                                          start="2024-01-01", end="2024-12-01")
+        long = indicators.plan_indicator("rainfall", 5_000,
+                                         start="2010-01-01", end="2026-03-01")
+        self.assertLess(short["months"], long["months"])
+        self.assertLess(short["estimated_seconds"], long["estimated_seconds"])
+
+    def test_the_indicator_names_its_own_product(self):
+        # A caller asking for "chirps" plainly means CHIRPS; making it also pass a
+        # product argument invites two things naming it and disagreeing.
+        import indicators
+
+        plan = indicators.plan_indicator("chirps", 5_000,
+                                         start="2010-01-01", end="2026-03-01")
+        self.assertEqual(plan["product"], "chirps")
+        self.assertLess(plan["resolution_km"], 10.0)
+
+    def test_an_unknown_product_falls_back_rather_than_crashing(self):
+        import indicators
+
+        plan = indicators.plan_indicator("rainfall", 5_000,
+                                         start="2010-01-01", end="2026-03-01",
+                                         product="smoke-signals")
+        self.assertEqual(plan["product"], "rainfall")
+
+    def test_the_resolution_reported_is_the_products_own(self):
+        import indicators
+
+        chirps = indicators.plan_indicator("chirps", 5_000,
+                                           start="2010-01-01", end="2026-03-01")
+        era5 = indicators.plan_indicator("rainfall", 5_000,
+                                         start="2010-01-01", end="2026-03-01")
+        self.assertLess(chirps["resolution_km"], era5["resolution_km"] / 4)
+
+    def test_the_vegetation_cost_is_read_from_its_own_module(self):
+        # Restated, it would drift from the constant the estimate actually uses.
+        import vegetation_series
+
+        self.assertEqual(registry.get("vegetation_series").seconds_per_month,
+                         vegetation_series.SECONDS_PER_READ)

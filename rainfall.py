@@ -861,35 +861,66 @@ def chirps_cell_monthly(grid: dict, start: str, end: str):
     matrix = np.full((len(labels), len(latitudes), len(longitudes)), np.nan)
     unreadable: list[str] = []
 
-    for index, label in enumerate(labels):
+    # One object per month, so the months are independent and are read together.
+    # Read in sequence this took 17 minutes for a 195-month series -- the ERA5
+    # path reads its whole time series from one asset and finishes in 24 seconds,
+    # and a CHIRPS job silently inherited ERA5's cost estimate, so the interface
+    # promised a minute and delivered a quarter of an hour.
+    def _read_one(label: str):
         ym = label[:7].replace("-", ".")
         try:
             with rio.open(CHIRPS_BASE_URL.format(ym=ym)) as src:
-                for row, lat in enumerate(latitudes):
-                    for column, lon in enumerate(longitudes):
-                        half = ERA5_GRID_DEGREES / 2
-                        window = src.window(lon - half, lat - half, lon + half, lat + half)
-                        if window.width < 1 or window.height < 1:
-                            continue
-                        block = src.read(1, window=window, boundless=False)
-                        valid = block[(block != CHIRPS_NODATA) & (block < 9000)]
-                        if valid.size:
-                            matrix[index, row, column] = float(valid.mean())
+                return label, _chirps_block(src, latitudes, longitudes), None
         except Exception as exc:  # noqa: BLE001
-            unreadable.append(label)
-            print(f"chirps {ym}: {type(exc).__name__}", file=sys.stderr)
+            return label, None, f"{type(exc).__name__}"
 
-    # The published bucket has real holes -- 2023-12, 2024-07 and 2024-08 are
-    # absent and return 404 -- so the missing months are returned rather than
-    # absorbed. A hole in a rainfall series reads as no rain, which is a drought
-    # that never happened, and a series that quietly omits months is a series
-    # whose anomalies are computed over a different period than it appears to be.
-    coverage = {
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for label, block, error in pool.map(_read_one, labels):
+                if error is not None:
+                    unreadable.append(label)
+                    print(f"chirps {label[:7]}: {error}", file=sys.stderr)
+                    continue
+                matrix[labels.index(label)] = block
+    except ImportError:
+        for label in labels:
+            got, block, error = _read_one(label)
+            if error is not None:
+                unreadable.append(got)
+            else:
+                matrix[labels.index(got)] = block
+
+    return labels, matrix, _chirps_coverage(labels, unreadable)
+
+
+def _chirps_coverage(labels, unreadable):
+    return {
         "source": "chirps-v2.0",
         "months": len(labels),
         "unreadable_months": unreadable,
     }
-    return labels, matrix, coverage
+
+
+def _chirps_block(src, latitudes, longitudes):
+    """One month, every cell, each averaged over its ERA5 footprint."""
+    import numpy as np
+
+    out = np.full((len(latitudes), len(longitudes)), np.nan)
+    for row, lat in enumerate(latitudes):
+        for column, lon in enumerate(longitudes):
+            half = ERA5_GRID_DEGREES / 2
+            window = src.window(lon - half, lat - half, lon + half, lat + half)
+            if window.width < 1 or window.height < 1:
+                continue
+            block = src.read(1, window=window, boundless=False)
+            valid = block[(block != CHIRPS_NODATA) & (block < 9000)]
+            if valid.size:
+                out[row, column] = float(valid.mean())
+    return out
+
+
 
 
 def chirps_available(year: int) -> bool:
