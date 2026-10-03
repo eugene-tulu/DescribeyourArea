@@ -395,3 +395,39 @@ class CacheSlotTests(unittest.TestCase):
         self.assertIn("product=product,", source,
                       "the worker must pass the name through; resolving it to a "
                       "callable loses the identity the cache slot is chosen by")
+
+
+class ReportedGridTests(unittest.TestCase):
+    """A series must report the grid it was actually read at.
+
+    Hard-coding ERA5's had a CHIRPS series printing 27.8 km and 0.25 degrees
+    beside a value computed from a completely different raster. The same class of
+    error as calling one modelled: the provenance contradicts the number.
+    """
+
+    def test_a_chirps_series_reports_its_own_grid(self):
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        try:
+            geom = {"type": "Polygon", "coordinates": [
+                [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30], [37.70, 1.30], [37.70, 1.20]]]}
+            chirps = rainfall.build_and_cache(
+                geom, start="2024-01-01", end="2024-03-01",
+                source=rainfall.reader_for("chirps"), product="chirps")
+            era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
+            self.assertLess(chirps["resolution_km"], 10.0)
+            self.assertLess(chirps["resolution_km"], era5["resolution_km"])
+            self.assertEqual(chirps["resolution_degrees"],
+                             rainfall.CHIRPS_NATIVE_GRID_DEGREES)
+            self.assertEqual(chirps["product"], "chirps")
+            self.assertEqual(era5["product"], "rainfall")
+        finally:
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()

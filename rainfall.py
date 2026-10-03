@@ -689,6 +689,12 @@ def compute_series(
     annual_normal = sum(climatology.values()) if climatology else None
     _assert_plausible(annual_normal, cells)
 
+    # The product's own grid. Hard-coding ERA5's had a CHIRPS series reporting
+    # 27.8 km and 0.25 degrees -- a grid it was never read at, printed beside a
+    # value that came from somewhere else.
+    source_degrees = (CHIRPS_NATIVE_GRID_DEGREES if source is not None
+                      else ERA5_GRID_DEGREES)
+
     return {
         "processing_version": RAINFALL_PROCESSING_VERSION,
         "indicator": "monthly_precipitation",
@@ -701,8 +707,9 @@ def compute_series(
         "license": "CC-BY 4.0",
         "retrieved": datetime.datetime.now(datetime.UTC).date().isoformat(),
         "bbox": bbox,
-        "resolution_degrees": ERA5_GRID_DEGREES,
-        "resolution_km": round(ERA5_GRID_DEGREES * 111.32, 1),
+        "resolution_degrees": source_degrees,
+        "resolution_km": round(source_degrees * 111.32, 1),
+        "product": "chirps" if source is not None else "rainfall",
         "grid_cells": cells,
         "climatology": {
             "start": CLIMATOLOGY_START,
