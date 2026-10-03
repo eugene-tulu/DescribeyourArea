@@ -25,14 +25,17 @@ import registry
 def stub_reader(grid, start, end):
     """A CHIRPS-shaped reader that reads nothing.
 
-    The two tests that used the real archive took seventeen minutes between them
-    and failed intermittently under load -- which is the same live-network flake
-    this file's other gaps test avoids. What they assert is plumbing: which cache
-    slot a product lands in, and which grid it reports. Neither needs a raster.
+    The tests that used the real archive took seventeen minutes between them and
+    failed intermittently under load -- the same live-network flake this file's
+    other gaps test avoids. What they assert is plumbing: which cache slot a
+    product lands in, and which grid it reports. Neither needs a raster.
+
+    The value has to look like weather: an early version returned 12 mm a month,
+    which the plausibility guard rightly refused as no product would read that.
     """
     months = rainfall._month_range(start, end)
     shape = (len(months), len(grid["latitudes"]), len(grid["longitudes"]))
-    return months, np.full(shape, 12.0), {
+    return months, np.full(shape, 100.0), {
         "source": "stub", "months": len(months), "unreadable_months": [],
     }
 
@@ -448,6 +451,62 @@ class ReportedGridTests(unittest.TestCase):
             else:
                 os.environ["RAINFALL_CACHE_DIR"] = previous
             tmp.cleanup()
+
+
+class ReaderResolutionTests(unittest.TestCase):
+    """A named product with no reader beside it must get that product's reader.
+
+    The worker passed a product name and no reader, expecting the callee to
+    resolve it, and nothing did -- so a CHIRPS job computed ERA5 and stored it
+    under a CHIRPS key. Right product name, wrong raster, and a reader shown a
+    0.25 degree value described as 0.05. The job reported ready and every number
+    it printed was ERA5's.
+    """
+
+    def test_a_named_product_resolves_its_own_reader(self):
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        try:
+            geom = {"type": "Polygon", "coordinates": [
+                [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+                 [37.70, 1.30], [37.70, 1.20]]]}
+            # The lookup is what is under test, so the reader it returns is a
+            # stub: resolving to the real one would make this a live-archive test,
+            # which is slow and the flake this file otherwise avoids.
+            real_reader_for = rainfall.reader_for
+            rainfall.reader_for = lambda key: (
+                stub_reader if key == "chirps" else real_reader_for(key))
+            try:
+                chirps = rainfall.build_and_cache(
+                    geom, start="2024-01-01", end="2024-03-01", product="chirps")
+            finally:
+                rainfall.reader_for = real_reader_for
+            era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
+            self.assertEqual(chirps["product"], "chirps")
+            self.assertLess(chirps["resolution_km"], 10.0,
+                            "a named product fell back to the default reader")
+            self.assertGreater(era5["resolution_km"], 20.0)
+        finally:
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()
+
+    def test_the_worker_still_passes_the_name_and_not_a_resolved_reader(self):
+        import inspect
+
+        import jobs
+
+        source = inspect.getsource(jobs.run_pending)
+        self.assertIn("product=product,", source)
+        self.assertNotIn("union_source = rainfall.reader_for(product)", source,
+                         "resolving in the worker loses the name the cache slot "
+                         "is chosen by")
 
 
 class CellCacheIdentityTests(unittest.TestCase):

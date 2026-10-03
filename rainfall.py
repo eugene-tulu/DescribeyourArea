@@ -768,8 +768,12 @@ def build_and_cache(
     if not named and isinstance(source, str):
         named = source.strip().lower()
     product = named or "rainfall"
-    if not named and source is not None:
-        source = None
+    if product != "rainfall" and not isinstance(source, str) and source is None:
+        # The product was named and no reader came with it, so the reader is
+        # looked up from the name. Without this the worker computed ERA5 and
+        # stored it under a CHIRPS key: right product name, wrong raster, and a
+        # reader shown a 0.25 degree value described as 0.05.
+        source = reader_for(product)
     payload = compute_series(geojson_geom, start=start, source=source, label=label, **kwargs)
     payload["product"] = product
     write_cache(key, payload, product)
