@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import datetime
 import hashlib
+import math
 import json
 import os
 import sys
@@ -508,10 +509,18 @@ def monthly_climatology(series: dict[str, float], start: str, end: str) -> dict[
 
 def anomalies(series: dict[str, float], climatology: dict[str, float]) -> list[dict[str, Any]]:
     """Per-month deviation from the climatological mean for the same month."""
+    import math
+
     out: list[dict[str, Any]] = []
     for label, value in sorted(series.items()):
         month = label.split("-")[1]
         if month not in climatology:
+            continue
+        # A month that could not be read is absent, not a number that is not a
+        # number. CHIRPS's published archive has holes, so a NaN reached the
+        # payload and took the whole response with it -- a 500 over one missing
+        # month, on a series that was otherwise fine.
+        if value is None or not math.isfinite(value):
             continue
         normal = climatology[month]
         row = {
@@ -692,12 +701,28 @@ def compute_series(
     # Average the cells belonging to this study area. The matrix is
     # (month, latitude, longitude), so iterating it yields one 2-D block per month.
     def area_mean(matrix) -> list[float]:
-        return [float(block.mean()) for block in matrix]
+        """One mean per month, and NaN where the month could not be read.
+
+        A block of all-NaN pixels averages to NaN, which is the honest answer for
+        a month the archive does not have. It is handled downstream -- dropped
+        from the series, kept out of the climatology -- rather than here, because
+        substituting a number for a missing month is the failure this project is
+        built to avoid.
+        """
+        import math
+
+        return [float(block.mean()) if math.isfinite(block.mean()) else float("nan")
+                for block in matrix]
 
     recent = dict(zip(recent_labels, area_mean(recent_matrix)))
     baseline = dict(zip(base_labels, area_mean(base_matrix)))
 
+    # Months the archive does not have must not enter the normal: one NaN makes
+    # the annual mean NaN, and the plausibility guard then refuses the whole
+    # series for a reason that looks like a units error.
+    baseline = {k: v for k, v in baseline.items() if math.isfinite(v)}
     climatology = monthly_climatology(baseline, CLIMATOLOGY_START, CLIMATOLOGY_END)
+    unreadable_recent = sum(1 for v in recent.values() if not math.isfinite(v))
     rows = anomalies(recent, climatology)
     cells = len(grid["longitudes"]) * len(grid["latitudes"])
 
@@ -726,6 +751,10 @@ def compute_series(
         "resolution_km": round(source_degrees * 111.32, 1),
         "product": "chirps" if source is not None else "rainfall",
         "grid_cells": cells,
+        # Months the archive does not have, excluded rather than filled. A series
+        # shorter than the window asked for is otherwise indistinguishable from a
+        # series for a shorter period, which is a different claim entirely.
+        "unreadable_months": [k for k, v in recent.items() if not math.isfinite(v)],
         "climatology": {
             "start": CLIMATOLOGY_START,
             "end": CLIMATOLOGY_END,

@@ -453,6 +453,68 @@ class ReportedGridTests(unittest.TestCase):
             tmp.cleanup()
 
 
+class HoleHandlingTests(unittest.TestCase):
+    """A month the archive does not have is absent, not a number that is not one.
+
+    CHIRPS's published archive has holes, so this is the normal case rather than
+    an edge one. A NaN reached the payload and the response became a 500 -- a
+    whole reading lost over one missing month, on a series that was otherwise
+    fine -- and it also poisoned the annual normal, so the plausibility guard
+    refused the series for what looked like a units error.
+    """
+
+    def _gappy(self, grid, start, end):
+        months = rainfall._month_range(start, end)
+        block = np.full((len(months), len(grid["latitudes"]), len(grid["longitudes"])),
+                        100.0)
+        block[1] = np.nan                      # a hole, as the archive really has
+        return months, block, {"source": "stub", "months": len(months),
+                               "unreadable_months": [months[1]]}
+
+    def _build(self):
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        self.addCleanup(
+            lambda: os.environ.__setitem__("RAINFALL_CACHE_DIR", previous)
+            if previous else os.environ.pop("RAINFALL_CACHE_DIR", None))
+        self.addCleanup(tmp.cleanup)
+        geom = {"type": "Polygon", "coordinates": [
+            [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+             [37.70, 1.30], [37.70, 1.20]]]}
+        return rainfall.build_and_cache(
+            geom, start="2024-01-01", end="2024-12-01",
+            source=self._gappy, product="chirps")
+
+    def test_the_payload_is_serialisable_with_a_hole_in_it(self):
+        import json
+
+        payload = self._build()
+        json.dumps(payload)          # raised ValueError: nan, taking the response with it
+
+    def test_the_missing_month_is_absent_rather_than_filled(self):
+        months = [row["month"] for row in self._build()["series"]]
+        self.assertNotIn("2024-02-01", months)
+        self.assertNotIn("nan", [str(m) for m in months])
+
+    def test_the_series_states_which_months_it_is_missing(self):
+        payload = self._build()
+        self.assertEqual(payload["unreadable_months"], ["2024-02-01"],
+                         "a series shorter than the window asked for is "
+                         "otherwise indistinguishable from a series for a "
+                         "shorter period, which is a different claim")
+
+    def test_the_plausibility_guard_is_not_fooled_by_the_gap(self):
+        # The guard is right to refuse an implausible total; it must not be
+        # refusing one because a single month was NaN.
+        payload = self._build()
+        annual = sum(payload["climatology"]["monthly_mean_mm"].values())
+        self.assertGreater(annual, 200.0)
+
+
 class ReaderResolutionTests(unittest.TestCase):
     """A named product with no reader beside it must get that product's reader.
 
