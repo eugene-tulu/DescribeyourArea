@@ -260,9 +260,16 @@ def geometry_hash(geojson_geom: dict) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
 
 
-def cellset_key(grid: dict, start: str, end: str) -> str:
-    """Identity of a read: which ERA5 cells, over which window."""
+def cellset_key(grid: dict, start: str, end: str, product: str = "rainfall") -> str:
+    """Identity of a read: which cells, over which window, from which product.
+
+    The product belongs here for the same reason it belongs in the series cache
+    key: without it a CHIRPS read is served ERA5's cells, so the series is built
+    from the wrong raster and reports a grid it was never read at. The cells are
+    the data; two products over the same cells are two different datasets.
+    """
     canonical = json.dumps({
+        "product": (product or "rainfall").strip().lower(),
         "lon": [round(v, 4) for v in grid["longitudes"]],
         "lat": [round(v, 4) for v in grid["latitudes"]],
         "start": start,
@@ -399,11 +406,18 @@ def _monthly_cell_totals(dataset, grid, start, end):
     return kept, array, report
 
 
-def read_cell_monthly(grid: dict, start: str, end: str, source=None):
-    """Read a cell set once, memoised on disk."""
+def read_cell_monthly(grid: dict, start: str, end: str, source=None,
+                      product: str = "rainfall"):
+    """Read a cell set once, memoised on disk.
+
+    ``product`` names the reader for the cache key. A callable cannot: it carries
+    no name, and a cache key built without one is a key both products share.
+    """
     import numpy as np
 
-    key = cellset_key(grid, start, end)
+    if product == "rainfall" and source is not None:
+        product = "chirps" if source is chirps_cell_monthly else product
+    key = cellset_key(grid, start, end, product)
     path = cache_dir() / "cells" / f"{key}.npz"
     if path.exists():
         try:
@@ -668,7 +682,8 @@ def compute_series(
     if not grid["longitudes"] or not grid["latitudes"]:
         raise ValueError("study area does not intersect the ERA5 grid")
 
-    recent_labels, recent_matrix, recent_coverage = read_cell_monthly(grid, start, end, source)
+    recent_labels, recent_matrix, recent_coverage = read_cell_monthly(
+        grid, start, end, source)
     base_labels, base_matrix, base_coverage = read_cell_monthly(
         grid, CLIMATOLOGY_START, CLIMATOLOGY_END, source)
     if not recent_labels:

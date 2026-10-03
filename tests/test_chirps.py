@@ -16,8 +16,25 @@ series is a drought that never happened.
 import json
 import unittest
 
+import numpy as np
+
 import rainfall
 import registry
+
+
+def stub_reader(grid, start, end):
+    """A CHIRPS-shaped reader that reads nothing.
+
+    The two tests that used the real archive took seventeen minutes between them
+    and failed intermittently under load -- which is the same live-network flake
+    this file's other gaps test avoids. What they assert is plumbing: which cache
+    slot a product lands in, and which grid it reports. Neither needs a raster.
+    """
+    months = rainfall._month_range(start, end)
+    shape = (len(months), len(grid["latitudes"]), len(grid["longitudes"]))
+    return months, np.full(shape, 12.0), {
+        "source": "stub", "months": len(months), "unreadable_months": [],
+    }
 
 
 class CacheIdentityTests(unittest.TestCase):
@@ -417,7 +434,7 @@ class ReportedGridTests(unittest.TestCase):
                 [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30], [37.70, 1.30], [37.70, 1.20]]]}
             chirps = rainfall.build_and_cache(
                 geom, start="2024-01-01", end="2024-03-01",
-                source=rainfall.reader_for("chirps"), product="chirps")
+                source=stub_reader, product="chirps")
             era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
             self.assertLess(chirps["resolution_km"], 10.0)
             self.assertLess(chirps["resolution_km"], era5["resolution_km"])
@@ -425,6 +442,65 @@ class ReportedGridTests(unittest.TestCase):
                              rainfall.CHIRPS_NATIVE_GRID_DEGREES)
             self.assertEqual(chirps["product"], "chirps")
             self.assertEqual(era5["product"], "rainfall")
+        finally:
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()
+
+
+class CellCacheIdentityTests(unittest.TestCase):
+    """The cell cache was the last layer where the two products could confuse
+    themselves.
+
+    The series cache was made product-aware, and then a CHIRPS read was served
+    ERA5's cells -- so the series was built from the right product name over the
+    wrong raster, and reported 27.8 km having been read at 0.05. The cells are the
+    data; two products over the same cells are two different datasets.
+    """
+
+    def test_the_cell_key_carries_the_product(self):
+        grid = {"longitudes": [37.75], "latitudes": [1.25]}
+        era5 = rainfall.cellset_key(grid, "2024-01-01", "2024-12-01")
+        chirps = rainfall.cellset_key(grid, "2024-01-01", "2024-12-01", "chirps")
+        self.assertNotEqual(era5, chirps,
+                            "one cell-cache key for both products is how a "
+                            "CHIRPS read gets ERA5's cells")
+
+    def test_it_is_stable_for_the_same_product(self):
+        grid = {"longitudes": [37.75], "latitudes": [1.25]}
+        self.assertEqual(
+            rainfall.cellset_key(grid, "2024-01-01", "2024-12-01", "chirps"),
+            rainfall.cellset_key(grid, "2024-01-01", "2024-12-01", "chirps"))
+
+    def test_the_reader_infers_the_product_from_the_callable(self):
+        # A callable carries no name. Without this, a CHIRPS read through the
+        # default key would collide with ERA5's.
+        import inspect
+
+        source = inspect.getsource(rainfall.read_cell_monthly)
+        self.assertIn("chirps_cell_monthly", source,
+                      "a bare reader with no product name must still select its "
+                      "own cache slot")
+
+    def test_the_two_products_read_from_different_rasters(self):
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        try:
+            geom = {"type": "Polygon", "coordinates": [
+                [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+                 [37.70, 1.30], [37.70, 1.20]]]}
+            era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
+            chirps = rainfall.build_and_cache(
+                geom, start="2024-01-01", end="2024-03-01",
+                source=rainfall.reader_for("chirps"), product="chirps")
+            self.assertGreater(era5["resolution_km"], chirps["resolution_km"] * 4,
+                               "one of them was read from the other's raster")
         finally:
             if previous is None:
                 os.environ.pop("RAINFALL_CACHE_DIR", None)
