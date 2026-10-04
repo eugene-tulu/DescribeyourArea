@@ -360,7 +360,7 @@ class PlanPricingTests(unittest.TestCase):
 
     def test_the_basis_names_the_product_it_was_measured_on(self):
         basis = self._plan("chirps")["estimate_basis"]
-        self.assertIn("1.04", basis)
+        self.assertIn(str(registry.get("chirps").seconds_per_month)[:3], basis)
         self.assertIn("CHIRPS", basis)
 
 
@@ -619,7 +619,7 @@ class CellCacheIdentityTests(unittest.TestCase):
             era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
             chirps = rainfall.build_and_cache(
                 geom, start="2024-01-01", end="2024-03-01",
-                source=rainfall.reader_for("chirps"), product="chirps")
+                source=stub_reader, product="chirps")
             self.assertGreater(era5["resolution_km"], chirps["resolution_km"] * 4,
                                "one of them was read from the other's raster")
         finally:

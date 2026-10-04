@@ -321,8 +321,12 @@ RAINFALL_CHIRPS = Product(
     latency_days="30-60",
     evidence=OBSERVED,
     cost=(COMPUTED,),
-    # 1.04 s a month with eight concurrent reads, each month a separate object.
-    seconds_per_month=1.04,
+    # 3.4 s a month with eight concurrent reads, each month a separate object.
+    # Refitted from a cold end-to-end job on the droplet: 681 s for 202 months. The
+    # first figure, 1.04, came from a warm cell cache left by my own earlier read
+    # and was 3x optimistic -- an estimate that understates the wait is the one
+    # kind a reader cannot forgive.
+    seconds_per_month=3.4,
     source="CHIRPS v2.0 (satellite and gauge, 0.05 degrees), via Digital Earth Africa",
     doi="10.1038/sdata.2015.66",
     caveats=(
