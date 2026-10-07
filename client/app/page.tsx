@@ -280,6 +280,35 @@ interface AnalysisMetadata {
   applied_resolution_m?: Record<string, number>;
 }
 
+/** One entry from the backend's `summary.measures` list (Measure.describe).
+ *  Mirrors contract.py:ContextSummary.measures / measure.py:Measure.describe. */
+interface MeasureExtent {
+  requested_area_km2?: number | null;
+  covered_area_km2?: number | null;
+  cell_count?: number | null;
+  native_resolution_m?: number | null;
+  native_grid_degrees?: number | null;
+  over_specified?: boolean;
+  window?: { start?: string | null; end?: string | null };
+}
+
+interface MeasureSummary {
+  product: string;
+  measure: string;
+  label: string;
+  value: unknown;
+  units: string;
+  evidence: string;
+  extent?: MeasureExtent;
+  observed_through?: string | null;
+  computed_at: string;
+  source?: string | null;
+  doi?: string | null;
+  caveats?: string[];
+  uncertainty?: string | null;
+  detail?: Record<string, unknown>;
+}
+
 interface Summary {
   dem?: DemStats | null;
   ndvi?: NdviStats | null;
@@ -287,6 +316,8 @@ interface Summary {
   rainfall?: RainfallResult | null;
   country?: string | null;
   analysis?: AnalysisMetadata;
+  /** Uniform measure envelope shipped as of 1.21.0 (contract.py). */
+  measures?: MeasureSummary[];
   caveats?: string[];
 }
 
@@ -580,6 +611,51 @@ function Figure({ term, value }: { term: string; value: string }) {
     <div className="hoverline flex items-baseline justify-between gap-4 px-2 -mx-2 py-2">
       <dt className="text-sm text-ink-2">{term}</dt>
       <dd className="fig text-sm text-ink">{value}</dd>
+    </div>
+  );
+}
+
+/** Renders one entry of the summary.measures envelope.
+ *  Mirrors the backend's honest-read framing: the value, its ground
+ *  (extent / over-specified), and its evidence class are inseparable. */
+function MeasureCard({ measure }: { measure: MeasureSummary }) {
+  const freshness = measure.observed_through
+    ? measure.observed_through.slice(0, 10)
+    : null;
+  const overSpecified = measure.extent?.over_specified && measure.extent?.covered_area_km2;
+  return (
+    <div className="rounded-xl border border-rule p-3">
+      <div className="flex items-baseline justify-between gap-3">
+        <dt className="text-sm font-medium text-ink-2">{measure.label}</dt>
+        {measure.units ? (
+          <dd className="fig text-sm text-ink">
+            {measure.value != null ? String(measure.value) : '—'} {measure.units}
+          </dd>
+        ) : (
+          <dd className="fig text-sm text-ink">
+            {measure.value != null ? String(measure.value) : '—'}
+          </dd>
+        )}
+      </div>
+      <p className="mt-1 text-[0.6875rem] text-ink-3">
+        {measure.evidence}
+        {freshness ? ` · as of ${freshness}` : ''}
+      </p>
+      {overSpecified && (
+        <p className="mt-1 text-[0.6875rem] text-ink-3">
+          read over {formatNumber(measure.extent!.covered_area_km2, 0)} km² for a{' '}
+          {measure.extent!.requested_area_km2
+            ? `${formatNumber(measure.extent!.requested_area_km2, 0)} km²`
+            : '? km²'} outline
+        </p>
+      )}
+      {measure.caveats && measure.caveats.length > 0 && (
+        <ul className="mt-1 space-y-0.5 pl-3 text-[0.6875rem] text-ink-3 marker:text-stressed">
+          {measure.caveats.map((c, i) => (
+            <li key={i} className="list-disc">{c}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
@@ -1262,6 +1338,16 @@ export default function Home() {
     const parts = landcoverEntries(landcover)
       .map(([code, percentage]) => `${LANDCOVER_LABELS[code] || code} (${formatNumber(percentage, 1)}%)`);
     if (parts.length > 0) lines.push(`Land cover: ${parts.join(', ')}.`);
+  }
+
+  // The measure envelope (summary.measures) carries derived/observed/modelled
+  // figures in a uniform shape. Surface each headline so the text summary stays
+  // in step with the structured panel below.
+  if (summary.measures && summary.measures.length > 0) {
+    for (const m of summary.measures) {
+      const head = m.observed_through ? `${m.label} ${m.value} ${m.units}, as of ${m.observed_through.slice(0, 10)}` : `${m.label} ${m.value} ${m.units}`;
+      lines.push(`${head} — ${m.evidence}.`);
+    }
   }
 
   return lines.join(' ') || 'The selected data sources did not return values for this area.';
@@ -2547,10 +2633,20 @@ export default function Home() {
                                   submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                                   onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
                                   vegetationSeries={vegetationSeries}
-                                />
-                              ))}
-                          </div>
-                        </div>
+                                 />
+                               ))}
+                           </div>
+                           {analysisSummary.measures && analysisSummary.measures.length > 0 && (
+                             <div className="mt-8">
+                               <h4 className="label mb-3">Measures</h4>
+                               <dl className="grid gap-3 sm:grid-cols-2">
+                                 {analysisSummary.measures.map((m) => (
+                                   <MeasureCard key={m.product} measure={m} />
+                                 ))}
+                               </dl>
+                             </div>
+                           )}
+                         </div>
                       )}
                     </>
                   ) : (
