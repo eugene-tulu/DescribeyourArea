@@ -37,6 +37,14 @@ services:
       MAX_AOI_VERTICES: ${MAX_AOI_VERTICES:-10000}
       MAX_CONCURRENT_ANALYSES: ${MAX_CONCURRENT_ANALYSES:-8}
       MAX_CONCURRENT_NDVI: ${MAX_CONCURRENT_NDVI:-3}
+      # The CHIRPS tensor store. Unset means every CHIRPS read falls back to one
+      # GeoTIFF per month, which is what this replaced; the fallback is kept so a
+      # deployment that has not run the ingest still answers, just slowly.
+      # RAINFALL_S3_ENDPOINT below must stay in its REGIONAL form. Icechunk adds
+      # the bucket to the host itself, so a bucket-qualified endpoint yields
+      # <bucket>.<bucket>.fra1.digitaloceanspaces.com and fails TLS validation.
+      # rainfall.py normalises it, but a tool that builds its own client will not.
+      CHIRPS_STORE_URI: ${CHIRPS_STORE_URI:-}
       ANALYSIS_ACQUIRE_SECONDS: ${ANALYSIS_ACQUIRE_SECONDS:-2}
       NDVI_ACQUIRE_SECONDS: ${NDVI_ACQUIRE_SECONDS:-20}
       ANALYSIS_DRAIN_SECONDS: ${ANALYSIS_DRAIN_SECONDS:-20}
@@ -98,6 +106,9 @@ services:
       RAINFALL_CACHE_S3_URI: ${RAINFALL_CACHE_S3_URI:-}
       RAINFALL_S3_ENDPOINT: ${RAINFALL_S3_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
       RAINFALL_S3_REGION: ${RAINFALL_S3_REGION:-nyc3}
+      # The worker is where CHIRPS series are actually computed, so this is the
+      # service the store matters most to. Regional endpoint only -- see above.
+      CHIRPS_STORE_URI: ${CHIRPS_STORE_URI:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       RAINFALL_ALERT_WEBHOOK: ${RAINFALL_ALERT_WEBHOOK:-}
