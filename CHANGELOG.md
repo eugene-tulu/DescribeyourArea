@@ -31,6 +31,253 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## Unreleased — The CHIRPS cache that was checked but never written
+
+CHIRPS is published as one GeoTIFF per month. Every job wanted the 1991-2020
+climatology plus a recent window, which is 555 separate object opens over the
+network, and none of it was reused between jobs. Two defects made that permanent
+rather than merely slow.
+
+### The cell cache was never written
+
+`rainfall.py:read_cell_monthly` keys its entry on the product — correctly, since
+31c3ca8 made `cellset_key` product-aware — but returned early whenever a reader
+was supplied, which is every CHIRPS call. So the entry was looked up, never
+found, and never written. Only ERA5 ever populated `cells/`.
+
+Anyone reading that directory would have concluded the per-cell months were being
+reused. They were not. A second identical job repeated the entire 3.2 GB fetch.
+
+Fixed by computing through to the write for both readers.
+
+**Evidence.** A CHIRPS read now leaves exactly one entry, a second read returns
+without calling the reader at all (`tests/test_chirps_store.py`, two tests
+guarding precisely this). Before the fix both would have been zero entries.
+
+### The two windows were read as two passes
+
+`compute_series` read the series window and the climatology window
+independently, so every shared month was fetched twice — for a typical request,
+the entire climatology. Now one read over the union of both, sliced afterwards.
+That is also one cache entry rather than two.
+
+**Evidence.** A union read produces one entry; the two-window form produced two
+(`UnionWindowTests`). Each window now sees only its own unreadable months, since
+the union spans decades and passing its full list on would have made a series
+claim to be missing months from a period it never covers.
+
+### A month the archive does not have
+
+CHIRPS does not publish every month, and the store has to keep the axis complete
+rather than concatenate what exists, or every later date shifts silently.
+
+Probing the source directly: **2023-12, 2024-07 and 2024-08 are absent** — the
+three already documented — and **2022-07 is absent too**, which no note recorded.
+Verified by three HEAD probes each, all 404, so it is a real gap and not a
+transient failure. 2026-09 and 2026-10 are absent as well, consistent with the
+30-60 day publication lag recorded in `CHIRPS_LATENCY_DAYS`.
+
+### The CHIRPS tensor store
+
+New: `tools/build_chirps_zarr.py` ingests the record into one contiguous, chunked
+array in DigitalOcean Spaces, read through the same Icechunk path ERA5 already
+uses. `rainfall.py:chirps_cell_monthly` prefers it and falls back to the
+per-month GeoTIFFs, which remain the authority when no store is configured.
+
+Stored as published — EPSG:4326 at 0.05 degrees, byte values unchanged except
+that the `-9999` sentinel becomes NaN. **No reprojection**: `registry.py` declares
+`native_grid_degrees=0.05` and the product caveat compares CHIRPS's grid with
+ERA5's, so a reprojected store would falsify the product's own metadata. Instead
+the reader weights each ERA5 cell's CHIRPS pixels by `cos(latitude)`, which makes
+the cell mean an area mean and is exact for a regular lat/lon grid. Worth
+recording the size of what that fixes: at 9°N a 0.25° cell is 1.23% smaller than
+at the equator, under 0.4% across Kenya — real, and well below CHIRPS's own
+uncertainty, so this is correctness of principle rather than a number that moves.
+
+Chunks are `(12, 32, 32)` — one calendar year of months, matching the ERA5 store's
+own year-per-chunk convention — so committing a year never leaves a partial
+chunk.
+
+**Evidence.** A 24-month slice was ingested and verified against freshly-read
+source pixels for whole months, not samples: identical shapes, identical nodata
+masks (1,162,393 NaN cells/month), and `max |delta| = 0 mm` across four months.
+All three holes read back as entirely NaN. No `-9999` and no negative value
+anywhere in the store.
+
+### Two things the ingest got wrong first, caught by verifying rather than trusting
+
+1. **South-up data under north-up coordinates.** The first build flipped the
+   arrays to ascending latitude and left the coordinate array derived from the
+   north-up source transform. Pixel values were bit-exact and every value check
+   passed; the *coordinates* ran 39.97 to -39.98, so each pixel was paired with
+   the wrong hemisphere. A `.sel(latitude=...)` lookup would have silently
+   returned the other side of the equator. Caught only because the verification
+   compares the axis, not just the numbers.
+   Both are now flipped together and the order is asserted before writing.
+   `read_month` also refuses a source that is not 1500x1600 at 0.05°, which is
+   what would let a single cube silently become wrong.
+2. **A published month that read as absent was refused, not absorbed.** A full
+   ingest aborted partway because the network failed mid-run, and the tool
+   declined to commit rather than writing those months as NaN — which would have
+   shortened the record while looking exactly like the real archive holes.
+
+The reader now also checks the store's latitude axis is ascending and falls back
+to the per-month archive if it is not, so a mis-built store degrades to slow
+rather than to wrong.
+
+### Missing dependency
+
+`rainfall.py` imported `boto3` for the Spaces-backed series cache, and
+`requirements.txt` did not list it. `icechunk` talks S3 through its own Rust
+client, so nothing pulled it in transitively: the remote series cache was a no-op
+in the built image. Added.
+
+### Also verified: DigitalOcean Spaces can host an Icechunk repository
+
+Measured against the real bucket rather than assumed, because the documented S3
+support table lists `If-Match`/`If-None-Match` for GET and HEAD but **omits them
+from PUT**, which reads as "unsupported".
+
+They are supported. `If-None-Match: *` returns 200 for an absent key and 412 for
+an existing one; `If-Match` returns 200 for a matching ETag and 412 otherwise;
+`GET` immediately after `PUT` reflects the write. Icechunk's defaults
+(`unsafe_use_conditional_create`/`_update`, both true) are therefore safe with no
+trade-offs needed.
+
+One caveat worth carrying: the ETag must be **unquoted**. A quoted `If-Match`
+returns 412. Icechunk strips quotes before sending (`icechunk-s3/lib.rs`:
+`req.if_match(strip_quotes(etag))`), so it sends the form that works — and a
+hand-written client that passes `head_object()["ETag"]` straight through will get
+412 on a correct ETag and conclude the store is broken.
+
+The endpoint must be **regional**. Icechunk prepends the bucket itself, so a
+bucket-qualified endpoint produces
+`primero.primero.fra1.digitaloceanspaces.com` and fails TLS validation.
+`rainfall.py` normalises both spellings; the compose comment says so too.
+
+### The full ingest, and what it bought
+
+**Run 2026-10-05 on the droplet.** 548 months, 544 published, 4 holes, committed
+as snapshot `QT300W6AXWW3JRSZVTYG`. Staging ran at 0.58 months/s; the whole build
+took about 20 minutes. It could not be done from the machine it was written on:
+that host sustained ~125 months before its network failed broadly and the guard
+described above stopped it. The droplet reads the source at 2.93 MB/s.
+
+The store verifies against the source: 548 × 1600 × 1500, latitude ascending
+(−39.975 → 39.975), the four holes recorded, provenance intact.
+
+Measured on the droplet, one ERA5 cell, 2010-01 → 2024-12 (180 months), with all
+three paths returning **identical** results — 180 months, 176 finite cells, 4
+unreadable:
+
+| | before | after |
+|---|---|---|
+| Per-month GeoTIFFs, cold cache | 282.95 s | — |
+| Store, cold cache | — | **0.15 s** |
+| Store, warm cell cache | — | **0.01 s** |
+
+**1,875× on a cold read, 35,000× on a warm one.** Through the real job path
+(`build_and_cache`, polygon in, series out) a 2015–2024 series is **5.3 s cold
+and 0.03 s warm**, against a per-month estimate of 3.4 s/month the code had been
+carrying in `registry.py`.
+
+Those are the same answer, not a different one, which is the part that matters.
+A Kenyan bimodal climatology comes back with the long rains peaking in April at
+185.8 mm, January at 59.2 and June at 30.0, and April 2015 at +34.4% against the
+WMO normal. The four archive holes surface in the payload's coverage as
+`["2022-07-01", "2023-12-01", "2024-07-01", "2024-08-01"]`, so the interface still
+says which months it does not have.
+
+### A read amplification bug the benchmark found
+
+The first measurement after the ingest was **67 s**, not the sub-second the design
+implied. The cause was in the new reader, not the store: it took a time slice and
+then materialised it while keeping the full global latitude/longitude extent.
+That is 180 × 1600 × 1500 = **1.7 GB fetched to answer a question about one
+5×5-pixel cell**, because a lazily-indexed array only fetches the chunks a
+selection actually overlaps.
+
+Bounding the box before touching values took it from 67.16 s to 0.15 s — **480×
+from one line of slicing.** Worth recording the lesson: "lazy" is not the same as
+"cheap". The store was lazy and still moved a gigabyte per job.
+
+The same mistake caused an out-of-memory kill on the build machine while
+verifying the store, which took the droplet's API down with it.
+
+### Disk, since the box was at 80% full
+
+38 GB used of 48 GB, none of it data. Reclaimed **19 GB** (now 19 GB of 154 GB,
+13%):
+
+- **15.2 GB** Docker build cache, entirely unused, pruned
+- **3.4 GB** journald, now capped at `SystemMaxUse=300M` so it does not regrow
+- 470 MB dangling images, 119 MB apt cache, a 126 MB rotated dmesg
+
+**Deliberately not removed: the five stale `gaul-api` image tags (4.4 GB).** The
+gaul-api source is not on this host — no Dockerfile, no git repository, only
+`/root/docker-compose.yml` pointing at `gaul-api:latest`. Those tags are the only
+copy of that image here, so deleting them would be unrecoverable on this machine.
+With 136 GB free there is no reason to spend that safety net.
+
+### An unrelated latent bug this turned up
+
+`geocontextualize-backend-1` is configured `restart: on-failure:5` while every
+other service is `unless-stopped`. It took a graceful shutdown during a droplet
+resize — exit 0 — and did not come back, so the API stayed down until started by
+hand. `on-failure` does not fire on a clean exit, which is exactly what a resize,
+a `docker stop` or a daemon shutdown produces. It is the only service a routine
+operation can leave down.
+
+---
+
+### Verification
+
+```bash
+# 20 new tests, plus the 59 CHIRPS tests
+~/miniconda3/envs/ndvi/bin/python -m unittest tests.test_chirps_store tests.test_chirps
+
+# broader
+~/miniconda3/envs/ndvi/bin/python -m unittest tests.test_rainfall tests.test_measure \
+    tests.test_lookup tests.test_scale tests.test_usage tests.test_contract \
+    tests.test_deployment_config
+```
+
+202 passed in the broader run; 59 in the CHIRPS run.
+
+One existing test changed rather than being deleted:
+`tests/test_chirps.py:HoleHandlingTests._gappy` blanked a *fixed row* to simulate a
+hole. With the union read that row falls in the climatology, not the series under
+test, so the stub now names its hole by month. The assertions are unchanged; a
+positional stub would have silently stopped testing what it was written for.
+
+---
+
+### The measure envelope
+
+`measure.py` existed with its `Measure` class, `measures_for()` and `headline()`
+functions, but `/generate-context` never used it. The response carried raw module
+dicts per evidence-wrapped call site (`_with_dem_evidence`, `_with_vegetation_evidence`,
+etc.), so the client still had to remember the shape of each product's result rather
+than a single uniform `measures` list.
+
+Now `/generate-context` builds `Measure` objects for each module that produced a number
+and returns them at `summary.measures` via `measure.Measure.describe()`. Each entry
+carries `product`, `measure`, `label`, `value`, `units`, `evidence`, `extent`,
+`observed_through`, `computed_at`, `source`, `doi`, and `caveats` — all derived from
+the registry at construction time, so a measure cannot disagree with its product's
+declaration.
+
+The `measures` field is added to `contract.py:ContextSummary` and is `null` when no
+dynamic measures were produced (e.g., only static products answered).
+
+**Evidence.** `Measure.__post_init__` rejects construction without `observed_through`
+for any product with `latency_days` set (ERA5 rainfall `latency_days="45-90"`), which
+is the exact failure that previously produced "as of" dates on some cards and not
+others. DEM and land-cover products have no `latency_days`, so they construct without
+it.
+
+---
+
 ## 1.22.0 — An instrument, not a report
 
 Follows 1.21.0. Four things were wrong with it: the charts were too small to
