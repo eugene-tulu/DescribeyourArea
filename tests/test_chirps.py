@@ -463,13 +463,24 @@ class HoleHandlingTests(unittest.TestCase):
     refused the series for what looked like a units error.
     """
 
+    # The hole is named rather than positional. ``compute_series`` reads the union
+    # of the series window and the 1991-2020 climatology in one pass and slices it,
+    # so a stub that blanked a fixed row would put its hole in the climatology
+    # rather than in the series being asserted about. Naming the month tests the
+    # behaviour under either windowing.
+    HOLE = "2024-02-01"
+
     def _gappy(self, grid, start, end):
         months = rainfall._month_range(start, end)
         block = np.full((len(months), len(grid["latitudes"]), len(grid["longitudes"])),
                         100.0)
-        block[1] = np.nan                      # a hole, as the archive really has
+        if self.HOLE in months:
+            block[months.index(self.HOLE)] = np.nan  # a hole, as the archive has
+            unreadable = [self.HOLE]
+        else:
+            unreadable = []
         return months, block, {"source": "stub", "months": len(months),
-                               "unreadable_months": [months[1]]}
+                               "unreadable_months": unreadable}
 
     def _build(self):
         import os

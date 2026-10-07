@@ -432,10 +432,17 @@ def read_cell_monthly(grid: dict, start: str, end: str, source=None,
         except (OSError, ValueError, KeyError):
             pass
 
+    # Both readers return the same three values, so the cache is written for
+    # either. This used to return early for a supplied source, which meant the
+    # cache was checked for CHIRPS and never populated: the key was product-aware
+    # from 31c3ca8, but only ERA5 ever wrote an entry, so every CHIRPS job
+    # re-read every month and the cache reported a hit rate that was never true.
     if source is not None:
-        return source(grid, start, end)
+        labels, matrix, coverage = source(grid, start, end)
+    else:
+        labels, matrix, coverage = _monthly_cell_totals(
+            _dataset_handle(), grid, start, end)
 
-    labels, matrix, coverage = _monthly_cell_totals(_dataset_handle(), grid, start, end)
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(".tmp")
     # numpy appends ".npz" to a *path* that lacks it, which would break the atomic
@@ -691,12 +698,45 @@ def compute_series(
     if not grid["longitudes"] or not grid["latitudes"]:
         raise ValueError("study area does not intersect the ERA5 grid")
 
-    recent_labels, recent_matrix, recent_coverage = read_cell_monthly(
-        grid, start, end, source)
-    base_labels, base_matrix, base_coverage = read_cell_monthly(
-        grid, CLIMATOLOGY_START, CLIMATOLOGY_END, source)
+    # One read over the union of the two windows, then sliced. These used to be two
+    # independent reads of the same cell set, so every month they share -- which
+    # for a typical request is the whole 1991-2020 climatology -- was fetched
+    # twice. The union is also what the cache is keyed on, so this collapses two
+    # cache entries into one and makes a repeat job a single hit.
+    window_start = min(start, CLIMATOLOGY_START)
+    window_end = max(end, CLIMATOLOGY_END)
+    union_labels, union_matrix, union_coverage = read_cell_monthly(
+        grid, window_start, window_end, source)
+    if not union_labels:
+        raise ValueError("no rainfall data available for the requested period")
+
+    def window_slice(first: str, last: str):
+        import numpy as np
+
+        keep = [i for i, label in enumerate(union_labels)
+                if first <= label[:7] <= last]
+        if not keep:
+            return [], np.empty((0, len(grid["latitudes"]),
+                                 len(grid["longitudes"]))), dict(union_coverage)
+        rows = union_matrix[keep]
+        chosen = [union_labels[i] for i in keep]
+        # The union read spans years, so its coverage lists every unreadable month
+        # in that span. Each window has to see only its own, or a series would
+        # claim to be missing months from a period it never covers.
+        in_window = {label for label in chosen}
+        coverage = dict(union_coverage)
+        coverage["unreadable_months"] = sorted(
+            (label for label in (union_coverage.get("unreadable_months") or [])
+             if label in in_window)
+        )
+        coverage["months"] = len(chosen)
+        return chosen, rows, coverage
+
+    recent_labels, recent_matrix, recent_coverage = window_slice(start, end)
+    base_labels, base_matrix, base_coverage = window_slice(
+        CLIMATOLOGY_START, CLIMATOLOGY_END)
     if not recent_labels:
-        raise ValueError("no ERA5 data available for the requested period")
+        raise ValueError("no rainfall data available for the requested period")
 
     # Average the cells belonging to this study area. The matrix is
     # (month, latitude, longitude), so iterating it yields one 2-D block per month.
