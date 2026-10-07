@@ -15,12 +15,19 @@ pyproj>=3.6.0
 # Scientific Computing
 numpy>=1.26.0
 
-# Rainfall (ERA5 via the public Earthmover Icechunk store on AWS Open Data).
-# Only the offline precompute path needs these; the request path reads a cache.
+# Rainfall (ERA5 via the public Earthmover Icechunk store on AWS Open Data, and
+# CHIRPS via our own store in DigitalOcean Spaces).
+# Only the offline precompute and ingest paths need these; the request path reads
+# a cache.
 xarray>=2023.12.0
 zarr>=3.0.0
 icechunk>=2.0.0
 pcodec>=1.0.0
+
+# boto3 backs the rainfall series cache in Spaces (tools/sync_rainfall_cache.py).
+# icechunk talks S3 through its own Rust client, so it does not pull this in --
+# without it the remote series cache silently no-ops in the built image.
+boto3>=1.34.0
 
 # Environment
 python-dotenv>=1.0.0

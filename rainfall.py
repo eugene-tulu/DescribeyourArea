@@ -24,6 +24,7 @@ import math
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -60,6 +61,149 @@ ERA5_CITATION = (
 )
 ERA5_GRID_DEGREES = 0.25
 ERA5_SOURCE = "ERA5 (Earthmover Icechunk edition)"
+
+
+# --------------------------------------------------------------------------
+# The CHIRPS tensor store
+# --------------------------------------------------------------------------
+#
+# CHIRPS is published as one GeoTIFF per month, which made every job pay for
+# hundreds of independent object opens over the network. The store collapses
+# the whole record into one contiguous, chunked array so a cell-month read is a
+# handful of range reads against chunks that are already adjacent.
+#
+# It lives next to the series cache because they answer different questions: the
+# store holds published pixels, the series cache holds the answers we have
+# already computed from them. A store read that misses still costs one job, not
+# one HTTP request per month.
+#
+#   CHIRPS_STORE_URI=s3://my-bucket/geocontextualize/chirps
+#   RAINFALL_S3_ENDPOINT=https://nyc3.digitaloceanspaces.com
+#   RAINFALL_S3_REGION=nyc3
+#
+# Unset means no store, and every CHIRPS read falls back to the per-month
+# GeoTIFFs. That fallback is the reason the reader is written against a callable
+# rather than against the store directly.
+CHIRPS_STORE_URI_ENV = "CHIRPS_STORE_URI"
+CHIRPS_STORE_VARIABLE = "precip"
+CHIRPS_STORE_GROUP = "chirps/monthly"
+CHIRPS_STORE_BRANCH = "main"
+
+# Chunk shape: (one year of months, 1.6 deg latitude, 1.6 deg longitude).
+#
+# Time is chunked a year at a time because a job always reads the whole 1991-2020
+# climatology plus a recent window, so almost every month is wanted every time;
+# one-year chunks keep the chunk count low without wasting bytes on short reads.
+# This matches the ERA5 store's own layout, which uses a year of time per chunk.
+#
+# Space is chunked small on purpose. The reader's unit is an ERA5 cell, which is
+# 5x5 CHIRPS pixels, so 32x32 holds about six ERA5 cells: an area's cells
+# usually fall inside one chunk instead of dragging a large block in for a few
+# of them.
+CHIRPS_STORE_CHUNKS = (12, 32, 32)
+
+# Bumped when the ingest changes what it writes, on the same principle as
+# RAINFALL_PROCESSING_VERSION: a stored value must never outlive the code that
+# produced it.
+CHIRPS_STORE_BUILD_VERSION = "chirps-store-1"
+
+
+def chirps_store_target() -> Optional[dict]:
+    """Connection details for the CHIRPS store, or None when it is not configured.
+
+    The endpoint is normalised to its regional form because Icechunk adds the
+    bucket to the host itself, and the bucket-qualified spelling DigitalOcean
+    also documents would produce ``<bucket>.<bucket>.fra1.digitaloceanspaces.com``
+    and fail TLS validation.
+    """
+    uri = (os.getenv(CHIRPS_STORE_URI_ENV) or "").strip()
+    if not uri:
+        return None
+    if not uri.startswith("s3://"):
+        raise ValueError(f"{CHIRPS_STORE_URI_ENV} must start with s3://, got {uri!r}")
+    remainder = uri[len("s3://"):].strip("/")
+    if not remainder:
+        raise ValueError(f"{CHIRPS_STORE_URI_ENV} is missing a bucket name")
+    bucket, _, prefix = remainder.partition("/")
+    return {
+        "bucket": bucket,
+        "prefix": prefix.strip("/"),
+        "region": region_hint(),
+        "endpoint": _normalise_endpoint(os.getenv(REMOTE_ENDPOINT_ENV) or None, bucket),
+    }
+
+
+_store_lock = threading.Lock()
+_store_dataset = None
+_store_identity: Optional[tuple] = None
+
+
+def _open_chirps_store(writable: bool = False):
+    """An Icechunk repository handle for the CHIRPS store, or None."""
+    target = chirps_store_target()
+    if target is None:
+        return None
+    import icechunk
+
+    credentials = credentials_for(target["bucket"])
+    storage = icechunk.s3_storage(
+        bucket=target["bucket"],
+        prefix=target["prefix"],
+        region=target["region"],
+        endpoint_url=target["endpoint"],
+        **credentials,
+    )
+    repo = icechunk.Repository.open_or_create(storage=storage)
+    branch = CHIRPS_STORE_BRANCH
+    session = (repo.writable_session(branch) if writable
+               else repo.readonly_session(branch))
+    return repo, session
+
+
+def chirps_store_dataset():
+    """Lazily-opened, cached read view of the store, or None.
+
+    Cached per process because opening a session is several round trips and the
+    reader is called once per cell-month block inside a job. Keyed on the store
+    identity so a re-pointed environment does not reuse the previous repo.
+    """
+    global _store_dataset, _store_identity
+    target = chirps_store_target()
+    if target is None:
+        return None
+    identity = (target["bucket"], target["prefix"], target["region"])
+    if _store_dataset is not None and _store_identity == identity:
+        return _store_dataset
+    with _store_lock:
+        if _store_dataset is not None and _store_identity == identity:
+            return _store_dataset
+        handle = _open_chirps_store(writable=False)
+        if handle is None:
+            return None
+        _repo, session = handle
+        import xarray as xr
+
+        dataset = xr.open_zarr(
+            session.store, group=CHIRPS_STORE_GROUP,
+            consolidated=False, chunks=None,
+        )
+        _store_dataset = dataset
+        _store_identity = identity
+        return _store_dataset
+
+
+def _invalidate_process_caches():
+    """Drop the cached store view.
+
+    The store handle is cached per process because opening a session is several
+    round trips. Anything that changes the store's identity at runtime -- a test
+    repointing the environment, a tool repointing the environment -- has to call
+    this, or it will keep answering from the previous repository.
+    """
+    global _store_dataset, _store_identity
+    with _store_lock:
+        _store_dataset = None
+        _store_identity = None
 
 
 # --------------------------------------------------------------------------
@@ -128,6 +272,20 @@ def _normalise_endpoint(endpoint: Optional[str], bucket: str) -> Optional[str]:
 
 def region_hint() -> str:
     return (os.getenv(REMOTE_REGION_ENV) or "us-east-1").strip()
+
+
+def credentials_for(bucket: str) -> dict:
+    """Static S3 credentials for ``bucket``, or anonymous access.
+
+    Only the ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY`` pair is honoured,
+    which is what the rest of this module already assumes. A public bucket with no
+    keys configured is reachable, so a store on a public bucket needs no secrets.
+    """
+    access = (os.getenv("AWS_ACCESS_KEY_ID") or "").strip()
+    secret = (os.getenv("AWS_SECRET_ACCESS_KEY") or "").strip()
+    if not access or not secret:
+        return {"anonymous": True}
+    return {"access_key_id": access, "secret_access_key": secret}
 
 
 def _s3_client():
@@ -948,11 +1106,154 @@ def _month_range(start: str, end: str) -> list[str]:
 def chirps_cell_monthly(grid: dict, start: str, end: str):
     """Monthly CHIRPS totals per cell, averaged over the ERA5 cell's footprint.
 
+    Prefers the tensor store and falls back to the per-month GeoTIFFs, which are
+    still the authority when no store is configured. Both paths return the same
+    three values, so the caller cannot tell which one answered.
+
     CHIRPS is 0.05 deg and an ERA5 cell is 0.25, so one CHIRPS cell covers 1/625
     of the ERA5 footprint. Averaging the whole footprint rather than reading one
     central CHIRPS pixel is deliberate: a point sample of a 5 km grid would be a
     different claim from the ERA5 cell it is being compared with.
     """
+    from_store = _chirps_cell_monthly_from_store(grid, start, end)
+    if from_store is not None:
+        return from_store
+    return _chirps_cell_monthly_from_geotiffs(grid, start, end)
+
+
+def _chirps_cell_monthly_from_store(grid: dict, start: str, end: str):
+    """The same cell-month table, read from one contiguous chunked array.
+
+    Returns None when no store is configured or the requested window falls outside
+    what the store holds, so the caller falls back rather than reporting an empty
+    result that looks like absent data.
+    """
+    import numpy as np
+
+    dataset = chirps_store_dataset()
+    if dataset is None:
+        return None
+
+    labels = _month_range(start, end)
+    if not labels:
+        return labels, np.empty((0, 0, 0)), _chirps_coverage(labels, [])
+
+    available = dataset.time.dt.strftime("%Y-%m").values
+    wanted = [label[:7] for label in labels]
+    if wanted[0] < available[0] or wanted[-1] > available[-1]:
+        # The store does not cover this window. Falling back is honest; reading a
+        # short window and calling it the whole series would not be.
+        return None
+
+    longitudes = [float(v) for v in grid["longitudes"]]
+    latitudes = [float(v) for v in grid["latitudes"]]
+    store_lats = np.asarray(dataset.latitude.values, dtype="float64")
+    store_lons = np.asarray(dataset.longitude.values, dtype="float64")
+    store_times = np.asarray(dataset.time.values)
+
+    # The cell lookup below is a binary search, so it is only correct on an
+    # ascending latitude axis. The source GeoTIFFs are north-up and the ingest
+    # flips them; a store built before that flip, or by anything else, would
+    # return an empty block for every cell. Refuse rather than report an empty
+    # result that reads as absent rainfall.
+    if store_lats.size > 1 and not np.all(np.diff(store_lats) > 0):
+        print(
+            "chirps store: latitude axis is not ascending; falling back to the "
+            "per-month archive. Rebuild it with tools/build_chirps_zarr.",
+            file=sys.stderr,
+        )
+        return None
+    if store_lons.size > 1 and not np.all(np.diff(store_lons) > 0):
+        print(
+            "chirps store: longitude axis is not ascending; falling back to the "
+            "per-month archive.", file=sys.stderr,
+        )
+        return None
+
+    matrix = np.full((len(labels), len(latitudes), len(longitudes)), np.nan)
+
+    # Index ranges by coordinate search rather than a coordinate slice: floating
+    # point boundaries decide membership in a slice, and an edge cell landing a
+    # rounding error either way would silently change an ERA5 cell's mean.
+    half = ERA5_GRID_DEGREES / 2
+    blocks = []
+    for lat in latitudes:
+        row = np.searchsorted(store_lats, [lat - half, lat + half], side="left")
+        for lon in longitudes:
+            column = np.searchsorted(store_lons, [lon - half, lon + half],
+                                     side="left")
+            blocks.append((int(row[0]), int(row[1]), int(column[0]),
+                           int(column[1])))
+
+    time_index = {str(value)[:7]: position
+                  for position, value in enumerate(store_times)}
+    start_offset = time_index[wanted[0]]
+
+    # Bounding box of the requested cells, as store indices.
+    row_start = min(b[0] for b in blocks)
+    row_stop = max(b[1] for b in blocks)
+    column_start = min(b[2] for b in blocks)
+    column_stop = max(b[3] for b in blocks)
+
+    # Slice space and time *before* touching values. Materialising a time slice
+    # alone would read 180 full global rasters -- 1.7 GB -- to answer a question
+    # about one 5x5 pixel cell, because the lazily-indexed array only fetches the
+    # chunks a selection actually overlaps. Bounding the box first is the
+    # difference between a few kilobytes and a gigabyte.
+    selected = dataset[CHIRPS_STORE_VARIABLE].isel(
+        time=slice(start_offset, start_offset + len(labels)),
+        latitude=slice(row_start, row_stop),
+        longitude=slice(column_start, column_stop),
+    )
+    window = np.asarray(selected.values, dtype="float64")
+    window_lats = store_lats[row_start:row_stop]
+
+    # Each cell's block is now relative to the window rather than the store.
+    blocks = [(r0 - row_start, r1 - row_start, c0 - column_start, c1 - column_start)
+              for r0, r1, c0, c1 in blocks]
+
+    # cos(latitude) weighting makes the mean an area mean rather than a mean of
+    # equal pixel counts. On a regular lat/lon grid a cell's area is proportional
+    # to cos(latitude), so this is exact, and it costs nothing -- unlike
+    # reprojecting, which would replace published values with derived ones.
+    weights_cache: dict[tuple[int, int], float] = {}
+
+    for month_position, label in enumerate(labels):
+        plane = window[month_position]
+        for cell_index, (r0, r1, c0, c1) in enumerate(blocks):
+            if r1 <= r0 or c1 <= c0:
+                continue
+            block = plane[r0:r1, c0:c1]
+            valid = np.isfinite(block)
+            if not valid.any():
+                continue
+            key = (r0, r1)
+            if key not in weights_cache:
+                weights = np.cos(np.radians(window_lats[r0:r1]))
+                weights_cache[key] = np.broadcast_to(
+                    weights[:, None], block.shape
+                )
+            weight = np.where(valid, weights_cache[key], 0.0)
+            total = weight.sum()
+            if total <= 0:
+                continue
+            row = cell_index // len(longitudes)
+            column = cell_index % len(longitudes)
+            matrix[month_position, row, column] = float(
+                (np.where(valid, block, 0.0) * weight).sum() / total
+            )
+
+    # A month on the axis with no finite value anywhere is a month the archive
+    # does not have. It is reported the same way an unreadable month was, in the
+    # same "YYYY-MM-01" form every reader uses, so the interface keeps saying so
+    # rather than plotting a flat line.
+    unreadable = [label for position, label in enumerate(labels)
+                  if not np.isfinite(matrix[position]).any()]
+    return labels, matrix, _chirps_coverage(labels, unreadable)
+
+
+def _chirps_cell_monthly_from_geotiffs(grid: dict, start: str, end: str):
+    """The same table, assembled from one GeoTIFF per month."""
     import numpy as np
     from rasterio.windows import Window
 
