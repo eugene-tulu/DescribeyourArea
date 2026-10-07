@@ -182,6 +182,10 @@ class ContextSummary(BaseModel):
     scene_dates: Dict[str, str] = Field(default_factory=dict)
     scene_ids: Dict[str, str] = Field(default_factory=dict)
     analysis: Optional[AnalysisMetadata] = None
+    # A uniform list of measure dicts, each with value/units/evidence/extent.
+    # Built via measure.Measure.descripe(); see measure.py docstring. Absent when
+    # no dynamic measures were produced.
+    measures: Optional[List[Dict[str, Any]]] = None
     # Anything a reader should know before relying on the numbers above: a module
     # that was skipped and why, a repaired boundary, months worth a second look,
     # or a source that stops short of today.

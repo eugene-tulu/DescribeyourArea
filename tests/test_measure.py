@@ -222,3 +222,59 @@ class RealSeriesTests(unittest.TestCase):
             observed_through=context["series"][-1]["month"] + "-01",
         )
         self.assertTrue(built.observed_through < built.computed_at)
+
+
+class ObservedThroughEnforcementTests(unittest.TestCase):
+    """The guard that turns "some cards say 'as of', some don't" into a hard fail.
+
+    Before the enforcement lived in ``Measure.__post_init__``, every dynamic
+    product could be built without ``observed_through`` and the omission simply
+    surfaced as a missing date on some cards and a stale one on others -- the
+    exact failure this class pins down as an invariant. It sweeps every
+    registered product so a new dynamic product added to the registry is covered
+    by this assertion automatically, and it checks the message names the product
+    and its latency so a half-greatened ``raise`` cannot regress to a generic
+    one that hides the cause.
+    """
+
+    def test_a_dynamic_product_cannot_be_built_without_a_date(self):
+        # Every product with a latency window is dynamic and must carry freshness.
+        dynamic = [(key, prod) for key, prod in registry.PRODUCTS.items()
+                   if prod.latency_days]
+        self.assertTrue(dynamic, "expected at least one dynamic product in the registry")
+        for key, product in dynamic:
+            with self.subTest(product=key):
+                with self.assertRaises(MeasureError) as caught:
+                    Measure(product_key=key, value=1.0, units=product.units)
+                message = str(caught.exception)
+                # The message has to name which product failed and why, otherwise
+                # it is a different error that happens to fire first.
+                self.assertIn(key, message)
+                self.assertIn(product.latency_days, message)
+                self.assertIn("observed_through", message)
+
+    def test_a_static_product_needs_no_date(self):
+        # The counterpart: a static product (latency_days is None) must keep
+        # building without observed_through. This pins the guard to "omitted when
+        # it should not be", not "always fails".
+        static = [(key, prod) for key, prod in registry.PRODUCTS.items()
+                  if not prod.latency_days]
+        self.assertTrue(static, "expected at least one static product in the registry")
+        for key, product in static:
+            with self.subTest(product=key):
+                built = Measure(product_key=key, value=1.0,
+                                units=product.units,
+                                extent=Extent(requested_area_km2=4.0,
+                                              covered_area_km2=4.0))
+                self.assertIsNone(built.observed_through)
+
+    def test_supplying_the_date_satisfies_a_dynamic_product(self):
+        # Supplying observed_through must make the same dynamic product that the
+        # guard rejects build cleanly, so the guard is scoped to the omission and
+        # not to the product itself.
+        key = "rainfall"
+        product = registry.PRODUCTS[key]
+        built = Measure(product_key=key, value=1.0, units=product.units,
+                        observed_through="2026-01-01")
+        self.assertEqual(built.observed_through, "2026-01-01")
+        self.assertEqual(built.describe()["observed_through"], "2026-01-01")

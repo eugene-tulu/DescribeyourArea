@@ -30,6 +30,7 @@ import os
 import jobs
 import registry
 import sensors
+import measure
 from dotenv import load_dotenv
 import sys
 import warnings
@@ -1692,6 +1693,57 @@ async def generate_context(
             area_km2=aoi["bbox_area_km2"],
             ndvi_stats=ndvi_stats,
         )
+        # Build a uniform list of Measure dicts via measure.py, so the client
+        # has one shape to render regardless of which products answered.
+        # Each Measure carries value, units, evidence, extent, observed_through
+        # (required for dynamic products) and caveats -- all derived from the
+        # registry, not restated per call site.
+        measures: list[dict] = []
+        if dem is not None and "mean" in dem:
+            measures.append(measure.Measure(
+                product_key="dem",
+                value=round(dem["mean"], 1),
+                units="m",
+                extent=measure.Extent(
+                    requested_area_km2=round(aoi["bbox_area_km2"], 2),
+                    covered_area_km2=round(aoi["bbox_area_km2"], 2),
+                    native_resolution_m=30.0,
+                ),
+            ).describe())
+        if landcover is not None and isinstance(landcover, dict) and landcover.get("status") == "ok":
+            coverage = landcover.get("coverage")
+            if coverage:
+                measures.append(measure.Measure(
+                    product_key="landcover",
+                    value=coverage,
+                    units="%",
+                    extent=measure.Extent(
+                        requested_area_km2=round(aoi["bbox_area_km2"], 2),
+                        covered_area_km2=round(aoi["bbox_area_km2"], 2),
+                        native_resolution_m=10.0,
+                    ),
+                ).describe())
+        if rainfall_context is not None and rainfall_context.get("status") == "ok":
+            series = rainfall_context.get("series", [])
+            coverage = rainfall_context.get("coverage", {})
+            window = rainfall_context.get("window", {})
+            observed_through = window.get("end")
+            if series:
+                total = round(sum(m.get("value", 0) for m in series), 1)
+                measures.append(measure.Measure(
+                    product_key=rainfall_context.get("product", "rainfall"),
+                    value=total,
+                    units="mm",
+                    extent=measure.Extent(
+                        requested_area_km2=round(aoi["bbox_area_km2"], 2),
+                        covered_area_km2=coverage.get("window") if isinstance(coverage, dict) else None,
+                        native_resolution_m=None,
+                        native_grid_degrees=0.25 if rainfall_context.get("product") == "rainfall" else 0.05,
+                        window_start=window.get("start"),
+                        window_end=observed_through,
+                    ),
+                    observed_through=observed_through,
+                ).describe())
         summary = {
             "dem": _with_dem_evidence(dem),
             "ndvi": _with_vegetation_evidence(ndvi_stats),
@@ -1720,6 +1772,7 @@ async def generate_context(
                 "datasets": sorted(requested),
                 "mode": "synchronous",
             },
+            "measures": measures if measures else None,
             "caveats": _caveats(aoi, dem, landcover, ndvi_stats, rainfall_context),
         }
         # Validating here means a change to a producer that breaks the contract
