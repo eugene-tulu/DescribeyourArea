@@ -67,11 +67,18 @@ function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, n
   };
   collect(geojson);
   if (!positions.length) return null;
-  const lats = positions.map((p) => p[1]);
-  const lngs = positions.map((p) => p[0]);
+  // Avoid spread operator limit (~65k args) by using reduce instead of spread
+  let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
+  for (const pos of positions) {
+    const lat = pos[1], lng = pos[0];
+    if (lat < minLat) minLat = lat;
+    if (lat > maxLat) maxLat = lat;
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
   return [
-    [Math.min(...lats), Math.min(...lngs)],
-    [Math.max(...lats), Math.max(...lngs)],
+    [minLat, minLng],
+    [maxLat, maxLng],
   ];
 }
 

@@ -1735,9 +1735,18 @@ export default function Home() {
         // offline panel told the user to wait for a job that would never help.
         const detail = String(failure?.detail || '');
         const isAreaTooLarge = detail.includes('synchronous limit');
-        if (response.status === 413 && geojson && isAreaTooLarge) {
-          await loadOfflineOffer(geojson);
-          return;
+        if (response.status === 413) {
+          if (geojson && isAreaTooLarge) {
+            await loadOfflineOffer(geojson);
+            return;
+          }
+          // Other 413 cases (payload too large, too many vertices) are also
+          // retryable by simplifying the geometry, but we surface the error
+          // so the user knows what happened and can retry with a simpler shape.
+          throw new Error(
+            `Area too large or payload too large. Try a smaller boundary or ` +
+            `fewer vertices. ${failure?.detail ? `: ${failure.detail}` : ``}`
+          );
         }
         throw new Error(failure?.detail || `Analysis request failed (${response.status}).`);
       }
