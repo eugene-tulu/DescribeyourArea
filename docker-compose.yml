@@ -70,7 +70,11 @@ services:
       options:
         max-size: 10m
         max-file: "3"
-    restart: on-failure:5
+    # unless-stopped, not on-failure: a clean exit does not fire on-failure, and
+    # a clean exit is exactly what a resize, a `docker stop` or a redeploy
+    # produces. On-failure left this service down until it was started by hand --
+    # the only service a routine operation could take offline.
+    restart: unless-stopped
 
   worker:
     build: .
