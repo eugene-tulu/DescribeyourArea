@@ -321,6 +321,17 @@ interface Summary {
   caveats?: string[];
 }
 
+/* The results pane is driven by a phase machine rather than a string protocol.
+   `response` used to hold either prose or "Error: ..."; the two were told apart
+   by prefix-splitting at render time, which made the error branch a fragile parse
+   of its own output. Phases make "what shows now" a single switch that every
+   async handler dispatches into. */
+type ResultPhase = 'idle' | 'searching' | 'error' | 'success';
+interface ResultError {
+  headline: string;
+  detail?: string;
+}
+
 function isDatasetId(value: string): value is DatasetId {
   return DATASET_OPTIONS.some((dataset) => dataset.id === value);
 }
@@ -923,6 +934,80 @@ function DatasetResultCard({
   );
 }
 
+/* ---- Results-pane presentational pieces ----
+   Pure given a phase + data, so the pane renders as a single switch over
+   `resultPhase`/`isLoading`/`prose` instead of a nest of string checks.
+   Splitting them out is what makes the four journeys -- live read, 413->offline,
+   poll->complete, and error/retry -- readable as state transitions rather than
+   as interleaved ternaries. */
+function LoadingState() {
+  return (
+    <div className="flex flex-col gap-5 py-8">
+      <div className="flex items-center gap-3">
+        <span className="beat h-2 w-2 rounded-full bg-signal" />
+        <span className="label">Reading the sources</span>
+      </div>
+      <div className="h-px w-full overflow-hidden bg-raised">
+        <div className="scan h-px w-full" />
+      </div>
+      <ul className="grid gap-2.5 sm:grid-cols-2">
+        {SOURCES.map((source) => (
+          <li
+            key={source.id}
+            className="flex items-center gap-2.5 text-[0.8125rem] text-ink-3"
+          >
+            <span className="h-1 w-1 rounded-full bg-signal-dim" />
+            {source.label}
+            <span className="text-ink-3/60">— {source.role}</span>
+          </li>
+        ))}
+      </ul>
+      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
+        Public satellite services take a moment on a cold cache. The
+        first read of any area is slower than the ones after it.
+      </p>
+    </div>
+  );
+}
+
+function ErrorView({ error, onRetry }: { error: ResultError; onRetry: () => void }) {
+  return (
+    <div role="alert" className="rounded-xl border border-bare/40 bg-bare/10 p-4">
+      <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-bare">
+        <span aria-hidden>!</span>
+        {error.headline}
+      </p>
+      {error.detail && (
+        <p className="text-sm text-bare/90">{error.detail}</p>
+      )}
+      <p className="mt-2 text-xs text-bare/75">
+        Nothing was charged for a failed analysis. Try a smaller
+        boundary, or press Read this area again.
+      </p>
+      <Button size="sm" variant="outline" className="mt-3.5" onClick={onRetry}>
+        Try again
+      </Button>
+    </div>
+  );
+}
+
+function EmptyState() {
+  return (
+    <div className="flex flex-col items-start gap-5 py-10">
+      <div className="ramp w-28" aria-hidden />
+      <p className="display display-md max-w-[24ch] text-ink">
+        Nothing here yet. That is normal.
+      </p>
+      <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
+        Draw a boundary on the map, or search for a place, and this
+        fills in within a few seconds. You will get terrain, land
+        cover, vegetation and rainfall — each with the source it came
+        from attached.
+      </p>
+    </div>
+  );
+}
+
 export default function Home() {
    const { toast } = useToast();
     const [searchQuery, setSearchQuery] = useState('');
@@ -930,9 +1015,10 @@ export default function Home() {
     const [showResults, setShowResults] = useState(false);
    const [selectedLocation, setSelectedLocation] = useState<{lat: number, lng: number} | null>(null);
    const [boundingBox, setBoundingBox] = useState<BoundingBox | null>(null);
-   const [isLoading, setIsLoading] = useState(false);
-   const [response, setResponse] = useState<string>('');
-   const [analysisWarnings, setAnalysisWarnings] = useState<AnalysisWarning[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [resultPhase, setResultPhase] = useState<ResultPhase>('idle');
+  const [resultError, setResultError] = useState<ResultError | null>(null);
+  const [analysisWarnings, setAnalysisWarnings] = useState<AnalysisWarning[]>([]);
    const [isSearching, setIsSearching] = useState(false);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
@@ -1239,7 +1325,8 @@ export default function Home() {
   // area", which was the one thing they were not.
   const clearAnalysis = useCallback(() => {
     setAnalysisSummary(null);
-    setResponse('');
+    setResultPhase('idle');
+    setResultError(null);
     setPlan(null);
     setOffline(null);
     setProgress(null);
@@ -1421,8 +1508,7 @@ export default function Home() {
         void loadVegetationSeries(data.cache_key);
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Submission failed';
-      setResponse(message);
+      reportError(error instanceof Error ? error.message : 'Submission failed');
     } finally {
       setPendingIndicator(null);
     }
@@ -1499,12 +1585,11 @@ export default function Home() {
       const summary = data.summary || {};
       setAnalysisSummary(summary);
       setAnalysisWarnings([]);
-      const result = summarizeData(summary);
-      setResponse(result);
+      setResultPhase('success');
       setActiveCacheKey(cacheKey);
       void loadVegetationSeries(cacheKey);
     } catch (error) {
-      setResponse('Error: ' + (error instanceof Error ? error.message : 'could not read the stored result.'));
+      reportError(error instanceof Error ? error.message : 'could not read the stored result.');
     }
   }
 
@@ -1532,13 +1617,15 @@ export default function Home() {
   // the time a poll can run the current function is in it.
   const analyzeRef = useRef<() => Promise<void>>(async () => {});
 
-  // Failures arrive in the same string slot as a successful summary, prefixed
-  // "Error: ". Splitting here is what lets the panel style them differently.
-  const responseIsError = response.startsWith('Error:');
-  const errorHeadline = responseIsError
-    ? (response.split('\n')[0].replace(/^Error:\s*/, '') || 'The analysis did not finish')
-    : '';
-  const errorDetail = responseIsError ? response.split('\n').slice(1).join(' ') : '';
+  // Route a failure into the phase machine. Centralising this keeps every error
+  // branch consistent and removes the prefix-splitting protocol that used to
+  // decide whether the pane was showing prose or an error. Clearing the summary
+  // here too stops a stale success panel from lingering behind a new error.
+  const reportError = (headline: string, detail?: string) => {
+    setResultError(detail ? { headline, detail } : { headline });
+    setResultPhase('error');
+    setAnalysisSummary(null);
+  };
 
   // Poll a queued area and describe what the worker is actually doing. The job
   // record already holds the timestamps, the indicator and the reason; all that
@@ -1767,7 +1854,7 @@ export default function Home() {
         void pollSubmission(data.cache_key, data.indicator || 'rainfall');
       }
     } catch (error) {
-      setResponse(error instanceof Error ? error.message : 'Submission failed');
+      reportError(error instanceof Error ? error.message : 'Submission failed');
       setShowResults(true);
     } finally {
       setIsLoading(false);
@@ -1786,7 +1873,8 @@ export default function Home() {
     }
 
     setIsLoading(true);
-    setResponse('');
+    setResultPhase('searching');
+    setResultError(null);
     setAnalysisWarnings([]);
     setAnalysisSummary(null);
 
@@ -1823,6 +1911,7 @@ export default function Home() {
         if (response.status === 413) {
           if (geojson && isAreaTooLarge) {
             await loadOfflineOffer(geojson);
+            setResultPhase('idle');
             return;
           }
           // Other 413 cases (payload too large, too many vertices) are also
@@ -1853,18 +1942,16 @@ export default function Home() {
         });
       }
       const summary = data.summary || {};
-      const result = summarizeData(summary);
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
       setAnalysisSummary(summary);
+      setResultPhase('success');
       const areaKey = (summary.rainfall as { cache_key?: string } | undefined)?.cache_key;
       setActiveCacheKey(areaKey ?? null);
       if (areaKey) void loadVegetationSeries(areaKey);
-      setResponse(result);
     } catch (err) {
       console.error(err);
-      const message = "Error: " + (err as Error).message;
-      setResponse(message);
+      reportError((err as Error).message);
     } finally {
       setIsLoading(false);
     }
@@ -2511,72 +2598,18 @@ export default function Home() {
                   ))}
 
                   {isLoading ? (
-                    /* A wait, described. The old interface put a spinning globe
-                       over a grey box; this states what is being read and draws a
-                       sweep across it, so the pause looks like an instrument
-                       working rather than a page that has stopped. */
-                    <div className="flex flex-col gap-5 py-8">
-                      <div className="flex items-center gap-3">
-                        <span className="beat h-2 w-2 rounded-full bg-signal" />
-                        <span className="label">Reading the sources</span>
-                      </div>
-                      <div className="h-px w-full overflow-hidden bg-raised">
-                        <div className="scan h-px w-full" />
-                      </div>
-                      <ul className="grid gap-2.5 sm:grid-cols-2">
-                        {SOURCES.map((source) => (
-                          <li
-                            key={source.id}
-                            className="flex items-center gap-2.5 text-[0.8125rem] text-ink-3"
-                          >
-                            <span className="h-1 w-1 rounded-full bg-signal-dim" />
-                            {source.label}
-                            <span className="text-ink-3/60">— {source.role}</span>
-                          </li>
-                        ))}
-                      </ul>
-                      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
-                        Public satellite services take a moment on a cold cache. The
-                        first read of any area is slower than the ones after it.
-                      </p>
-                    </div>
-                  ) : response ? (
+                    <LoadingState />
+                  ) : resultPhase === 'error' && resultError ? (
+                    <ErrorView
+                      error={resultError}
+                      onRetry={() => void handleAnalyze()}
+                    />
+                  ) : prose ? (
                     <>
                       <div className="max-w-[68ch] text-[1.0625rem] leading-relaxed text-ink-2">
-                        {responseIsError ? (
-                          // An error used to render in the same paragraph style as
-                          // a successful result, in the same panel, with the same
-                          // weight. Reading "Error: Raster processing timed out" as
-                          // a finding is exactly the failure this avoids.
-                          <div
-                            role="alert"
-                            className="rounded-xl border border-bare/40 bg-bare/10 p-4"
-                          >
-                            <p className="mb-2 flex items-center gap-2 text-sm font-semibold text-bare">
-                              <span aria-hidden>!</span>
-                              {errorHeadline}
-                            </p>
-                            {errorDetail && (
-                              <p className="text-sm text-bare/90">{errorDetail}</p>
-                            )}
-                            <p className="mt-2 text-xs text-bare/75">
-                              Nothing was charged for a failed analysis. Try a smaller
-                              boundary, or press Read this area again.
-                            </p>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="mt-3.5"
-                              onClick={() => void handleAnalyze()}
-                            >
-                              Try again
-                            </Button>
-                          </div>
-                        ) : (
-                          response.split('\n').map((paragraph, index) => (
-                            <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
-                          ))
-                        )}
+                        {prose.split('\n').map((paragraph, index) => (
+                          <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
+                        ))}
                       </div>
 
                       {analysisSummary && (
@@ -2627,38 +2660,24 @@ export default function Home() {
                                   submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                                   onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
                                   vegetationSeries={vegetationSeries}
-                                 />
-                               ))}
-                           </div>
-                           {analysisSummary.measures && analysisSummary.measures.length > 0 && (
-                             <div className="mt-8">
-                               <h4 className="label mb-3">Measures</h4>
-                               <dl className="grid gap-3 sm:grid-cols-2">
-                                 {analysisSummary.measures.map((m) => (
-                                   <MeasureCard key={m.product} measure={m} />
-                                 ))}
-                               </dl>
-                             </div>
-                           )}
-                         </div>
+                                />
+                              ))}
+                          </div>
+                          {analysisSummary.measures && analysisSummary.measures.length > 0 && (
+                            <div className="mt-8">
+                              <h4 className="label mb-3">Measures</h4>
+                              <dl className="grid gap-3 sm:grid-cols-2">
+                                {analysisSummary.measures.map((m) => (
+                                  <MeasureCard key={m.product} measure={m} />
+                                ))}
+                              </dl>
+                            </div>
+                          )}
+                        </div>
                       )}
                     </>
                   ) : (
-                    /* The empty state is the first thing a stranger reads after
-                       the promise, so it confirms the promise instead of
-                       describing a control. */
-                    <div className="flex flex-col items-start gap-5 py-10">
-                      <div className="ramp w-28" aria-hidden />
-                      <p className="display display-md max-w-[24ch] text-ink">
-                        Nothing here yet. That is normal.
-                      </p>
-                      <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
-                        Draw a boundary on the map, or search for a place, and this
-                        fills in within a few seconds. You will get terrain, land
-                        cover, vegetation and rainfall — each with the source it came
-                        from attached.
-                      </p>
-                    </div>
+                    <EmptyState />
                   )}
                 </div>
               </div>
@@ -2674,7 +2693,7 @@ export default function Home() {
               they looked like something hidden behind the controls. A comment
               here claimed it was full width for several deploys; only the
               structure was wrong. */}
-          {response && !responseIsError && analysisSummary && (
+          {resultPhase === 'success' && analysisSummary && (
             <TimeSection
               rain={(analysisSummary.rainfall?.series ?? []) as RainPoint[]}
               vegetation={(vegetationSeries?.series ?? []) as VegPoint[]}
