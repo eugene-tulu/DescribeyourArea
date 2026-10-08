@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect, type ReactNode } from 'react';
+import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import {
   Search, MapPin, Loader2, Globe, Satellite, ArrowDown, Download,
@@ -925,10 +925,9 @@ function DatasetResultCard({
 
 export default function Home() {
    const { toast } = useToast();
-   const [searchQuery, setSearchQuery] = useState('');
-   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-   const [summaryText, setSummaryText] = useState<string>('');
-   const [showResults, setShowResults] = useState(false);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+    const [showResults, setShowResults] = useState(false);
    const [selectedLocation, setSelectedLocation] = useState<{lat: number, lng: number} | null>(null);
    const [boundingBox, setBoundingBox] = useState<BoundingBox | null>(null);
    const [isLoading, setIsLoading] = useState(false);
@@ -1040,6 +1039,16 @@ export default function Home() {
   const [drawnInfo, setDrawnInfo] = useState<{ areaKm2: number; lon: number; lat: number } | null>(null);
   const [containingArea, setContainingArea] = useState<{ name: string; level: number; id: string | null; area_km2: number } | null>(null);
   const [containingBusy, setContainingBusy] = useState(false);
+
+  // The copy target is derived from `summary` rather than mirrored from the
+  // prose string. `summaryText` used to track `response` in three places; one of
+  // them ran in the error branch and copied the *previous* success prose while
+  // the screen showed an error. Deriving from the summary makes that impossible:
+  // there is no summary to copy from while an error is shown.
+  const prose = useMemo(
+    () => (analysisSummary ? summarizeData(analysisSummary) : ''),
+    [analysisSummary],
+  );
 
 
   // Search for places using Nominatim
@@ -1230,7 +1239,6 @@ export default function Home() {
   // area", which was the one thing they were not.
   const clearAnalysis = useCallback(() => {
     setAnalysisSummary(null);
-    setSummaryText('');
     setResponse('');
     setPlan(null);
     setOffline(null);
@@ -1415,7 +1423,6 @@ export default function Home() {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Submission failed';
       setResponse(message);
-      setSummaryText(message);
     } finally {
       setPendingIndicator(null);
     }
@@ -1494,12 +1501,10 @@ export default function Home() {
       setAnalysisWarnings([]);
       const result = summarizeData(summary);
       setResponse(result);
-      setSummaryText(result);
       setActiveCacheKey(cacheKey);
       void loadVegetationSeries(cacheKey);
     } catch (error) {
       setResponse('Error: ' + (error instanceof Error ? error.message : 'could not read the stored result.'));
-      setSummaryText(response);
     }
   }
 
@@ -1565,17 +1570,11 @@ export default function Home() {
       if (state === 'ready' || state === 'failed' || state === 'not_submitted') {
         if (state === 'ready') {
           setSubmission((previous) => ({ ...previous, [cacheKey]: { state, cacheKey } }));
-          // Fetch the finished series. The progress line said "Done" and the
-          // card still read "no series has been processed for this exact
-          // boundary yet", and the only way to see the result was to notice that
-          // and press Analyze again. The work is already done; showing it is the
-          // last step, and skipping it is the difference between a queue and a
-          // black hole.
-          // Show the finished reading. A queued area cannot be re-computed --
-          // it was refused synchronously and would be refused again -- so the
-          // artefacts the worker just wrote are assembled instead. Before this
-          // a large area could be queued, completed, and still shown an error.
-          void showComputedResult(activeCacheKey);
+          // A queued area cannot be re-computed -- it was refused synchronously --
+          // so read the artefacts the worker wrote rather than re-running. Reading
+          // `cacheKey` (not the closure-captured `activeCacheKey`, which is null on
+          // the offline path) is what actually surfaces a completed offline result.
+          void showComputedResult(cacheKey);
         }
         return;
       }
@@ -1853,9 +1852,6 @@ export default function Home() {
           lat: (Number(box[1]) + Number(box[3])) / 2,
         });
       }
-      setActiveCacheKey(
-        (data.summary?.rainfall as { cache_key?: string } | undefined)?.cache_key ?? null
-      );
       const summary = data.summary || {};
       const result = summarizeData(summary);
       const ndviWarning = summary.ndvi?.warning;
@@ -1865,12 +1861,10 @@ export default function Home() {
       setActiveCacheKey(areaKey ?? null);
       if (areaKey) void loadVegetationSeries(areaKey);
       setResponse(result);
-      setSummaryText(result);
     } catch (err) {
       console.error(err);
       const message = "Error: " + (err as Error).message;
       setResponse(message);
-      setSummaryText(message);
     } finally {
       setIsLoading(false);
     }
@@ -2394,7 +2388,7 @@ export default function Home() {
                     <MapPin className="h-4 w-4 text-signal" />
                     <span className="text-[0.9375rem] font-medium">The reading</span>
                   </div>
-                  {summaryText && <CopySummary summaryText={summaryText} />}
+                   {prose && <CopySummary summaryText={prose} />}
                 </div>
 
                 <div className="px-5 py-5">
