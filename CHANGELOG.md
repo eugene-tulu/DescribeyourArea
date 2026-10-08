@@ -276,6 +276,38 @@ is the exact failure that previously produced "as of" dates on some cards and no
 others. DEM and land-cover products have no `latency_days`, so they construct without
 it.
 
+### The result pane was driven by a string, not a state
+
+The results pane decided what to render by overloading one `response` string:
+prose on success, or `"Error: ..."` on failure, told apart by splitting on the
+prefix at render time (`responseIsError`, `errorHeadline`, `errorDetail`). That
+made the error branch a parse of its own output, and left two latent bugs:
+
+- A queued-offline area that had finished was re-read with `/generate-context`,
+  which still refuses anything past the synchronous cap — so four completed
+  modules showed an error over the result. `pollSubmission` now hands
+  `showComputedResult(cacheKey)` the key it polled, and that reads
+  `/context?cache_key=` instead, which returns the stored summary.
+- `CopySummary` shadowed `response` while an error was shown, so copying "the
+  reading" copied the *previous* success prose. Prose is now derived once from
+  `analysisSummary` via `useMemo`, so there is no value left to shadow.
+
+The pane is now a switch over `resultPhase` (`idle | searching | error |
+success`) with a structured `ResultError` (`{headline, detail}`) set by a
+single `reportError()`; `LoadingState`, `ErrorView` and `EmptyState` are now
+extracted presentational components, and the `measures` panel and CSV/JSON
+exports read the same derived `analysisSummary`. Submitting a pre-existing area
+for rainfall (`submitForPreprocessing`) previously rendered its failure as
+green prose; it now routes through `ErrorView` like every other failure.
+
+**Evidence.** Smoke-tested against the live deployment before restructuring
+(see verification block): a 6 km² area returns `summary.measures`
+(`Elevation 1800.7 m`), a 276.9 km² area is refused with HTTP 413 and
+`"synchronous limit is 100 km²"`, `/rainfall/plan` returns the same limit,
+`/rainfall/submit` yields a `cache_key`, polling reaches `ready`, and
+`GET /context?cache_key=` returns the completed `landcover` summary — the
+exact data path `showComputedResult` now relies on.
+
 ---
 
 ## 1.22.0 — An instrument, not a report
