@@ -15,6 +15,7 @@ import CopySummary from '@/components/Copy';
 import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
 import { Wordmark } from '@/components/Mark';
 import { useToast } from '@/hooks/use-toast';
+import { computeStartDate } from '@/lib/window';
 
 
 // Dynamic imports to avoid SSR issues with Leaflet
@@ -1035,14 +1036,6 @@ export default function Home() {
   const [customStart, setCustomStart] = useState('');
   function todayISO(): string {
     const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  }
-  function computeStartDate(endISO: string, amount: number, unit: 'years' | 'months' | 'days'): string {
-    const d = new Date(`${endISO}T00:00:00`);
-    const safeAmount = Math.max(1, Number(amount) || 1);
-    if (unit === 'months') d.setMonth(d.getMonth() - safeAmount);
-    else if (unit === 'days') d.setDate(d.getDate() - safeAmount);
-    else d.setFullYear(d.getFullYear() - safeAmount);
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
   // The inclusive end of the window, in YYYY-MM-DD. A set value wins; otherwise
