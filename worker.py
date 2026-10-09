@@ -157,7 +157,8 @@ def run_forever(
     # rate-limited to a handful of times a day. It is isolated so a store failure
     # never trips the environment-failure counter -- the queue is more important
     # than the store being a month or two behind.
-    auto_refresh = bool(os.getenv("CHIRPS_STORE_AUTO_UPDATE"))
+    auto_refresh = (os.getenv("CHIRPS_STORE_AUTO_UPDATE", "1").strip().lower()
+                    not in ("0", "false", "no", "off", ""))
     refresh_seconds = float(os.getenv("CHIRPS_STORE_REFRESH_SECONDS", "21600"))
     last_refresh = time.monotonic()
 

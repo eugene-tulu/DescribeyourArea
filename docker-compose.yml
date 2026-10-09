@@ -113,6 +113,13 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       RAINFALL_ALERT_WEBHOOK: ${RAINFALL_ALERT_WEBHOOK:-}
       RAINFALL_ALERT_RULES: ${RAINFALL_ALERT_RULES:-}
+      # Keep the CHIRPS store current with DEA's monthly publications, from the
+      # worker in the background. Extending is idempotent and isolated (a failure
+      # never fails a sweep), and the cadence is a few times a day. Set to 0 to
+      # turn it off -- it is the default-on piece here because a store that stops
+      # at its build date sends every recent window to the GeoTIFF fallback.
+      CHIRPS_STORE_AUTO_UPDATE: ${CHIRPS_STORE_AUTO_UPDATE:-1}
+      CHIRPS_STORE_REFRESH_SECONDS: ${CHIRPS_STORE_REFRESH_SECONDS:-21600}
     mem_limit: 768m
     cpus: 0.75
     pids_limit: 128
