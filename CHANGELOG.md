@@ -33,6 +33,52 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ## Unreleased — The CHIRPS cache that was checked but never written
 
+### /generate-context honours the rainfall product
+
+The live preview accepted the ERA5/CHIRPS choice and dropped it. `GeoJSONRequest`
+declared only `geojson`, so Pydantic ignored the frontend's `product`; and even
+once read, `cached_context()` and `_with_rainfall_evidence()` were both called
+without it — so the preview always read the ERA5 cache and labelled the result
+"ERA5 monthly precipitation". A reader who chose CHIRPS (finer 5.6 km, fresher,
+observed-class) got an ERA5 answer with no sign the choice was silent, even
+though `CHIRPS_STORE_URI` was configured. Evidence: a differential
+`POST /api/generate-context?...&product` returned identical ERA5 evidence for
+both `product:"rainfall"` and `product:"chirps"`.
+
+- `GeoJSONRequest` gains `product: str = "rainfall"` (matches `SubmitRequest`).
+- `main.py`: `cached_context(geom, product=request.product)` reads the product's
+  own cache; `_with_rainfall_evidence(rainfall_context, product=request.product)`
+  labels the evidence for the product that answered.
+- Regression test in `tests/test_chirps.ApiPlumbingTests` asserts the product
+  reaches `cached_context` and the series is labelled `observed`; it fails on the
+  pre-fix code (product defaulted to `rainfall`).
+- Post-fix live check: `product:"chirps"` now returns
+  `"CHIRPS v2.0 (satellite and gauge, 0.05 degrees), via Digital Earth Africa"`
+  while `product:"rainfall"` returns `"ERA5 monthly precipitation, 0.25 degrees"`.
+
+### Contract tests refreshed to the current surface
+
+`tests/test_client_contract.py` pinned three strings the refactors had removed:
+`setResponse('')` → `setResultPhase('idle')`, `responseIsError` →
+`resultPhase === 'error'`, and the date control's `aria-label="Window start"` /
+`windowYears === years` → `aria-label="Window start date"` / `periodAmount ===
+years`. The first two were already red on `e432715` (stale from the phase-machine
+refactor); the date one was displaced by the window redesign. Refreshed to assert
+the same intent against the live surface.
+
+### Frontend test runner (Vitest)
+
+The client had no JS-level test runner (`dev`/`build`/`lint` only); the
+backend's `test_client_contract.py` text-scanned the source, but nothing ran the
+frontend's own logic. Added Vitest (node env, `lib/**/*.test.ts`) and extracted
+`computeStartDate` into `client/lib/window.ts` as a pure module — no clock, no
+React — so the end-date+lookback arithmetic is testable without the page. Six
+cases pin whole years, months, days, month/year-boundary rollover, the zero-padded
+`YYYY-MM-DD` shape, and the 1-of-anything floor. PostCSS is overridden to an
+empty plugin set in the Vitest config because the Tailwind v4 config cannot load
+outside Next's runtime. Vitest installs in the Docker builder stage only, so the
+production image is unchanged.
+
 ### Date window control: end-date + lookback
 
 `client/app/page.tsx` moved the date control to an end-date + lookback model:
