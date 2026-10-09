@@ -820,7 +820,7 @@ export default function TimeSection({
                       // is happening, for as long as it is happening, and the wait is
                       // quantified because a spinner over an unquantified wait is the
                       // thing this replaces.
-                      `Building now — reading ${jobMonths ? `${jobMonths} months` : "month by month"} from MODIS. This usually takes a few minutes, and you can leave this page open.`
+                      `Building now — reading ${jobMonths ? `${jobMonths} months` : "month by month"} from MODIS, and the years behind them to form the normal. It takes a few minutes; you can leave this page open.`
                     : (vegetationNotice ??
                       "Read offline from MODIS, one month at a time. The wait is minutes rather than seconds, and it does not grow with the size of the area.")}
                 </p>

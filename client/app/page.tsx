@@ -130,10 +130,10 @@ const DATASET_OPTIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain variation' },
-  { id: 'landcover', label: 'Land cover', description: 'ESA WorldCover composition' },
-  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Recent vegetation condition' },
-  { id: 'rainfall', label: 'Rainfall & drought', description: 'ERA5 monthly totals and anomaly vs normal' },
+  { id: 'dem', label: 'Elevation & terrain', description: 'How much ground there is to work with' },
+  { id: 'landcover', label: 'Land cover', description: 'ESA WorldCover, one date, classed' },
+  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'What is alive, right now' },
+  { id: 'rainfall', label: 'Rainfall & drought', description: 'Against the normal, not against hope' },
 ];
 
 const LANDCOVER_LABELS: Record<string, string> = {
@@ -731,10 +731,10 @@ function JobProgressLine({
   queued?: string[];
 }) {
   const stage: Record<string, string> = {
-    pending: 'Queued, waiting for a worker.',
-    running: 'Being computed now.',
+    pending: 'Queued — it will be read in turn.',
+    running: 'Being read now, one month at a time, at native resolution.',
     ready: 'Done.',
-    failed: 'Could not be computed.',
+    failed: 'Could not be read.',
   };
   const active = progress.state === 'pending' || progress.state === 'running';
   const elapsed = useElapsedSince(progress.startedAt ?? progress.submittedAt, active);
@@ -1011,10 +1011,10 @@ function DatasetResultCard({
         <ModuleBlock title={option.label} description={option.description}>
           <p className="fig text-sm text-ink-2">
             {pending
-              ? 'Queued. Precipitation is processed offline, usually within a few minutes.'
+              ? 'Queued. Rainfall is read at its full 5.6 km resolution rather than estimated, so it is prepared after you ask instead of in the moment you ask.'
               : rejected
-                ? submission?.reason || 'The submission queue is full. Try again shortly.'
-                : 'No series has been processed for this exact boundary yet.'}
+                ? submission?.reason || 'The queue is full at the moment. Try again shortly.'
+                : 'This exact outline has not been read yet.'}
           </p>
           {!pending && onSubmit && (
             <button
@@ -1022,7 +1022,7 @@ function DatasetResultCard({
               onClick={onSubmit}
                         className="btn btn-primary mt-4 h-10 px-4 text-[0.8125rem]"
             >
-              {rejected ? 'Try again' : 'Process precipitation for this area'}
+              {rejected ? 'Try again' : 'Read rainfall for this outline'}
             </button>
           )}
           <EvidenceLine evidence={rain?.evidence} status={rain?.status || 'not_computed'} />
@@ -1226,8 +1226,8 @@ function ErrorView({ error, onRetry }: { error: ResultError; onRetry: () => void
         <p className="text-sm text-bare/90">{error.detail}</p>
       )}
       <p className="mt-2 text-xs text-bare/75">
-        Nothing was charged for a failed analysis. Try a smaller
-        boundary, or press Read this area again.
+        Nothing was charged for a failed read — we would rather refuse than
+        approximate. Try a smaller boundary, or press Read this area again.
       </p>
       <Button size="sm" variant="outline" className="mt-3.5" onClick={onRetry}>
         Try again
@@ -1244,10 +1244,11 @@ function EmptyState() {
         Nothing here yet. That is normal.
       </p>
       <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
-        Draw a boundary on the map, or search for a place, and this
-        fills in within a few seconds. You will get terrain, land
-        cover, vegetation and rainfall — each with the source it came
-        from attached.
+        Draw a boundary on the map, or search for a place, and this fills in
+        within seconds. You get terrain, land cover, vegetation and rainfall —
+        each one naming the instrument it came from, and each one saying what
+        kind of number it is. That second part is the point: a figure nobody
+        can check is a figure nobody should act on.
       </p>
     </div>
   );
@@ -1715,7 +1716,7 @@ export default function Home() {
     }
   }
 
-  return lines.join(' ') || 'The selected data sources did not return values for this area.';
+  return lines.join(' ') || 'None of the chosen sources have anything to say about this outline. That is an answer too — it usually means open water, or outside the reach of the instruments.';
 }
 
 
