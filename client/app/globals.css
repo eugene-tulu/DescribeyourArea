@@ -86,11 +86,21 @@
   --text-2: #a3b3a8;  /*  8.9:1 on void */
   --text-3: #77877c;  /*  5.0:1 on void — the worst case, the 11px label */
 
-  /* The ramp. One accent does the signalling; the rest is only ever used where
-     it also carries meaning, so colour never becomes noise. */
-  --signal: #c3f24e;   /* 15.0:1 on void — vigorous cover, and the accent */
-  --signal-dim: #86b62f;
-  --deep: #55ad3e;     /* established cover */
+  /* The ramp, then the accent -- and they are deliberately not the same colour.
+
+     One accent does the signalling (chrome: focus, links, buttons, the map), and
+     `vigour` is the "vigorous cover" rung of the false-colour scale this product
+     reads. They used to be one token, which meant the accent was also a claim
+     about vegetation. Making the accent verdigris would have put hue 169 degrees
+     *after* green 108 on the wheel and given a 1.2:1 step into `deep`, so the
+     ramp would have read as a muddy smear while misstating the product's own
+     scale. Split apart, the ramp still runs bare -> stressed -> vigour -> deep as
+     a lightness journey, and the accent is free to be a colour rather than a
+     claim. */
+  --signal: #3f9d8c;   /*  6.1:1 on void, 5.4:1 on raised — the accent */
+  --signal-dim: #349184; /*  5.2:1 on void, 4.7:1 on raised */
+  --vigour: #c3f24e;   /* 15.3:1 on void — vigorous cover, a ramp rung */
+  --deep: #55ad3e;     /*  7.1:1 — established cover */
   --stressed: #e8ac33; /*  9.8:1 — the caution lane */
   --bare: #e56a4e;     /*  6.0:1 — the error lane */
 
@@ -139,6 +149,7 @@
   --color-caution: var(--caution);
   --color-signal: var(--signal);
   --color-signal-dim: var(--signal-dim);
+  --color-vigour: var(--vigour);
   --color-deep: var(--deep);
   --color-stressed: var(--stressed);
   --color-bare: var(--bare);
@@ -501,7 +512,9 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
 .link:hover { text-decoration-thickness: 2px; }
 
 ::selection {
-  background: rgba(185, 232, 75, 0.28);
+  /* Derived from the accent rather than a second literal, so the selection
+     highlight cannot drift from it the way the literal did. */
+  background: color-mix(in srgb, var(--signal) 28%, transparent);
   color: #fff;
 }
 
@@ -576,7 +589,7 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
     90deg,
     var(--bare) 0%,
     var(--stressed) 28%,
-    var(--signal) 62%,
+    var(--vigour) 62%,
     var(--deep) 100%
   );
 }
@@ -598,7 +611,12 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
   position: absolute;
   inset: 0;
   width: 30%;
-  background: linear-gradient(90deg, transparent, rgba(185, 232, 75, 0.55), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--signal) 55%, transparent),
+    transparent
+  );
   animation: sweep 1.5s var(--ease) infinite;
 }
 
@@ -658,7 +676,9 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
   color: var(--text-2) !important;
 }
 .leaflet-bar a:hover {
-  background-color: rgba(185, 232, 75, 0.16) !important;
+  /* The accent's own wash. It was a lime wash hardcoded beside the token, so it
+     drifted from the accent the moment the accent changed. */
+  background-color: rgba(63, 157, 140, 0.16) !important;
   color: var(--signal) !important;
 }
 .leaflet-bar a.leaflet-disabled {
@@ -720,7 +740,9 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
   border-radius: 8px !important;
 }
 .leaflet-draw-actions a:hover {
-  background: #cbf76a !important;
+  /* A lighter step of the accent, so the hover reads as the same colour rather
+     than as a leftover from the previous one. */
+  background: #4fb3a3 !important;
 }
 .leaflet-control-attribution {
   background: rgba(5, 8, 10, 0.72) !important;
@@ -761,8 +783,9 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
     --text-3: #555555;
     --line: #cccccc;
     --line-2: #999999;
-    --signal: #3f6b00;
-    --signal-dim: #3f6b00;
+    --signal: #0f5c50;
+    --signal-dim: #0f5c50;
+    --vigour: #3f6b00;
     --deep: #2f6b1f;
     --stressed: #7a4f00;
     --bare: #9c2f16;
