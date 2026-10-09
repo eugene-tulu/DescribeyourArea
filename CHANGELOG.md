@@ -35,16 +35,19 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ### Date window control: end-date + lookback
 
-`client/app/page.tsx` replaced the separate year-preset dropdown
-(`windowYears`) and the dual start/end date fields (`customStart`/`customEnd`)
-with a single end-date picker plus a lookback period whose start is derived.
-The window is always `(end − period)`: end defaults to today, the start is
-computed locally and sent as `window_start`/`window_end`, so a shared link
-reproduces the analysed window rather than an approximation of it.
+`client/app/page.tsx` moved the date control to an end-date + lookback model:
+the window is `(end − period)` by default, with `startDate`/`endDate` derived
+locally and sent as `window_start`/`window_end` so a shared link reproduces the
+analysed window rather than an approximation of it. A custom start is preserved
+as an override, so an asymmetric window ("since the last rains") is still
+reachable; presets set the lookback and clear both custom dates. Legacy
+start/end and `years` links still round-trip.
 
-- `periodAmount`/`periodUnit`/`customEnd` state replaces `windowYears`/
-  `customStart`; `startDate`/`endDate` are derived, not entered.
+- `periodAmount`/`periodUnit`/`customEnd` (plus `customStart` override) replace
+  `windowYears`; `startDate = customStart || computeStartDate(endDate, ...)` and
+  `endDate = customEnd || todayISO()` are derived, not entered.
 - `todayISO()`/`computeStartDate()` are the single source of the bounds;
+  `customRangeValid = endDate <= today && startDate <= endDate`.
   `customRangeValid = endDate <= today` (a future end is a misread, not a refusal).
 - Share links now encode `end` + `period` + `unit`; the URL parser still reads
   legacy `years` and exact `start`/`end` so old links round-trip.
