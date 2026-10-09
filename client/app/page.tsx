@@ -962,10 +962,11 @@ function LoadingState() {
           </li>
         ))}
       </ul>
-      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
-        Public satellite services take a moment on a cold cache. The
-        first read of any area is slower than the ones after it.
-      </p>
+                      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
+                        We read each source at its native resolution and hold nothing
+                        that is not yours. The first outline is slower than the ones
+                        after it — sources complete in order, shown below.
+                      </p>
     </div>
   );
 }
@@ -2545,34 +2546,38 @@ export default function Home() {
                   )}
                   {offline && (
                     <div className="mb-6 rule-t pt-5">
-                      <p className="headline">
-                        This area is <span className="fig text-signal">{formatNumber(offline.areaKm2, 0)} km²</span>
-                      </p>
-                      <p className="fig mt-1.5 text-[0.8125rem] leading-relaxed text-ink-2">
-                        A live request handles up to {formatNumber(offline.limitKm2, 0)} km²
-                        so it stays inside a few seconds. A larger area is not refused
-                        — it is read offline, at a coarser resolution, and you choose
-                        whether to wait.
-                      </p>
-                      <dl className="rows mt-4">
-                        {offline.plans.map((plan) => (
-                          <Figure
-                            key={plan.indicator}
-                            term={
-                              plan.already_computed
-                                ? `${plan.indicator} — already computed`
-                                : plan.indicator || ''
-                            }
-                            value={`${
-                              plan.resolution_m ? `${plan.resolution_m} m` : `${plan.resolution_km} km`
-                            } · ${plan.estimated_seconds ?? '?'}s est.`}
-                          />
-                        ))}
-                      </dl>
+                    <p className="headline">
+                      This area is <span className="fig text-signal">{formatNumber(offline.areaKm2, 0)} km²</span> — large enough for a curated reading.
+                    </p>
+                    <p className="fig mt-1.5 text-[0.8125rem] leading-relaxed text-ink-2">
+                      A live preview handles up to {formatNumber(offline.limitKm2, 0)} km² in a few seconds.
+                      Anything larger goes to the reading room, where each source is
+                      read at its full native resolution and the chain of custody for
+                      every figure is shown while it works. A coarse grid up front
+                      keeps the wait short; you choose whether to wait for the full
+                      reading.
+                    </p>
+                    <dl className="rows mt-4">
+                      {offline.plans.map((plan) => (
+                        <Figure
+                          key={plan.indicator}
+                          term={
+                            plan.already_computed
+                              ? `${plan.indicator} — already computed`
+                              : plan.indicator || ''
+                          }
+                          value={`${
+                            plan.resolution_m ? `${plan.resolution_m} m` : `${plan.resolution_km} km`
+                          } · ${plan.estimated_seconds ?? '?'}s est.${
+                            plan.reason ? ` · ${plan.reason}` : ''
+                          }`}
+                        />
+                      ))}
+                    </dl>
                       {offline.queued.length ? (
                         <p className="fig mt-3 text-sm text-ink">
-                          Queueing {offline.queued.join(', ')}. The progress line reports
-                          when each is ready.
+                          Queued {offline.queued.join(', ')} in the reading room. The
+                          progress line below reports each module as it finishes.
                         </p>
                       ) : (
                         <button
@@ -2580,14 +2585,16 @@ export default function Home() {
                           onClick={queueOffline}
                           className="btn btn-primary mt-4 h-10 px-4 text-[0.8125rem]"
                         >
-                          Process {offline.plans.length} module
-                          {offline.plans.length === 1 ? '' : 's'} offline
+                          Read {offline.plans.length} module
+                          {offline.plans.length === 1 ? '' : 's'} in the reading room
                         </button>
                       )}
                       <p className="fig mt-2.5 text-[0.6875rem] text-ink-3">
                         Times are estimates from the measured per-read cost, not
-                        guarantees. A coarser grid is a different kind of claim, so the
-                        resolution each module will use is listed rather than buried.
+                        guarantees. A coarser grid is a deliberate choice to bound the
+                        wait, not a short-cut on provenance — the resolution each
+                        module will use is listed above so the claim matches the
+                        evidence.
                       </p>
                     </div>
                   )}
