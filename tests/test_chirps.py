@@ -258,6 +258,33 @@ class ApiPlumbingTests(unittest.TestCase):
         self.assertEqual(rain["evidence"]["status"], "observed",
                          "a CHIRPS selection was labelled with ERA5's modelled class")
 
+    def test_a_completed_chirps_read_is_displayed_not_a_miss(self):
+        # /context assembles a finished reading from stored artefacts. It read
+        # the rainfall module from the ERA5 cache by the area alone, so a job
+        # that computed CHIRPS -- series cached under "chirps" -- came back with
+        # no rainfall at all; and with dem/landcover/ndvi never queued for a
+        # precipitation job, `modules` was empty and the read 404'd "nothing has
+        # been computed yet" over a series that had just finished.
+        import jobs
+
+        jobs.write_job({"cache_key": self.KEY, "indicator": "rainfall",
+                        "product": "chirps", "state": "ready",
+                        "submitted_at": "2026-09-28T00:00:00+00:00"})
+        rainfall.write_cache(self.KEY, {
+            "product": "chirps",
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "window": {"start": "2026-01-01", "end": "2026-01-31"},
+            "series": [{"month": "2026-01", "precip_mm": 10.0, "normal_mm": 30.0}],
+        }, product="chirps")
+
+        response = self.client.get(f"/context?cache_key={self.KEY}")
+        self.assertEqual(response.status_code, 200, response.text[:300])
+        rain = response.json()["summary"]["rainfall"]
+        self.assertEqual(rain["status"], "ok", rain)
+        self.assertEqual(rain["evidence"]["status"], "observed",
+                         "the assembled reading labelled a CHIRPS series as "
+                         "something other than observed")
+
     def test_an_unknown_product_is_refused_with_the_ones_that_exist(self):
         response = self.client.post(
             "/rainfall/submit", json={"geojson": self.AOI, "product": "smoke-signals"})

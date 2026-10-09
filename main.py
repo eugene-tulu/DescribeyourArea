@@ -2558,10 +2558,15 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None):
     missing: list[str] = []
     for name in wanted:
         if name == "rainfall":
-            # Rainfall does not use the artefact store. The worker writes it to
-            # the ERA5 cache, which is why reading artefacts alone silently
-            # dropped the headline module from the assembled reading.
-            context = _rainfall_by_key(key, "rainfall")
+            # Rainfall does not use the artefact store. The worker writes it into
+            # the *product* cache -- ERA5's for a rainfall job, CHIRPS's for a
+            # chirps job -- keyed by area and product. Reading the ERA5 cache by
+            # the area alone served ERA5 to a reader whose job computed CHIRPS,
+            # or nothing at all: a completed CHIRPS read came back "nothing has
+            # been computed yet". Read the product the job recorded; a later
+            # product submission is the one honoured (see jobs._job_product).
+            product = jobs._job_product(key) or "rainfall"
+            context = _rainfall_by_key(key, product)
             if context.get("status") != "ok":
                 missing.append(name)
                 continue
