@@ -316,6 +316,12 @@ interface Summary {
   landcover?: LandcoverStats | null;
   rainfall?: RainfallResult | null;
   country?: string | null;
+  /** Administrative chain from the boundary service: country, region, district. */
+  admin?: {
+    country?: string | null;
+    admin1?: string | null;
+    admin2?: string | null;
+  } | null;
   analysis?: AnalysisMetadata;
   /** Uniform measure envelope shipped as of 1.21.0 (contract.py). */
   measures?: MeasureSummary[];
@@ -328,6 +334,16 @@ interface Summary {
    of its own output. Phases make "what shows now" a single switch that every
    async handler dispatches into. */
 type ResultPhase = 'idle' | 'searching' | 'error' | 'success';
+/* The administrative place this outline sits in, as specific as we know it:
+   country · region (ADM1) · district (ADM2). A country alone names a large unit;
+   the chain under it names the place. Falls back to the country when the finer
+   levels did not resolve. */
+function locationLabel(summary: Summary): string {
+  const admin = summary.admin;
+  const parts = [admin?.country ?? summary.country, admin?.admin1, admin?.admin2];
+  return parts.filter((part): part is string => Boolean(part)).join(' · ');
+}
+
 interface ResultError {
   headline: string;
   detail?: string;
@@ -1412,8 +1428,9 @@ export default function Home() {
   function summarizeData(summary: Summary): string {
   const lines: string[] = [];
 
-  if (summary.country) {
-    lines.push(`Location context: ${summary.country}.`);
+  const location = locationLabel(summary);
+  if (location) {
+    lines.push(`Location context: ${location}.`);
   }
   if (summary.analysis?.bbox_area_km2 != null) {
     lines.push(`Analysis bounding box: ${formatNumber(summary.analysis.bbox_area_km2, 2)} km².`);
@@ -2696,9 +2713,9 @@ export default function Home() {
                         <div className="mt-8 border-t border-rule pt-7">
                           <div className="mb-6 flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
                             <h3 className="display display-md">Selected data</h3>
-                            {analysisSummary.country && (
+                            {locationLabel(analysisSummary) && (
                               <span className="text-[0.9375rem] text-ink-2">
-                                {analysisSummary.country}
+                                {locationLabel(analysisSummary)}
                               </span>
                             )}
                             {analysisSummary.analysis?.bbox_area_km2 != null && (

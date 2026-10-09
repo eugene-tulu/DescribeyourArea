@@ -1378,6 +1378,102 @@ async def get_country_from_centroid(geojson_geom: dict) -> Optional[str]:
         print(f"⚠️ Country lookup failed: {e}", file=sys.stderr)
     return None
 
+
+def _build_measures(dem, landcover, rainfall_context, requested_area_km2) -> list[dict]:
+    """Uniform Measure list for a reading.
+
+    One builder behind both readers -- the synchronous path and the read-from-
+    artefacts path -- so a rainfall measure appears wherever the rainfall module
+    is, not only on a synchronous read. Each Measure carries value, units,
+    evidence, extent and (for a dynamic product) observed_through, all derived
+    from the registry rather than restated.
+    """
+    measures: list[dict] = []
+    if dem is not None and "mean" in dem:
+        measures.append(measure.Measure(
+            product_key="dem",
+            value=round(dem["mean"], 1),
+            units="m",
+            extent=measure.Extent(
+                requested_area_km2=requested_area_km2,
+                covered_area_km2=requested_area_km2,
+                native_resolution_m=30.0,
+            ),
+        ).describe())
+    if landcover is not None and isinstance(landcover, dict) and landcover.get("status") == "ok":
+        coverage = landcover.get("coverage")
+        if coverage:
+            measures.append(measure.Measure(
+                product_key="landcover",
+                value=coverage,
+                units="%",
+                extent=measure.Extent(
+                    requested_area_km2=requested_area_km2,
+                    covered_area_km2=requested_area_km2,
+                    native_resolution_m=10.0,
+                ),
+            ).describe())
+    if rainfall_context is not None and rainfall_context.get("status") == "ok":
+        series = rainfall_context.get("series", [])
+        coverage = rainfall_context.get("coverage", {})
+        window = rainfall_context.get("window", {})
+        observed_through = window.get("end")
+        if series:
+            total = round(sum(m.get("value", 0) for m in series), 1)
+            measures.append(measure.Measure(
+                product_key=rainfall_context.get("product", "rainfall"),
+                value=total,
+                units="mm",
+                extent=measure.Extent(
+                    requested_area_km2=requested_area_km2,
+                    covered_area_km2=coverage.get("window") if isinstance(coverage, dict) else None,
+                    native_resolution_m=None,
+                    native_grid_degrees=0.25 if rainfall_context.get("product") == "rainfall" else 0.05,
+                    window_start=window.get("start"),
+                    window_end=observed_through,
+                ),
+                observed_through=observed_through,
+            ).describe())
+    return measures
+
+
+async def location_context_from_centroid(geojson_geom: dict) -> dict:
+    """Where this outline is, as specific as the boundary service can say.
+
+    GAUL resolves a point to the administrative chain -- country (ADM0), region
+    (ADM1), district (ADM2) -- which is far more specific than a country name,
+    and it is the service already in front of us for containment. A country
+    name alone ("Kenya") says a boundary the size of a continent; the region and
+    the district under it say the place. Nominatim's country name stays as the
+    fallback when the boundary service has no unit for the point (open water, or
+    outside its coverage). Location is auxiliary, so any failure degrades to
+    "country only" rather than failing the read.
+    """
+    country = admin1 = admin2 = None
+    try:
+        from shapely.geometry import shape
+
+        centroid = shape(geojson_geom).centroid
+        import areas
+
+        resolver = areas.GaulResolver()
+        payload = await asyncio.to_thread(resolver.containing, centroid.y, centroid.x)
+        boundaries = payload.get("boundaries") or {}
+
+        def name(level: str, field: str) -> Optional[str]:
+            feature = (boundaries.get(level) or {}).get("feature") or {}
+            return (feature.get("properties") or {}).get(field)
+
+        country = name("l0", "gaul0_name")
+        admin1 = name("l1", "gaul1_name")
+        admin2 = name("l2", "gaul2_name")
+    except Exception as exc:  # noqa: BLE001 - location is auxiliary; never fail the read
+        print(f"admin-context lookup failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if not country:
+        country = await get_country_from_centroid(geojson_geom)
+    return {"country": country, "admin1": admin1, "admin2": admin2}
+
+
 # --------------------------------------------------
 # API ENDPOINT
 # --------------------------------------------------
@@ -1687,7 +1783,8 @@ async def generate_context(
                 window_end=requested_window_end)
 
         # Get country
-        country = await get_country_from_centroid(geom)
+        location = await location_context_from_centroid(geom)
+        country = location["country"]
 
         # Extract scene metadata for provenance
         scene_dates = {}
@@ -1713,52 +1810,8 @@ async def generate_context(
         # Each Measure carries value, units, evidence, extent, observed_through
         # (required for dynamic products) and caveats -- all derived from the
         # registry, not restated per call site.
-        measures: list[dict] = []
-        if dem is not None and "mean" in dem:
-            measures.append(measure.Measure(
-                product_key="dem",
-                value=round(dem["mean"], 1),
-                units="m",
-                extent=measure.Extent(
-                    requested_area_km2=round(aoi["bbox_area_km2"], 2),
-                    covered_area_km2=round(aoi["bbox_area_km2"], 2),
-                    native_resolution_m=30.0,
-                ),
-            ).describe())
-        if landcover is not None and isinstance(landcover, dict) and landcover.get("status") == "ok":
-            coverage = landcover.get("coverage")
-            if coverage:
-                measures.append(measure.Measure(
-                    product_key="landcover",
-                    value=coverage,
-                    units="%",
-                    extent=measure.Extent(
-                        requested_area_km2=round(aoi["bbox_area_km2"], 2),
-                        covered_area_km2=round(aoi["bbox_area_km2"], 2),
-                        native_resolution_m=10.0,
-                    ),
-                ).describe())
-        if rainfall_context is not None and rainfall_context.get("status") == "ok":
-            series = rainfall_context.get("series", [])
-            coverage = rainfall_context.get("coverage", {})
-            window = rainfall_context.get("window", {})
-            observed_through = window.get("end")
-            if series:
-                total = round(sum(m.get("value", 0) for m in series), 1)
-                measures.append(measure.Measure(
-                    product_key=rainfall_context.get("product", "rainfall"),
-                    value=total,
-                    units="mm",
-                    extent=measure.Extent(
-                        requested_area_km2=round(aoi["bbox_area_km2"], 2),
-                        covered_area_km2=coverage.get("window") if isinstance(coverage, dict) else None,
-                        native_resolution_m=None,
-                        native_grid_degrees=0.25 if rainfall_context.get("product") == "rainfall" else 0.05,
-                        window_start=window.get("start"),
-                        window_end=observed_through,
-                    ),
-                    observed_through=observed_through,
-                ).describe())
+        measures = _build_measures(
+            dem, landcover, rainfall_context, round(aoi["bbox_area_km2"], 2))
         summary = {
             "dem": _with_dem_evidence(dem),
             "ndvi": _with_vegetation_evidence(ndvi_stats),
@@ -1776,6 +1829,14 @@ async def generate_context(
             "rainfall": _with_rainfall_evidence(
                 rainfall_context, product=request.product),
             "country": country,
+            # The administrative chain, as specific as the boundary service can
+            # say: country, region (ADM1), district (ADM2). A country name alone
+            # names a continent-sized unit; these name the place.
+            "admin": {
+                "country": location["country"],
+                "admin1": location["admin1"],
+                "admin2": location["admin2"],
+            },
             "scene_dates": scene_dates,
             "scene_ids": scene_ids,
             "analysis": {
@@ -2613,12 +2674,21 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             detail=f"nothing has been computed for this area yet "
                    f"(missing or incomplete: {', '.join(missing) or 'unknown'})")
 
+    # The same uniform measures the synchronous path ships, so a completed
+    # offline reading shows a rainfall measure too rather than only a
+    # synchronous one. No geometry rides with the key, so the area is unset;
+    # the value, units, evidence and observed_through are what matter. Built
+    # into a variable rather than inline in the dict literal so it is a plain
+    # call -- it evaluated empty when written inline, which is its own trap.
+    measures = _build_measures(
+        modules.get("dem"), modules.get("landcover"), modules.get("rainfall"), None)
     summary = {
         **modules,
         "analysis": {"mode": "from computed artefacts", "datasets": sorted(modules)},
         "caveats": _caveats({"feature": {}}, modules.get("dem"),
-                             modules.get("landcover"), modules.get("ndvi"),
-                             modules.get("rainfall")),
+                            modules.get("landcover"), modules.get("ndvi"),
+                            modules.get("railfall")),
+        "measures": measures or None,
     }
     if missing:
         summary["caveats"].append(

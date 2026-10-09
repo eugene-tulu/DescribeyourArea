@@ -173,12 +173,22 @@ class AnalysisMetadata(BaseModel):
     applied_resolution_m: Optional[Dict[str, int]] = None
 
 
+class AdminContext(BaseModel):
+    # The administrative chain the outline sits in, from the boundary service:
+    # country, then region (ADM1), then district (ADM2). A country name alone
+    # names a continent-sized unit; the levels under it name the place.
+    country: Optional[str] = None
+    admin1: Optional[str] = None
+    admin2: Optional[str] = None
+
+
 class ContextSummary(BaseModel):
     dem: Optional[DemResult] = None
     landcover: Optional[LandcoverResult] = None
     ndvi: Optional[VegetationResult] = None
     rainfall: Optional[RainfallResult] = None
     country: Optional[str] = None
+    admin: Optional[AdminContext] = None
     scene_dates: Dict[str, str] = Field(default_factory=dict)
     scene_ids: Dict[str, str] = Field(default_factory=dict)
     analysis: Optional[AnalysisMetadata] = None
