@@ -1028,10 +1028,11 @@ export default function Home() {
   const [customEnd, setCustomEnd] = useState('');
   // End-date + lookback model. The window is always (end − period): the reader
   // sets an end date (default today) and a lookback (default one year), and the
-  // start is derived. This replaces the old preset + two-date-field arrangement,
-  // which made the dates and the period separate, competing questions. A legacy
-  // exact start/end link is still honoured (read into end + a days lookback), so
-  // shared links keep working.
+  // start is derived. A custom start can still be set; when it is, it overrides
+  // the derived start so an asymmetric window ("since the last rains") is
+  // reachable. Legacy exact start/end links are honoured too, so shared links
+  // keep working.
+  const [customStart, setCustomStart] = useState('');
   function todayISO(): string {
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -1047,10 +1048,11 @@ export default function Home() {
   // The inclusive end of the window, in YYYY-MM-DD. A set value wins; otherwise
   // the window ends at today.
   const endDate = customEnd || todayISO();
-  const startDate = computeStartDate(endDate, periodAmount, periodUnit);
-  // A window ending in the future is a misread, not a refusal: the reader is
-  // stopped before the request rather than surprised by an empty result.
-  const customRangeValid = endDate <= todayISO();
+  // The start is derived from the end + lookback unless the reader set one.
+  const startDate = customStart || computeStartDate(endDate, periodAmount, periodUnit);
+  // Stopped before the request rather than surprised: the window must end at or
+  // before today, and the start must not be after the end.
+  const customRangeValid = endDate <= todayISO() && startDate <= endDate;
     const [selectedSensor, setSelectedSensor] = useState('auto');
   // Which precipitation product. Two providers for one measure, differing in
   // resolution, freshness and evidence class -- so it is a choice with a reason,
@@ -1100,14 +1102,15 @@ export default function Home() {
     const sensor = params.get('sensor');
     if (sensor) setSelectedSensor(sensor);
     // Prefer the dates/period a link was built with. The new model is end +
-    // period; legacy links used start/end or a `years` preset, so both still
-    // round-trip (the link builder always writes absolute start/end dates).
+    // period; a custom start, if present, overrides the derived start. Legacy
+    // links wrote absolute start/end, so both still round-trip.
     const end = params.get('end') || params.get('window_end') || null;
     const start = params.get('start') || params.get('window_start') || null;
     const period = params.get('period');
     const unit = params.get('unit');
     const years = params.get('years');
     if (end) setCustomEnd(end);
+    if (start) setCustomStart(start);
     const unitValid = unit === 'years' || unit === 'months' || unit === 'days';
     if (period && unitValid) {
       setPeriodAmount(Number(period) || 1);
@@ -1115,11 +1118,6 @@ export default function Home() {
     } else if (years) {
       setPeriodAmount(Math.max(1, Number(years) || 10));
       setPeriodUnit('years');
-    } else if (start && end) {
-      // Legacy exact range: encode as end-date + days lookback.
-      const diff = Math.max(1, Math.round((Date.parse(end) - Date.parse(start)) / 86400000));
-      setPeriodAmount(diff);
-      setPeriodUnit('days');
     }
   }, []);
 
@@ -1308,7 +1306,9 @@ export default function Home() {
     const months = Math.max(1, (Number(endDate.slice(0, 4)) - Number(startDate.slice(0, 4))) * 12
       + Number(endDate.slice(5, 7)) - Number(startDate.slice(5, 7)) + 1);
     const parts: string[] = [];
-    parts.push(` — ends ${endDate}, ${periodAmount} ${periodUnit.replace(/s$/, '')}${periodAmount === 1 ? '' : 's'} back`);
+    parts.push(customStart
+      ? ` — dates you set (${startDate} → ${endDate})`
+      : ` — ends ${endDate}, ${periodAmount} ${periodUnit.replace(/s$/, '')}${periodAmount === 1 ? '' : 's'} back`);
     // Landsat is the archive that reaches furthest back; if it cannot answer then
     // nothing can.
     const reaches = new Date('1982-08-22');
@@ -1795,9 +1795,11 @@ export default function Home() {
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
         // The window that was actually analysed, encoded as an end-date plus a
-        // lookback so a shared link reproduces the thing itself, not a preset
-        // the sender may no longer still be looking at.
+        // lookback (and a custom start, when one was set) so a shared link
+        // reproduces the thing itself, not a preset the sender may no longer
+        // still be looking at.
         end: endDate,
+        ...(customStart ? { start: customStart } : {}),
         period: String(periodAmount),
         unit: periodUnit,
       });
@@ -2270,10 +2272,21 @@ export default function Home() {
                         manager's actual questions -- inexpressible without finding a
                         date field second. */}
                     <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
-                      <Label className="mr-1 text-[0.8125rem] text-ink-2">Window ends</Label>
+                      <Label className="mr-1 text-[0.8125rem] text-ink-2">Window</Label>
+                      <input
+                        type="date"
+                        value={customStart || startDate}
+                        min="1980-01-01"
+                        max={endDate}
+                        onChange={(e) => { setCustomStart(e.target.value); }}
+                        aria-label="Window start date"
+                        className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
+                      />
+                      <span className="text-[0.75rem] text-ink-3">to</span>
                       <input
                         type="date"
                         value={customEnd || endDate}
+                        min={customStart || undefined}
                         max={todayISO()}
                         onChange={(e) => { setCustomEnd(e.target.value); }}
                         aria-label="Window end date"
@@ -2282,15 +2295,15 @@ export default function Home() {
                     </div>
 
                     <div className="fig mb-2.5 flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
-                      <span>lookback</span>
+                      <span>or</span>
                       {([1, 3, 10, 30] as const).map((years) => (
                         <button
                           key={years}
                           type="button"
-                          aria-pressed={!customEnd && periodAmount === years && periodUnit === 'years'}
-                          onClick={() => { setPeriodAmount(years); setPeriodUnit('years'); setCustomEnd(''); }}
+                          aria-pressed={!customStart && !customEnd && periodAmount === years && periodUnit === 'years'}
+                          onClick={() => { setPeriodAmount(years); setPeriodUnit('years'); setCustomStart(''); setCustomEnd(''); }}
                           className={`fig h-7 rounded-lg border px-2.5 transition-colors duration-200 ${
-                            !customEnd && periodAmount === years && periodUnit === 'years'
+                            !customStart && !customEnd && periodAmount === years && periodUnit === 'years'
                               ? 'border-signal bg-signal/12 text-signal'
                               : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
                           }`}
@@ -2309,7 +2322,7 @@ export default function Home() {
                     </p>
                     {!customRangeValid && (
                       <p className="mt-1.5 text-[0.75rem] text-stressed">
-                        The start date is after the end date, or in the future.
+                        The start date is after the end date, or the end date is in the future.
                       </p>
                     )}
                     <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
