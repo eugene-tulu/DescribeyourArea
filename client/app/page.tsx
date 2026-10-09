@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } fro
 import dynamic from 'next/dynamic';
 import {
   Search, MapPin, Loader2, Globe, Satellite, ArrowDown, Download,
-  Link2, Printer, Info, Upload,
+  Link2, Printer, Info, Upload, Share2, ChevronDown, Check, X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,6 +16,7 @@ import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSec
 import { Wordmark } from '@/components/Mark';
 import { useToast } from '@/hooks/use-toast';
 import { computeStartDate } from '@/lib/window';
+import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
 
 
 // Dynamic imports to avoid SSR issues with Leaflet
@@ -77,6 +78,8 @@ interface WorkPlan {
   resolution_km?: number;
   reason?: string;
   months?: number;
+  /** Months actually read: the series plus the years forming its normal. */
+  months_to_read?: number;
   pixels_analysed?: number;
   estimated_seconds?: number;
   estimate_basis?: string;
@@ -528,14 +531,204 @@ function minutes(seconds?: number | null): string {
   return `about ${Math.round(seconds / 60)} minutes`;
 }
 
+/** Seconds since `when`, ticking while the caller wants it live.
+
+   The job record carries timestamps, so the elapsed figure is read from those
+   rather than measured from mount -- a page refreshed mid-job shows the same
+   wait it would have shown without the refresh, instead of restarting at zero.
+   It ticks only when asked to, because an always-on interval is a battery cost
+   paid for a number nobody is looking at.
+ */
+function useElapsedSince(when?: string | null, live = false): number | null {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!live || !when) return;
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [live, when]);
+  return secondsSince(when, now);
+}
+
+/* Everything that leaves the app, behind one action. Six buttons in a row --
+   copy link, CSV, JSON, print, remove -- read as a toolbar and were read as
+   clutter; the reading itself was what the page was about. One trigger that
+   opens a short list keeps the export reachable without competing with the
+   finding, and groups "take this with me" apart from "delete it". */
+function ReadingActions({
+  shareLink,
+  onCopyLink,
+  onCsv,
+  onJson,
+  onPrint,
+  onRemove,
+  linkCopied,
+}: {
+  shareLink: string;
+  onCopyLink: () => void;
+  onCsv: () => void;
+  onJson: () => void;
+  onPrint: () => void;
+  onRemove?: () => void;
+  linkCopied?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onPointer = (event: MouseEvent) => {
+      if (wrap.current && !wrap.current.contains(event.target as Node)) setOpen(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onPointer);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onPointer);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  const item =
+    'fig flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[0.8125rem] text-ink-2 transition-colors duration-150 hover:bg-surface hover:text-ink';
+
+  return (
+    <div className="relative" ref={wrap} data-print-hide>
+      <Button
+        size="sm"
+        variant="outline"
+        aria-expanded={open}
+        aria-haspopup="menu"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <Share2 className="h-3.5 w-3.5" />
+        Take it with you
+        <ChevronDown className={`h-3.5 w-3.5 transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+      </Button>
+
+      {open && (
+        <div
+          role="menu"
+          className="fig absolute left-0 z-30 mt-2 w-64 overflow-hidden rounded-xl border border-rule bg-raised p-1.5 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.65)]"
+        >
+          <p className="label px-2.5 pb-1.5 pt-1 text-ink-3">Share this reading</p>
+          <button type="button" role="menuitem" className={item} onClick={onCopyLink}>
+            {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+            {linkCopied ? 'Link copied' : 'Copy the link'}
+          </button>
+          <button type="button" role="menuitem" className={item} onClick={onCsv}>
+            <Download className="h-3.5 w-3.5" />
+            Download the series (CSV)
+          </button>
+          <button type="button" role="menuitem" className={item} onClick={onJson}>
+            <Download className="h-3.5 w-3.5" />
+            Download the reading (JSON)
+          </button>
+          <button type="button" role="menuitem" className={item} onClick={onPrint}>
+            <Printer className="h-3.5 w-3.5" />
+            Print, or save as PDF
+          </button>
+          <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
+            {shareLink}
+          </code>
+          {onRemove && (
+            <>
+              <div className="mx-1 my-1 border-t border-rule" />
+              <button
+                type="button"
+                role="menuitem"
+                onClick={onRemove}
+                className="fig flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-[0.8125rem] text-bare transition-colors duration-150 hover:bg-surface"
+              >
+                <X className="h-3.5 w-3.5" />
+                Remove this area
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* The per-source detail, behind one disclosure.
+
+   The page used to stack the reading, four source cards and the measures into
+   one column, so the finding -- the prose -- was the fourth thing down the page
+   and the wall of panels said nothing about which part mattered. The reading and
+   the headline measures are now the page; the provenance for each source is one
+   disclosure away, and that disclosure names how many sources are behind it and
+   how each was read, so opening it is a choice rather than a scroll.
+ */
+function SourceDetail({
+  summary,
+  selectedDatasets,
+  submission,
+  onSubmitForRainfall,
+  vegetationSeries,
+}: {
+  summary: Summary;
+  selectedDatasets: string[];
+  submission?: SubmissionState;
+  onSubmitForRainfall: () => void;
+  vegetationSeries?: ClimateVegSeries | null;
+}) {
+  const [open, setOpen] = useState(false);
+  const datasets = (summary.analysis?.datasets || selectedDatasets).filter(isDatasetId);
+  const read = datasets.filter(
+    (dataset) => (summary[dataset as keyof Summary] as { status?: string } | undefined)?.status === 'ok',
+  );
+  return (
+    <div className="rule-t pt-5" data-print-hide={open ? undefined : true}>
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        className="group flex w-full items-baseline justify-between gap-4 text-left"
+      >
+        <span>
+          <span className="label">{open ? 'Hide' : 'Show'} every source</span>
+          <span className="fig mt-1 block text-[0.8125rem] text-ink-2">
+            {read.length} of {datasets.length} sources read, each with the grid it was
+            read at and what kind of number it is.
+          </span>
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-ink-3 transition-transform duration-200 group-hover:text-ink ${
+            open ? 'rotate-180' : ''
+          }`}
+        />
+      </button>
+      {open && (
+        <div className="grid gap-x-10 gap-y-2 pt-5 xl:grid-cols-2">
+          {datasets.map((dataset) => (
+            <DatasetResultCard
+              key={dataset}
+              dataset={dataset}
+              summary={summary}
+              submission={submission}
+              onSubmit={dataset === 'rainfall' ? onSubmitForRainfall : undefined}
+              vegetationSeries={vegetationSeries}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function JobProgressLine({
   progress,
   planned,
   onDismiss,
+  queued,
 }: {
   progress: JobProgress;
   planned?: WorkPlan | null;
   onDismiss: () => void;
+  /** The ordered list of modules still to be read for this area, if any. */
+  queued?: string[];
 }) {
   const stage: Record<string, string> = {
     pending: 'Queued, waiting for a worker.',
@@ -544,6 +737,13 @@ function JobProgressLine({
     failed: 'Could not be computed.',
   };
   const active = progress.state === 'pending' || progress.state === 'running';
+  const elapsed = useElapsedSince(progress.startedAt ?? progress.submittedAt, active);
+  const estimate = planned?.estimated_seconds ?? null;
+  // Elapsed against the plan. It is a fraction of an *estimate*, so it is
+  // labelled as one and never drawn as a promise: a read that stalls at 90% is
+  // a read that is still honest about where it is.
+  const fraction = fractionOfEstimate(elapsed, estimate);
+  const queuedAhead = (queued ?? []).filter((name) => name && name !== progress.indicator);
   return (
     <div className="rule-t mt-4 pt-3">
       <div className="flex items-baseline justify-between gap-3">
@@ -560,15 +760,42 @@ function JobProgressLine({
           </button>
         )}
       </div>
-      {planned?.estimated_seconds != null && (
+
+      {active && fraction != null && (
+        <div className="mt-2.5">
+          <div className="h-1 w-full overflow-hidden rounded-full bg-surface">
+            <div
+              className="h-full rounded-full bg-signal transition-[width] duration-1000 ease-linear"
+              style={{ width: `${Math.round(fraction * 100)}%` }}
+            />
+          </div>
+          <p className="fig mt-1.5 text-xs text-ink-2">
+            {Math.round(fraction * 100)}% of the estimate — {Math.floor(elapsed! / 60)}
+            {Math.floor(elapsed! / 60) === 1 ? ' minute' : ' minutes'} in.
+            {' '}An estimate, not a promise.
+          </p>
+        </div>
+      )}
+
+      {estimate != null && (
         <p className="fig mt-1 text-sm text-ink">
-          Ready in {minutes(planned.estimated_seconds)}.
-          {planned.months ? ` ${planned.months} monthly reads` : null}
-          {planned.resolution_m ? ` at ${planned.resolution_m} m` : null}
-          {planned.resolution_km ? ` on a ${planned.resolution_km} km grid` : null}.
+          Ready in {minutes(estimate)}.
+          {planned?.months ? ` ${planned.months} monthly reads` : null}
+          {planned?.months_to_read && planned.months_to_read !== planned.months
+            ? ` (${planned.months_to_read} read, to form the normal as well as the series)`
+            : null}
+          {planned?.resolution_m ? ` at ${planned.resolution_m} m` : null}
+          {planned?.resolution_km ? ` on a ${planned.resolution_km} km grid` : null}.
         </p>
       )}
       {planned?.reason && <p className="fig mt-1 text-xs text-ink-2">{planned.reason}</p>}
+
+      {queuedAhead.length > 0 && (
+        <p className="fig mt-2 text-xs text-ink-2">
+          <span className="text-ink-3">Queued behind it: </span>
+          {queuedAhead.join(' → ')}
+        </p>
+      )}
       <Working
         rows={[
           ['resolution', planned?.resolution_m ? `${planned.resolution_m} m` : null],
@@ -1070,6 +1297,9 @@ export default function Home() {
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
+  // Whether the share link was just copied, so the action can say so. The
+  // clipboard API reports nothing, so this is the only honest confirmation.
+  const [linkCopied, setLinkCopied] = useState(false);
    const [drawnFeatures, setDrawnFeatures] = useState<FeatureCollection<Geometry> | null>(null);
   // Read the share link back on arrival. Without this the link was write-only:
   // it encoded the area, the datasets, the sensor and the window, and nothing
@@ -2576,54 +2806,20 @@ export default function Home() {
                     </div>
                   )}
                   {shareLink && (
-                    <div
-                      data-print-hide
-                      className="mb-6 flex flex-wrap items-center gap-2 rounded-xl border border-rule bg-raised/60 px-3.5 py-3"
-                    >
-                      <span className="text-[0.75rem] text-ink-3">Take it with you</span>
-                      <code className="fig max-w-xs truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.75rem] text-ink-3">
-                        {shareLink}
-                      </code>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => navigator.clipboard?.writeText(shareLink)}
-                      >
-                        <Link2 className="h-3.5 w-3.5" />
-                        Copy link
-                      </Button>
-                      <span className="basis-full" />
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
-                      >
-                        CSV
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => download('analysis.json', exportJson(), 'application/json')}
-                      >
-                        JSON
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => window.print()}>
-                        <Printer className="h-3.5 w-3.5" />
-                        Print
-                      </Button>
-                      {activeCacheKey && (
-                        // Withdrawal is a first-class action, not a support email.
-                        // The app holds a series derived from the submitted
-                        // geometry, and the person who submitted it should be the
-                        // one who can say to remove it.
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void forgetThisArea()}
-                        >
-                          Remove this area
-                        </Button>
-                      )}
+                    <div data-print-hide className="mb-6 flex items-center gap-2">
+                      <ReadingActions
+                        shareLink={shareLink}
+                        linkCopied={linkCopied}
+                        onCopyLink={() => {
+                          navigator.clipboard?.writeText(shareLink);
+                          setLinkCopied(true);
+                          window.setTimeout(() => setLinkCopied(false), 2000);
+                        }}
+                        onCsv={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
+                        onJson={() => download('analysis.json', exportJson(), 'application/json')}
+                        onPrint={() => window.print()}
+                        onRemove={activeCacheKey ? () => void forgetThisArea() : undefined}
+                      />
                     </div>
                   )}
                   {offline && (
@@ -2737,31 +2933,8 @@ export default function Home() {
                               </ul>
                             </div>
                           )}
-                          <div className="grid gap-x-10 gap-y-2 xl:grid-cols-2">
-                            {progress && (
-                              <div className="xl:col-span-2">
-                                <JobProgressLine
-                                  progress={progress}
-                                  planned={plan}
-                                  onDismiss={() => setProgress(null)}
-                                />
-                              </div>
-                            )}
-                            {(analysisSummary.analysis?.datasets || selectedDatasets)
-                              .filter(isDatasetId)
-                              .map((dataset) => (
-                                <DatasetResultCard
-                                  key={dataset}
-                                  dataset={dataset}
-                                  summary={analysisSummary}
-                                  submission={activeCacheKey ? submission[activeCacheKey] : undefined}
-                                  onSubmit={dataset === 'rainfall' ? submitForPreprocessing : undefined}
-                                  vegetationSeries={vegetationSeries}
-                                />
-                              ))}
-                          </div>
                           {analysisSummary.measures && analysisSummary.measures.length > 0 && (
-                            <div className="mt-8">
+                            <div className="mb-7">
                               <h4 className="label mb-3">Measures</h4>
                               <dl className="grid gap-3 sm:grid-cols-2">
                                 {analysisSummary.measures.map((m) => (
@@ -2770,6 +2943,23 @@ export default function Home() {
                               </dl>
                             </div>
                           )}
+                          {progress && (
+                            <div>
+                              <JobProgressLine
+                                progress={progress}
+                                planned={plan}
+                                onDismiss={() => setProgress(null)}
+                                queued={offline?.queued}
+                              />
+                            </div>
+                          )}
+                          <SourceDetail
+                            summary={analysisSummary}
+                            selectedDatasets={selectedDatasets}
+                            submission={activeCacheKey ? submission[activeCacheKey] : undefined}
+                            onSubmitForRainfall={submitForPreprocessing}
+                            vegetationSeries={vegetationSeries}
+                          />
                         </div>
                       )}
                     </>
