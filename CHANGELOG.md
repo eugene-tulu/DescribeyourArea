@@ -33,6 +33,30 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ## Unreleased — The CHIRPS cache that was checked but never written
 
+### Date window control: end-date + lookback
+
+`client/app/page.tsx` replaced the separate year-preset dropdown
+(`windowYears`) and the dual start/end date fields (`customStart`/`customEnd`)
+with a single end-date picker plus a lookback period whose start is derived.
+The window is always `(end − period)`: end defaults to today, the start is
+computed locally and sent as `window_start`/`window_end`, so a shared link
+reproduces the analysed window rather than an approximation of it.
+
+- `periodAmount`/`periodUnit`/`customEnd` state replaces `windowYears`/
+  `customStart`; `startDate`/`endDate` are derived, not entered.
+- `todayISO()`/`computeStartDate()` are the single source of the bounds;
+  `customRangeValid = endDate <= today` (a future end is a misread, not a refusal).
+- Share links now encode `end` + `period` + `unit`; the URL parser still reads
+  legacy `years` and exact `start`/`end` so old links round-trip.
+- Presets (1/3/10/30y) set `periodAmount`/`periodUnit` and clear the custom end.
+
+`npx tsc --noEmit`, `npx eslint app/page.tsx --max-warnings=0`, and
+`npx next build` (compiled ✓, static prerender of `/` and `/_not-found` ✓) all
+pass. Deployed to `209.38.197.161`: `app/page.tsx` md5 matches locally and
+remotely (`83839facaab42e80af961f2a1e21fadf`), `geocontextualize-frontend-1`
+rebuilt and running, `https://209.38.197.161/` → HTTP 200, and
+`/api/health` → healthy (v1.21.0).
+
 CHIRPS is published as one GeoTIFF per month. Every job wanted the 1991-2020
 climatology plus a recent window, which is 555 separate object opens over the
 network, and none of it was reused between jobs. Two defects made that permanent
