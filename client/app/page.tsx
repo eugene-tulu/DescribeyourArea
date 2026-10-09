@@ -1661,7 +1661,15 @@ export default function Home() {
           // so read the artefacts the worker wrote rather than re-running. Reading
           // `cacheKey` (not the closure-captured `activeCacheKey`, which is null on
           // the offline path) is what actually surfaces a completed offline result.
-          void showComputedResult(cacheKey);
+          if (indicator === 'vegetation_series') {
+            // The vegetation series lives in its own artefact, read by
+            // GET /rainfall?indicator=vegetation_series -- not by /context, which
+            // only carries the summary. Routing the completed job through
+            // showComputedResult here left the chart on "not computed" forever.
+            void loadVegetationSeries(cacheKey);
+          } else {
+            void showComputedResult(cacheKey);
+          }
         }
         return;
       }
