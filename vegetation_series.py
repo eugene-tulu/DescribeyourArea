@@ -55,11 +55,20 @@ ESTIMATE_OVERHEAD_SECONDS = float(os.getenv("VEG_ESTIMATE_OVERHEAD_SECONDS", "6"
 
 # The normal is a calendar-month mean, and a climatology needs years, not months.
 # It used to start in 1991 unconditionally, so a user asking for ten years paid
-# for thirty-five: 429 reads to return 196. The baseline is now a rolling window
-# of BASELINE_YEARS ending with the series, which is a standard normal period and
-# cuts the read by roughly 45%. It is reported in the artefact as
+# for thirty-five: 429 reads to return 196. It began as a rolling window of
+# BASELINE_YEARS ending with the series, which is a standard normal period and
+# cuts the read by roughly 45%.
+#
+# It is now also *capped to the window*. A normal is a per-calendar-month mean,
+# so the years it needs is the number of distinct calendar months the requested
+# series actually spans -- twelve at most, not twenty. A one-year window asking
+# for the whole calendar therefore reads twelve years, not twenty, and pays for
+# no year it can never show. MIN_BASELINE_YEARS is the floor that keeps a
+# one-month window from producing a one-sample "normal", which would be a single
+# observation wearing the word "normal". It is reported in the artefact as
 # `normal_window`, because a normal nobody states is not a normal.
 BASELINE_YEARS = int(os.getenv("VEG_BASELINE_YEARS", "20"))
+MIN_BASELINE_YEARS = int(os.getenv("VEG_MIN_BASELINE_YEARS", "2"))
 
 # Shown to the reader under the chart. It is a load-bearing string: the product's
 # claim is that it says what kind of number something is, and a rainfall overlay
@@ -146,6 +155,25 @@ def _read_month(href, window_spec) -> Optional[np.ndarray]:
         return src.read(1, window=window, boundless=False)
 
 
+def baseline_years_for(start: str, end: str) -> int:
+    """How many years of baseline a window actually needs.
+
+    The normal is a mean per calendar month, so the baseline only has to reach
+    back far enough to cover the distinct calendar months the requested window
+    spans -- twelve at most. Capping to that, rather than a fixed twenty, is why
+    a one-year window over the whole calendar reads twelve years instead of
+    twenty: the wait scales with the window instead of being constant.
+    """
+    span = _month_range(start[:7] + "-01", end[:7] + "-01")
+    distinct = len({month[5:7] for month in span})
+    return max(MIN_BASELINE_YEARS, min(BASELINE_YEARS, distinct))
+
+
+def _baseline_start(end: str, start: str) -> str:
+    years = baseline_years_for(start, end)
+    return f"{max(int(end[:4]) - years + 1, 1991):04d}-01-01"
+
+
 def months_to_read(start: str, end: str) -> int:
     """How many months a series actually reads, which is not how many it returns.
 
@@ -154,7 +182,7 @@ def months_to_read(start: str, end: str) -> int:
     on the returned count therefore understates the work by the length of the
     baseline, which is most of it for a short request.
     """
-    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    baseline_start = _baseline_start(end, start)
     return len(_month_range(baseline_start, end))
 
 
@@ -170,11 +198,11 @@ def estimate_seconds(months: int, workers: int = DEFAULT_WORKERS) -> int:
 
 
 def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = None) -> dict:
-    """What the worker will do for this area, and roughly how long it will take."""
+    """What the worker will do for this area, and roughly how long it should take."""
     end = end or datetime.date.today().replace(day=1).isoformat()
     months = len(_month_range(start[:7] + "-01", end[:7] + "-01"))
     reads = months_to_read(start[:7] + "-01", end)
-    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    baseline_start = _baseline_start(end, start[:7] + "-01")
     seconds = estimate_seconds(reads)
     return {
         "indicator": "vegetation_series",
@@ -192,9 +220,10 @@ def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = N
             f"an estimate: {reads} monthly reads at {SECONDS_PER_READ} s each across "
             f"{DEFAULT_WORKERS} workers, plus {ESTIMATE_OVERHEAD_SECONDS:.0f} s overhead, "
             "measured on this host. Cost is request latency, not pixels, so it barely "
-            "moves with area. The reads include the years used to form the normal, "
-            "which is why they exceed the months returned."
-        ),
+            "moves with area. The reads include {years} years of baseline -- enough to "
+            "average the calendar months this window spans -- which is why they exceed "
+            "the months returned."
+        ).replace("{years}", str(int(end[:4]) - int(baseline_start[:4]) + 1)),
         "area_km2": round(bbox_area_km2, 2),
     }
 
@@ -219,14 +248,14 @@ def compute_monthly_series(
     from shapely.geometry import shape
 
     end = end or datetime.date.today().replace(day=1).isoformat()
-    # Read from the nominal climatology start so the series and the normal come from
-    # one pass and cannot disagree. MOD13Q1 begins 2000-02, so the years before it
-    # return nothing; the baseline actually used is reported below rather than
-    # claimed as 1991-2020.
-    # Read back far enough to have a normal, and no further. This used to be an
-    # unconditional 1991 start, so a ten-year request paid for thirty-five years:
-    # 429 reads to return 196 months.
-    baseline_start = f"{max(int(end[:4]) - BASELINE_YEARS + 1, 1991):04d}-01-01"
+    # Read from far enough back to have a normal for every calendar month the
+    # window spans, and no further. This used to be an unconditional 1991 start,
+    # then a fixed twenty-year baseline, so a ten-year request paid for
+    # thirty-five and a one-year request paid for twenty. The baseline now scales
+    # with the window, which is why the wait does too.
+    # MOD13Q1 begins 2000-02, so the years before it return nothing; the baseline
+    # actually used is reported below rather than claimed as 1991-2020.
+    baseline_start = _baseline_start(end, start)
     months = _month_range(baseline_start, end)
     found = _items_by_month(bbox, months)
 

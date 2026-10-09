@@ -33,6 +33,7 @@ Two properties are load-bearing and were previously implicit:
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -286,9 +287,13 @@ VEGETATION_SERIES = Product(
     latency_days="30-60",
     evidence=DERIVED,
     cost=(COMPUTED,),
-    # Read from the series module rather than restated, so the published cost and
-    # the one an estimate uses cannot drift apart.
-    seconds_per_month=__import__("vegetation_series").SECONDS_PER_READ,
+    # Read from the same environment knob the series module reads, rather than
+    # importing it. vegetation_series imports main, which imports this module, so
+    # reaching into it at import time is a circular import that AttributeErrors
+    # whenever this module is loaded first -- which is how the cost tests and the
+    # tools both load it. The default is stated once here and mirrored there, so
+    # the published cost and the one an estimate uses cannot drift apart.
+    seconds_per_month=float(os.getenv("VEG_SECONDS_PER_READ", "0.25")),
     source="MODIS MOD13Q1 (250 m label, 231.7 m grid), 16-day",
     doi="10.5067/MODIS/MOD13Q1.061",
     caveats=(

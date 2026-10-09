@@ -55,6 +55,18 @@ class EstimateTests(unittest.TestCase):
         self.assertIn("VEG_BASELINE_YEARS", source,
                       "the baseline length must be overridable by environment")
 
+    def test_the_published_cost_and_the_estimate_agree(self):
+        # The registry used to read its cost by importing the series module,
+        # which took `main` with it and therefore imported the registry: a
+        # circular import that AttributeErrors whenever the registry loads first.
+        # Both now read the same knob, so this is the guard that they still agree.
+        import registry
+
+        published = registry.get("vegetation_series").seconds_per_month
+        self.assertEqual(published, vs.SECONDS_PER_READ,
+                         "the published per-month cost has drifted from the one "
+                         "an estimate uses")
+
 
 class BaselineTests(unittest.TestCase):
     def test_a_ten_year_request_no_longer_reads_thirty_five_years(self):
@@ -64,22 +76,33 @@ class BaselineTests(unittest.TestCase):
             "a ten-year request reads 237 months with a 20-year baseline; if this "
             "is back near 429 the unconditional 1991 start has returned")
 
-    def test_a_one_year_request_reads_the_same_as_a_ten_year_one(self):
-        # Both pay for the normal, so they cost the same. That is the point of
-        # the baseline, and it is also why the estimate must be on reads rather
-        # than on the months returned.
-        self.assertEqual(
-            vs.months_to_read("2025-01-01", "2026-09-01"),
-            vs.months_to_read("2010-01-01", "2026-09-01"),
-        )
+    def test_a_full_calendar_window_reads_twelve_years_not_twenty(self):
+        # The baseline used to be a fixed twenty years whatever the window. A
+        # normal is a per-calendar-month mean, so it needs the calendar months
+        # the window spans -- twelve at most -- and no year it can never show.
+        full = vs.months_to_read("2023-01-01", "2026-09-01")
+        self.assertEqual(full, len(vs._month_range("2015-01-01", "2026-09-01")),
+                         "a window spanning the whole calendar reads a twelve-year "
+                         "baseline, not the module default of twenty")
+        self.assertLess(full, 237,
+                        "the twenty-year default is still being paid in full")
+
+    def test_the_wait_scales_with_the_window(self):
+        # A short window over few calendar months needs a shorter baseline, so
+        # the reads fall with it. This is the wait being governed by the window.
+        whole_calendar = vs.months_to_read("2026-01-01", "2026-09-01")   # 9 months
+        three_calendar = vs.months_to_read("2026-07-01", "2026-09-01")   # 3 months
+        self.assertLess(three_calendar, whole_calendar,
+                        "a three-calendar-month window must read less than a "
+                        "nine-calendar-month one")
 
     def test_the_baseline_is_reported_not_implied(self):
         # A normal nobody states is not a normal. The plan is what the interface
         # reads, so this is the surface that has to carry it.
         plan = vs.plan(5000, "2010-01-01", "2026-09-01")
         self.assertIn("normal_window", plan)
-        self.assertEqual(plan["normal_window"]["start"][:4], "2007")
-        self.assertEqual(plan["months_to_read"], 237)
+        self.assertEqual(plan["normal_window"]["start"][:4], "2015")
+        self.assertEqual(plan["months_to_read"], 141)
         self.assertIn("exceed the months returned", plan["estimate_basis"])
 
 
