@@ -197,13 +197,29 @@ def _invalidate_process_caches():
 
     The store handle is cached per process because opening a session is several
     round trips. Anything that changes the store's identity at runtime -- a test
-    repointing the environment, a tool repointing the environment -- has to call
+    repointing the environment, a tool extending the store -- has to call
     this, or it will keep answering from the previous repository.
     """
     global _store_dataset, _store_identity
     with _store_lock:
         _store_dataset = None
         _store_identity = None
+
+
+def chirps_store_refresh(dry_run: bool = False) -> dict:
+    """Extend the CHIRPS store with the months DEA has published since it was
+    last built, from the worker, in the background.
+
+    DEA publishes a new CHIRPS month about every month, so a store built once is
+    always a little behind. This closes that gap automatically instead of by
+    hand: idempotent (no new month is a no-op), and it delegates the raster read
+    and the Icechunk write to ``tools.build_chirps_zarr.extend`` so both live in
+    one place beside the builder. ``dry_run`` reports what it would append
+    without touching the store.
+    """
+    from tools import build_chirps_zarr
+
+    return build_chirps_zarr.extend(dry_run=dry_run)
 
 
 # --------------------------------------------------------------------------
@@ -871,8 +887,13 @@ def compute_series(
     def window_slice(first: str, last: str):
         import numpy as np
 
+        # Compare year-month on both sides. Comparing the full start date against
+        # a "YYYY-MM" key (`first <= label[:7]`) drops the window's first month,
+        # because "2024-01-01" sorts after "2024-01" -- a longer string is greater
+        # than its own prefix. Every window then silently lost its opening month,
+        # which is the window being ignored rather than honoured.
         keep = [i for i, label in enumerate(union_labels)
-                if first <= label[:7] <= last]
+                if first[:7] <= label[:7] <= last[:7]]
         if not keep:
             return [], np.empty((0, len(grid["latitudes"]),
                                  len(grid["longitudes"]))), dict(union_coverage)

@@ -150,6 +150,17 @@ def run_forever(
     totals = {"sweeps": 0, "processed": 0, "ready": 0, "failed": 0, "alerts": 0, "skipped": 0}
     idle_failures = 0
 
+    # Keep the CHIRPS store current with DEA's monthly publications, from here in
+    # the background rather than by hand. Off by default: extending the shared
+    # store is the one thing the worker can do that other consumers of that store
+    # (the backend, a reader) can be affected by, so it is opt-in, idempotent, and
+    # rate-limited to a handful of times a day. It is isolated so a store failure
+    # never trips the environment-failure counter -- the queue is more important
+    # than the store being a month or two behind.
+    auto_refresh = bool(os.getenv("CHIRPS_STORE_AUTO_UPDATE"))
+    refresh_seconds = float(os.getenv("CHIRPS_STORE_REFRESH_SECONDS", "21600"))
+    last_refresh = time.monotonic()
+
     with worker_lock() as acquired:
         if not acquired:
             raise RuntimeError("another worker holds the lock; exiting so the supervisor restarts one")
@@ -170,6 +181,19 @@ def run_forever(
                              f"{max_consecutive_idle_failures}): {type(exc).__name__}: {exc}")
                 if idle_failures >= max_consecutive_idle_failures:
                     raise
+
+            if auto_refresh and refresh_seconds and \
+                    time.monotonic() - last_refresh >= refresh_seconds:
+                last_refresh = time.monotonic()
+                try:
+                    result = rainfall.chirps_store_refresh()
+                    if progress and result.get("added"):
+                        progress(f"chirps store: {result}")
+                except Exception as exc:  # noqa: BLE001 - never restart the worker over this
+                    if progress:
+                        progress(f"chirps store refresh failed: "
+                                 f"{type(exc).__name__}: {exc}")
+
             totals["sweeps"] += 1
             sleep(interval)
     return totals

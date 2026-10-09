@@ -742,6 +742,33 @@ class CellCacheIdentityTests(unittest.TestCase):
                 os.environ["RAINFALL_CACHE_DIR"] = previous
             tmp.cleanup()
 
+    def test_the_window_includes_its_opening_month(self):
+        # The slice compared the full start date against a "YYYY-MM" key, so
+        # "2024-01-01" sorted after "2024-01" and the window's first month was
+        # dropped from every series -- the window being partly ignored.
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        try:
+            geom = {"type": "Polygon", "coordinates": [
+                [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+                 [37.70, 1.30], [37.70, 1.20]]]}
+            chirps = rainfall.build_and_cache(
+                geom, start="2024-01-01", end="2024-03-01",
+                source=stub_reader, product="chirps")
+            self.assertEqual([r["month"] for r in chirps["series"]],
+                             ["2024-01-01", "2024-02-01", "2024-03-01"],
+                             "the opening month of the window must be served")
+        finally:
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()
+
 
 class WindowServingTests(unittest.TestCase):
     """The window guides what is served, not only what is displayed.
@@ -842,3 +869,82 @@ class WindowServingTests(unittest.TestCase):
         # (which reaches past it), and the tail is the only GeoTIFF read.
         self.assertEqual(store_calls, [("2026-01-01", "2026-08-01")])
         self.assertEqual(geotiff_calls, [("2026-09-01", "2026-10-01")])
+
+
+class ChirpsStoreRefreshTests(unittest.TestCase):
+    """Background extension of the CHIRPS store is safe by construction.
+
+    Extending the shared DO store is the one worker action other consumers can
+    be affected by, so these pin the things that must never happen: a no-op or a
+    dry-run must not write, and a real extension must append along time (never
+    rebuild/replace) and then drop the stale cached handle.
+    """
+
+    STORE_LAST = "2026-08"
+
+    def _run(self, *, new_axis, dry_run):
+        from unittest import mock
+
+        import numpy as np
+        import xarray as xr
+        import tools.build_chirps_zarr as builder
+
+        year, month = int(self.STORE_LAST[:4]), int(self.STORE_LAST[5:7])
+        # The store's own grid (1600 x 1500), so the appended cube's shape matches
+        # the coordinates it is built with, exactly as in the real store.
+        existing = xr.Dataset(coords={
+            "time": xr.date_range(f"{year:04d}-{month:02d}-01", periods=1, freq="MS"),
+            "latitude": np.zeros(builder.EXPECTED_HEIGHT),
+            "longitude": np.zeros(builder.EXPECTED_WIDTH),
+        })
+        commit = mock.Mock()
+        session = mock.Mock()
+        session.commit = commit
+        session.store = object()
+        appended = {}
+
+        def fake_to_zarr(self_s, store, *, mode, append_dim, **kwargs):
+            appended["mode"] = mode
+            appended["append_dim"] = append_dim
+
+        with mock.patch.object(rainfall, "chirps_store_target",
+                               return_value={"bucket": "b", "prefix": "p",
+                                             "region": "x", "endpoint": None}), \
+             mock.patch.object(rainfall, "_open_chirps_store",
+                               return_value=(None, session)), \
+             mock.patch.object(builder, "plan",
+                               return_value=(new_axis, [], [])), \
+             mock.patch.object(builder, "read_month",
+                               return_value=(np.zeros((builder.EXPECTED_HEIGHT,
+                                                       builder.EXPECTED_WIDTH),
+                                                      dtype="float32"), None)), \
+             mock.patch("xarray.open_zarr", return_value=existing), \
+             mock.patch.object(xr.Dataset, "to_zarr", fake_to_zarr), \
+             mock.patch.object(rainfall, "_invalidate_process_caches"):
+            result = rainfall.chirps_store_refresh(dry_run=dry_run)
+        return result, appended, commit
+
+    def test_nothing_new_is_a_noop_that_never_writes(self):
+        # axis past the store holds only months <= the store's last (none).
+        result, appended, commit = self._run(new_axis=[self.STORE_LAST], dry_run=False)
+        self.assertEqual(result["status"], "current")
+        self.assertNotIn("commit_snapshot", appended)
+        self.assertNotIn("append_dim", appended)
+        commit.assert_not_called()
+
+    def test_a_dry_run_reports_without_writing(self):
+        result, appended, commit = self._run(
+            new_axis=["2026-09", "2026-10"], dry_run=True)
+        self.assertEqual(result["status"], "would_extend")
+        self.assertEqual(result["would_add"], 2)
+        self.assertNotIn("append_dim", appended)
+        commit.assert_not_called()
+
+    def test_a_real_extension_appends_along_time(self):
+        result, appended, commit = self._run(
+            new_axis=["2026-09", "2026-10"], dry_run=False)
+        self.assertEqual(result["status"], "extended")
+        self.assertEqual(result["added"], 2)
+        self.assertEqual(appended["mode"], "a")
+        self.assertEqual(appended["append_dim"], "time")
+        commit.assert_called_once()

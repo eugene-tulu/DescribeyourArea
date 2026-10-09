@@ -352,6 +352,87 @@ def build(axis: list[str], holes: list[str], workers: int, label: str) -> dict:
             "present": count - len(holes), "holes": holes}
 
 
+def extend(dry_run: bool = False) -> dict:
+    """Append CHIRPS months DEA has published since the store was last built.
+
+    DEA publishes a new CHIRPS month roughly every month, so a store built once
+    is always a couple of months behind. This closes that gap in the background:
+    it reads the store's last month, HEAD-probes DEA for anything after it, and
+    extends the array -- holes stay as NaN so the time axis stays complete and
+    every later date keeps its row. It is idempotent: nothing published past the
+    store is a no-op, so it is safe to run on any cadence.
+
+    The latitude/longitude coordinates are taken from the store itself rather
+    than recomputed, so they match the existing array exactly and ``to_zarr``
+    appends along time without reconciling a drifting axis. ``dry_run`` reports
+    what would happen without touching the store.
+    """
+    import xarray as xr
+
+    target = rainfall.chirps_store_target()
+    if target is None:
+        return {"status": "unconfigured", "added": 0}
+
+    _repo, session = rainfall._open_chirps_store(writable=False)
+    group = rainfall.CHIRPS_STORE_GROUP
+    existing = xr.open_zarr(session.store, group=group, consolidated=False, chunks=None)
+    store_last = str(existing.time.dt.strftime("%Y-%m").values[-1])
+    latitude = np.asarray(existing.latitude.values, dtype="float64")
+    longitude = np.asarray(existing.longitude.values, dtype="float64")
+
+    # First month after the store, through this month.
+    year, month = int(store_last[:4]), int(store_last[5:7])
+    month += 1
+    if month == 13:
+        month, year = 1, year + 1
+    start = f"{year:04d}-{month:02d}"
+    end = datetime.date.today().replace(day=1).isoformat()
+    if start > end:
+        return {"status": "current", "added": 0, "store_last": store_last}
+
+    try:
+        axis, holes, _trailing = plan(start, end, 8)
+    except SystemExit:
+        # No month after the store is published yet (publication lag).
+        return {"status": "current", "added": 0, "store_last": store_last}
+    new_axis = [label for label in axis if label > store_last]
+    if not new_axis:
+        return {"status": "current", "added": 0, "store_last": store_last}
+    if dry_run:
+        return {"status": "would_extend", "would_add": len(new_axis),
+                "range": f"{new_axis[0]}..{new_axis[-1]}", "holes": holes}
+
+    cube = np.full((len(new_axis), EXPECTED_HEIGHT, EXPECTED_WIDTH), np.nan, dtype="float32")
+    for position, label in enumerate(new_axis):
+        if label in holes:
+            continue
+        array, _transform = read_month(label)
+        cube[position] = array
+
+    times = xr.date_range(f"{new_axis[0]}-01", periods=len(new_axis), freq="MS",
+                          use_cftime=False)
+    dataset = xr.Dataset(
+        {rainfall.CHIRPS_STORE_VARIABLE: (("time", "latitude", "longitude"), cube)},
+        coords={"time": times, "latitude": latitude, "longitude": longitude},
+    )
+    dataset[rainfall.CHIRPS_STORE_VARIABLE].encoding.update(
+        chunks=rainfall.CHIRPS_STORE_CHUNKS, dtype="float32",
+        fill_value=np.nan, _FillValue=np.nan,
+    )
+
+    _repo, session = rainfall._open_chirps_store(writable=True)
+    dataset.to_zarr(session.store, group=group, mode="a", append_dim="time",
+                    consolidated=False)
+    snapshot = session.commit(
+        f"CHIRPS extend {store_last} -> {new_axis[-1]} "
+        f"({len(new_axis)} months, {len(holes)} holes)")
+    # The read-only handle opened this process's view of the old snapshot; drop it
+    # so the next read sees the months just appended.
+    rainfall._invalidate_process_caches()
+    return {"status": "extended", "added": len(new_axis),
+            "range": f"{new_axis[0]}..{new_axis[-1]}", "snapshot": str(snapshot)}
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--start", default=CHIRPS_RECORD_START,
@@ -364,12 +445,24 @@ def main(argv: list[str] | None = None) -> int:
                         help="concurrent source reads (default 8)")
     parser.add_argument("--label", default=os.getenv("BUILD_LABEL", "build"),
                         help="short description recorded in the array note")
+    parser.add_argument("--extend", action="store_true",
+                        help="append only the months DEA has published since the "
+                             "store was last built, instead of a full rebuild")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --extend, report what would be appended and stop")
     args = parser.parse_args(argv)
 
     end = args.end or datetime.date.today().replace(day=1).isoformat()
     print(f"source: {CHIRPS_BASE_URL}")
     print(f"store:  {rainfall.chirps_store_target() or 'NOT CONFIGURED'}")
     print(f"chunks: {rainfall.CHIRPS_STORE_CHUNKS} (months, lat, lon)\n")
+
+    if args.extend:
+        started = time.perf_counter()
+        result = extend(dry_run=args.dry_run)
+        result["seconds"] = round(time.perf_counter() - started, 1)
+        print(f"extend: {result}")
+        return 0
 
     started = time.perf_counter()
     axis, holes, _trailing = plan(args.start, end, args.threads)
