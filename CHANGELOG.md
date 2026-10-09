@@ -308,6 +308,24 @@ green prose; it now routes through `ErrorView` like every other failure.
 `GET /context?cache_key=` returns the completed `landcover` summary — the
 exact data path `showComputedResult` now relies on.
 
+### The vegetation chart never read its own series
+
+A completed `vegetation_series` job reached `ready` in the queue, and
+`pollSubmission` handled every indicator the same: it called
+`showComputedResult(cacheKey)`, which reads `/context` — and `/context` does
+not contain the vegetation series (it carries the rainfall/dem/ndvi summary
+only). So the chart stayed on "not computed" forever and `TimeSection`
+rendered its fallback. `pollSubmission` now branches on the indicator:
+`vegetation_series` is reloaded via `loadVegetationSeries` (GET
+`/rainfall?cache_key=…&indicator=vegetation_series`, the artefact the worker
+writes), while the offline-summary path keeps using `showComputedResult`.
+
+**Evidence.** Queued `vegetation_series` for a small area against the live
+deployment: submission → `cache_key d2a853…`, poll reached `ready`
+(`pending → running → ready`), and `GET /rainfall?cache_key=d2a853…&indicator=vegetation_series`
+returned HTTP 200 `status: ok` with 196 monthly series points — the exact
+payload `loadVegetationSeries` now consumes on completion.
+
 ---
 
 ## 1.22.0 — An instrument, not a report
