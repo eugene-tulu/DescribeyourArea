@@ -369,7 +369,7 @@ class UserFacingSurfaceTests(unittest.TestCase):
         # marking it stale, which read as "these are the numbers for this area".
         self.assertIn("clearAnalysis", self.source)
         body = self.source.split("const clearAnalysis")[1][:800]
-        for piece in ("setAnalysisSummary(null)", "setOffline(null)", "setResponse('')"):
+        for piece in ("setAnalysisSummary(null)", "setOffline(null)", "setResultPhase('idle')"):
             self.assertIn(piece, body, f"clearAnalysis does not reset {piece}")
 
     def test_a_finished_job_fetches_its_result(self):
@@ -384,7 +384,7 @@ class UserFacingSurfaceTests(unittest.TestCase):
     def test_errors_render_as_errors(self):
         # A failure used to render in the same paragraph style as a result, in
         # the same panel, so it read as a finding.
-        self.assertIn("responseIsError", self.source)
+        self.assertIn("resultPhase === 'error'", self.source)
         self.assertIn("role=\"alert\"", self.source)
         self.assertIn("Try again", self.source, "no way to retry from the error")
 
@@ -546,9 +546,10 @@ class DatesPrimaryTests(unittest.TestCase):
         # Scoped to the control itself: the same attribute appears in the link
         # restore, so searching the whole file compared two unrelated places.
         source = self.source
-        control = source[source.index('aria-label="Window start"') - 1200:
-                         source.index('aria-label="Window start"') + 1200]
-        self.assertLess(control.index('type="date"'), control.index("windowYears === years"),
+        needle = 'aria-label="Window start date"'
+        control = source[source.index(needle) - 1200: source.index(needle) + 1200]
+        self.assertIn('type="date"', control, "the start date field must exist")
+        self.assertLess(control.index('type="date"'), control.index("periodAmount === years"),
                         "dates are the question; presets are a convenience")
 
     def test_choosing_a_preset_clears_the_dates(self):

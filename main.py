@@ -330,6 +330,10 @@ async def limit_analysis_concurrency(request: Request, call_next):
 # --------------------------------------------------
 class GeoJSONRequest(BaseModel):
     geojson: dict
+    # Which precipitation product produced the rainfall measure. It travels with
+    # the request so the live preview serves the product the reader chose rather
+    # than silently answering with ERA5. Matches SubmitRequest.product.
+    product: str = "rainfall"
 
 class RainfallLookupRequest(BaseModel):
     """Identify a study area, by geometry or by the key it hashes to."""
@@ -1669,7 +1673,11 @@ async def generate_context(
         if "rainfall" in requested:
             import rainfall
 
-            rainfall_context = rainfall.cached_context(geom)
+            # The product the reader chose, forwarded to the reader. It was
+            # accepted here and then dropped: cached_context was called without
+            # it, so the live preview always read the ERA5 cache and a CHIRPS
+            # request was answered with ERA5 and no indication of the switch.
+            rainfall_context = rainfall.cached_context(geom, product=request.product)
 
         # Get country
         country = await get_country_from_centroid(geom)
@@ -1758,7 +1766,8 @@ async def generate_context(
                 "landcover": 10.0,
                 "ndvi": (ndvi_stats or {}).get("resolution_m"),
             },
-            "rainfall": _with_rainfall_evidence(rainfall_context),
+            "rainfall": _with_rainfall_evidence(
+                rainfall_context, product=request.product),
             "country": country,
             "scene_dates": scene_dates,
             "scene_ids": scene_ids,

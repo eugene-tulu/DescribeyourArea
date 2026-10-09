@@ -214,6 +214,50 @@ class ApiPlumbingTests(unittest.TestCase):
 
         self.assertEqual(jobs._job_product(response.json()["cache_key"]), "chirps")
 
+    def test_the_live_preview_honours_the_product_choice(self):
+        # The reader's choice reached /generate-context in the body and never
+        # left it: cached_context was called without the product, so a request
+        # that chose CHIRPS was answered from the ERA5 cache (or an ERA5-shaped
+        # miss) with no evidence label saying so. Product-vs-product collision is
+        # the failure this suite exists to prevent, and the live preview is where
+        # it hid.
+        from unittest import mock
+
+        seen = []
+        shipped = {
+            "status": "ok",
+            "cache_key": self.KEY,
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "window": {"start": "2026-01-01", "end": "2026-01-31"},
+            "series": [{"month": "2026-01", "precip_mm": 10.0, "normal_mm": 30.0}],
+        }
+
+        def cache(geojson_geom, product="rainfall"):
+            seen.append(product)
+            return dict(shipped, product=product)
+
+        # A sub-cap area: /generate-context's admission policy refuses anything
+        # past the synchronous limit before the rainfall read is even reached.
+        small = {"type": "Feature", "properties": {},
+                 "geometry": {"type": "Polygon",
+                              "coordinates": [[[37.70, 1.20], [37.75, 1.20],
+                                               [37.75, 1.25], [37.70, 1.25],
+                                               [37.70, 1.20]]]}}
+        with mock.patch.object(rainfall, "cached_context", cache):
+            chirps = self.client.post(
+                "/generate-context?datasets=rainfall",
+                json={"geojson": small, "product": "chirps"})
+        self.assertEqual(chirps.status_code, 200, chirps.text[:200])
+        rain = chirps.json()["summary"]["rainfall"]
+        self.assertEqual(seen, ["chirps"],
+                         "generate_context must forward the caller's product to "
+                         "cached_context instead of defaulting to ERA5")
+        # The CHIRPS series arrives, labelled observed rather than modelled --
+        # the one thing that tells a reader which product spoke.
+        self.assertEqual(rain["status"], "ok", rain)
+        self.assertEqual(rain["evidence"]["status"], "observed",
+                         "a CHIRPS selection was labelled with ERA5's modelled class")
+
     def test_an_unknown_product_is_refused_with_the_ones_that_exist(self):
         response = self.client.post(
             "/rainfall/submit", json={"geojson": self.AOI, "product": "smoke-signals"})
