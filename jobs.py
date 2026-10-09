@@ -212,6 +212,7 @@ def submit(
     *,
     indicator: str = "rainfall",
     start: str = "2010-01-01",
+    end: Optional[str] = None,
     label: Optional[str] = None,
     submitted_by: Optional[str] = None,
     product: Optional[str] = None,
@@ -253,6 +254,7 @@ def submit(
         "state": PENDING,
         "submitted_at": _now(),
         "start": start,
+        "end": (end or None),
         "label": label,
         "submitted_by_prefix": submitted_by,
         "product": product,
@@ -405,6 +407,7 @@ async def run_pending(
                 payload = rainfall.build_and_cache(
                     geometry,
                     start=job.get("start", "2010-01-01"),
+                    end=job.get("end"),
                     source=union_source,
                     product=product,
                     upload=publish,
@@ -425,7 +428,8 @@ async def run_pending(
                 payload = await indicators.compute_indicator(
                     indicator, bbox, geometry,
                     area_km2=area, resolution_m=resolution,
-                    window_start=job.get("start"), enforce_budget=False,
+                    window_start=job.get("start"),
+                    window_end=job.get("end"), enforce_budget=False,
                 )
                 # The resolution to report is the one actually read, not the policy
                 # target. A MODIS 250 m composite computed because the policy asked

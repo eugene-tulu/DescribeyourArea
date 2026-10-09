@@ -1677,7 +1677,14 @@ async def generate_context(
             # accepted here and then dropped: cached_context was called without
             # it, so the live preview always read the ERA5 cache and a CHIRPS
             # request was answered with ERA5 and no indication of the switch.
-            rainfall_context = rainfall.cached_context(geom, product=request.product)
+            # The window is forwarded the same way: the cached series is the
+            # union of the request and the climatology, so narrowing it here
+            # rather than sending the whole record to be sliced in the browser
+            # makes what was requested equal what is served.
+            rainfall_context = rainfall.cached_context(
+                geom, product=request.product,
+                window_start=requested_window_start,
+                window_end=requested_window_end)
 
         # Get country
         country = await get_country_from_centroid(geom)
@@ -1968,7 +1975,9 @@ class ForgetRequest(BaseModel):
     cache_key: Optional[str] = None
 
 
-def _rainfall_by_key(key: str, indicator: str) -> dict:
+def _rainfall_by_key(key: str, indicator: str, *,
+                     window_start: Optional[str] = None,
+                     window_end: Optional[str] = None) -> dict:
     """Read a precomputed artefact by cache key, for either transport.
 
     Attaches evidence here, at the single place both verbs read through.
@@ -1989,7 +1998,9 @@ def _rainfall_by_key(key: str, indicator: str) -> dict:
     if name in ("chirps", "rainfall"):
         # Two products for one measure, so the key alone is not the identity.
         return _with_rainfall_evidence(
-            rainfall.cached_context_by_key(key, name), name)
+            rainfall.cached_context_by_key(key, name,
+                                            window_start=window_start,
+                                            window_end=window_end), name)
 
     if name in jobs.RUNTIME_INDICATORS:
         return jobs.read_artefact(key, name) or {
@@ -2004,16 +2015,19 @@ def _rainfall_by_key(key: str, indicator: str) -> dict:
 
 
 @app.get("/rainfall")
-async def rainfall_lookup_by_key(cache_key: str, indicator: str = "rainfall"):
+async def rainfall_lookup_by_key(cache_key: str, indicator: str = "rainfall",
+                                 window_start: Optional[str] = None,
+                                 window_end: Optional[str] = None):
     """Read a computed series by key, without resending the polygon.
 
     The client has always called this with GET and a query string, while the
     route was registered POST-only, so every vegetation-series fetch returned
     405 and the chart behind it could never render. A key-addressed read is a
     GET by any reading of the verb, so the transport follows the intent rather
-    than the other way round.
+    than the other way around.
     """
-    result = _rainfall_by_key(cache_key.strip(), indicator)
+    result = _rainfall_by_key(cache_key.strip(), indicator,
+                              window_start=window_start, window_end=window_end)
     import rainfall
 
     return {
@@ -2028,7 +2042,9 @@ async def rainfall_lookup_by_key(cache_key: str, indicator: str = "rainfall"):
 
 
 @app.post("/rainfall")
-async def rainfall_lookup(request: RainfallLookupRequest):
+async def rainfall_lookup(request: RainfallLookupRequest,
+                          window_start: Optional[str] = None,
+                          window_end: Optional[str] = None):
     """Return the precomputed rainfall series for a study area.
 
     Separate from ``/generate-context`` on purpose. There the admission policy is
@@ -2043,7 +2059,8 @@ async def rainfall_lookup(request: RainfallLookupRequest):
         # A caller that already knows the key never resends a polygon, which for a
         # detailed conservancy is a megabyte of coordinates.
         key = request.cache_key.strip()
-        result = _rainfall_by_key(key, request.indicator or "rainfall")
+        result = _rainfall_by_key(key, request.indicator or "rainfall",
+                                  window_start=window_start, window_end=window_end)
         bbox_area = None
     else:
         if not request.geojson:
@@ -2051,7 +2068,8 @@ async def rainfall_lookup(request: RainfallLookupRequest):
         area = validate_for_lookup(request.geojson)
         key = rainfall.geometry_hash(area["feature"]["geometry"])
         result = _with_rainfall_evidence(
-            rainfall.cached_context(area["feature"]["geometry"]))
+            rainfall.cached_context(area["feature"]["geometry"],
+                                    window_start=window_start, window_end=window_end))
         bbox_area = round(area["bbox_area_km2"], 2)
     return {
         "rainfall": result,
@@ -2149,9 +2167,16 @@ async def submit_rainfall(
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
 
+    # The window must reach the job. It used to reach only the pricing estimate
+    # (plan_indicator below), so every offline job computed the hard default
+    # 2010-2026 regardless of what the reader asked for -- the window was ignored
+    # for the compute even as it framed the price. Now both ends travel with the
+    # job, for rainfall and for the raster indicators alike.
     state = jobs.submit(
         area["feature"]["geometry"],
         indicator=indicator,
+        start=(window_start or None) or "2010-01-01",
+        end=(window_end or None),
         label=(area["feature"].get("properties") or {}).get("NAME"),
         submitted_by=_client_host(http_request),
         product=product if indicator == "rainfall" else None,
@@ -2530,7 +2555,9 @@ async def resolve_study_area(
 
 
 @app.get("/context")
-async def context_for_key(cache_key: str, indicators: Optional[str] = None):
+async def context_for_key(cache_key: str, indicators: Optional[str] = None,
+                          window_start: Optional[str] = None,
+                          window_end: Optional[str] = None):
     """A completed area's reading, assembled from the artefacts the worker wrote.
 
     `/generate-context` computes, and refuses anything past the synchronous cap --
@@ -2566,7 +2593,9 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None):
             # been computed yet". Read the product the job recorded; a later
             # product submission is the one honoured (see jobs._job_product).
             product = jobs._job_product(key) or "rainfall"
-            context = _rainfall_by_key(key, product)
+            context = _rainfall_by_key(key, product,
+                                       window_start=window_start,
+                                       window_end=window_end)
             if context.get("status") != "ok":
                 missing.append(name)
                 continue

@@ -232,7 +232,7 @@ class ApiPlumbingTests(unittest.TestCase):
             "series": [{"month": "2026-01", "precip_mm": 10.0, "normal_mm": 30.0}],
         }
 
-        def cache(geojson_geom, product="rainfall"):
+        def cache(geojson_geom, product="rainfall", **_window):
             seen.append(product)
             return dict(shipped, product=product)
 
@@ -710,3 +710,135 @@ class CellCacheIdentityTests(unittest.TestCase):
             else:
                 os.environ["RAINFALL_CACHE_DIR"] = previous
             tmp.cleanup()
+
+    def test_a_chirps_series_carries_chirps_provenance_not_era5(self):
+        # compute_series stamped ERA5's source/DOI/citation on every payload, so
+        # a CHIRPS series carried the reanalysis's provenance under its own grid
+        # and "chirps" product -- a correct number wearing the wrong statement of
+        # where it came from.
+        import os
+        import tempfile
+
+        previous = os.environ.get("RAINFALL_CACHE_DIR")
+        tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = tmp.name
+        try:
+            geom = {"type": "Polygon", "coordinates": [
+                [[37.70, 1.20], [37.80, 1.20], [37.80, 1.30],
+                 [37.70, 1.30], [37.70, 1.20]]]}
+            chirps = rainfall.build_and_cache(
+                geom, start="2024-01-01", end="2024-03-01",
+                source=stub_reader, product="chirps")
+            self.assertEqual(chirps["source"], rainfall.CHIRPS_SOURCE)
+            self.assertEqual(chirps["doi"], rainfall.CHIRPS_DOI)
+            self.assertEqual(chirps["product"], "chirps")
+            era5 = rainfall.build_and_cache(geom, start="2024-01-01", end="2024-03-01")
+            self.assertEqual(era5["source"], rainfall.ERA5_SOURCE)
+            self.assertEqual(era5["doi"], rainfall.ERA5_DOI)
+        finally:
+            if previous is None:
+                os.environ.pop("RAINFALL_CACHE_DIR", None)
+            else:
+                os.environ["RAINFALL_CACHE_DIR"] = previous
+            tmp.cleanup()
+
+
+class WindowServingTests(unittest.TestCase):
+    """The window guides what is served, not only what is displayed.
+
+    The stored series is wider than any one window (it is the union of the
+    request and the fixed 1991-2020 climatology). These pin that narrowing the
+    window narrows the series actually served -- the monthly rows, the summary,
+    the coverage it reports and the window it names -- while the climatology
+    reference is left whole.
+    """
+
+    def _payload(self):
+        def row(month, precip, normal, anomaly, pct):
+            return {"month": month, "precip_mm": precip, "normal_mm": normal,
+                    "anomaly_mm": anomaly, "anomaly_pct": pct}
+
+        return {
+            "status": "ok", "product": "rainfall",
+            "series": [
+                row("2023-11-01", 10.0, 20.0, -10.0, -50.0),
+                row("2023-12-01", 12.0, 20.0, -8.0, -40.0),
+                row("2024-01-01", 20.0, 20.0, 0.0, 0.0),
+                row("2024-06-01", 30.0, 20.0, 10.0, 50.0),
+                row("2024-12-01", 40.0, 20.0, 20.0, 100.0),
+            ],
+            "coverage": {
+                "window": {"months": 5, "unreadable_months": ["2023-12-01"]},
+                "climatology": {"months": 360, "unreadable_months": []},
+            },
+            "unreadable_months": ["2023-12-01"],
+            "window": {"start": "2023-11-01", "end": "2024-12-01"},
+            "climatology": {"start": "1991-01-01", "end": "2020-12-31"},
+        }
+
+    def test_no_window_serves_the_whole_series_unchanged(self):
+        self.assertEqual(
+            rainfall._window_precomputed_payload(self._payload(), None, None),
+            self._payload())
+
+    def test_the_window_serves_only_its_own_months(self):
+        out = rainfall._window_precomputed_payload(
+            self._payload(), "2024-01-01", "2024-06-30")
+        self.assertEqual([r["month"] for r in out["series"]],
+                         ["2024-01-01", "2024-06-01"])
+        self.assertEqual(out["window"]["start"], "2024-01-01")
+        self.assertEqual(out["window"]["end"], "2024-06-30")
+        # Coverage reports the served window, not the stored one.
+        self.assertEqual(out["coverage"]["window"]["months"], 2)
+        self.assertEqual(out["coverage"]["window"]["unreadable_months"], [])
+        # An unreadable month outside the window is not claimed for it.
+        self.assertEqual(out["unreadable_months"], [])
+        # The climatology is a fixed reference and is left whole.
+        self.assertEqual(out["coverage"]["climatology"]["months"], 360)
+        self.assertEqual(out["climatology"],
+                         {"start": "1991-01-01", "end": "2020-12-31"})
+
+    def test_the_chirps_store_serves_the_months_it_holds_and_fills_the_tail(self):
+        # The store used to answer a window only whole: any month outside its
+        # range returned None and the entire series fell back to one GeoTIFF per
+        # month. A window that reaches the present therefore rebuilt most of the
+        # record from scratch. Now the store serves the months it holds and only
+        # the publication-lag tail is read from GeoTIFFs.
+        import numpy as np
+
+        from unittest import mock
+
+        grid = {"latitudes": [0.0], "longitudes": [0.0],
+                "lat_step": 0.25, "lon_step": 0.25}
+
+        store_calls = []
+        geotiff_calls = []
+
+        def from_store(g, start, end):
+            store_calls.append((start, end))
+            labels = rainfall._month_range(start, end)  # 2026-01 .. 2026-08
+            matrix = np.full((len(labels), 1, 1), 50.0)
+            return labels, matrix, rainfall._chirps_coverage(labels, [])
+
+        def from_geotiffs(g, start, end):
+            geotiff_calls.append((start, end))
+            labels = rainfall._month_range(start, end)  # 2026-09 .. 2026-10
+            matrix = np.full((len(labels), 1, 1), 60.0)
+            return labels, matrix, rainfall._chirps_coverage(labels, [])
+
+        with mock.patch.object(rainfall, "chirps_store_month_bounds",
+                               return_value=("1981-01", "2026-08")), \
+             mock.patch.object(rainfall, "_chirps_cell_monthly_from_store",
+                               from_store), \
+             mock.patch.object(rainfall, "_chirps_cell_monthly_from_geotiffs",
+                               from_geotiffs):
+            labels, matrix, coverage = rainfall.chirps_cell_monthly(
+                grid, "2026-01-01", "2026-10-01")
+
+        self.assertEqual(labels, rainfall._month_range("2026-01-01", "2026-10-01"))
+        self.assertEqual(list(np.ravel(matrix)),
+                         [50.0] * 8 + [60.0] * 2)
+        # The store is read for exactly the months it holds, not the whole window
+        # (which reaches past it), and the tail is the only GeoTIFF read.
+        self.assertEqual(store_calls, [("2026-01-01", "2026-08-01")])
+        self.assertEqual(geotiff_calls, [("2026-09-01", "2026-10-01")])

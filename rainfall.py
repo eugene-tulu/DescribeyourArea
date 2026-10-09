@@ -933,16 +933,27 @@ def compute_series(
     source_degrees = (CHIRPS_NATIVE_GRID_DEGREES if source is not None
                       else ERA5_GRID_DEGREES)
 
+    # The product's own provenance, chosen the same way as the grid above
+    # (``source is not None`` means a CHIRPS reader was resolved from the name).
+    # Stamping ERA5's source/DOI/citation on a CHIRPS payload is a correct number
+    # wearing the wrong provenance, which is the failure this project avoids.
+    if source is not None:
+        product_source, product_doi = CHIRPS_SOURCE, CHIRPS_DOI
+        product_citation, product_license = CHIRPS_CITATION, "CC-BY 4.0"
+    else:
+        product_source, product_doi = ERA5_SOURCE, ERA5_DOI
+        product_citation, product_license = ERA5_CITATION, "CC-BY 4.0"
+
     return {
         "processing_version": RAINFALL_PROCESSING_VERSION,
         "indicator": "monthly_precipitation",
         # A notification has to be able to name the area it is about, and the
         # geometry is deliberately not stored, so the label travels with the series.
         "label": label,
-        "source": ERA5_SOURCE,
-        "doi": ERA5_DOI,
-        "citation": ERA5_CITATION,
-        "license": "CC-BY 4.0",
+        "source": product_source,
+        "doi": product_doi,
+        "citation": product_citation,
+        "license": product_license,
         "retrieved": datetime.datetime.now(datetime.UTC).date().isoformat(),
         "bbox": bbox,
         "resolution_degrees": source_degrees,
@@ -1009,7 +1020,49 @@ def build_and_cache(
     return payload
 
 
-def cached_context_by_key(key: str, product: str = "rainfall") -> dict:
+def _window_precomputed_payload(payload: dict, window_start: Optional[str],
+                                window_end: Optional[str]) -> dict:
+    """Narrow a stored payload to the window the caller actually asked for.
+
+    The stored series is the union of the request window and the 1991-2020
+    climatology, so it can be far longer than the window a given call cares
+    about. The served series is narrowend here rather than left for the browser
+    to slice, so "what was requested" is also "what is served" -- for the monthly
+    series, its summary, the coverage it reports and the window it names. The
+    climatology is a fixed reference and is returned whole; it is not part of the
+    window and slicing it would change the anomaly's basis.
+    """
+    if not window_start and not window_end:
+        return payload
+    start = (window_start or "")[:10]
+    end = (window_end or "")[:10]
+
+    def keep(month: str) -> bool:
+        return (not start or month >= start) and (not end or month <= end)
+
+    series = payload.get("series") or []
+    windowed = [row for row in series if keep(row.get("month", ""))]
+    clipped = dict(payload)
+    clipped["series"] = windowed
+    clipped["summary"] = describe(windowed) if windowed else {}
+    clipped["window"] = {"start": window_start or (payload.get("window") or {}).get("start"),
+                         "end": window_end or (payload.get("window") or {}).get("end")}
+    clipped["unreadable_months"] = sorted(
+        m for m in (payload.get("unreadable_months") or []) if keep(m))
+    coverage = dict(payload.get("coverage") or {})
+    win_cov = dict(coverage.get("window") or {})
+    if win_cov:
+        win_cov["months"] = len(windowed)
+        win_cov["unreadable_months"] = sorted(
+            m for m in (win_cov.get("unreadable_months") or []) if keep(m))
+        coverage["window"] = win_cov
+        clipped["coverage"] = coverage
+    return clipped
+
+
+def cached_context_by_key(key: str, product: str = "rainfall", *,
+                          window_start: Optional[str] = None,
+                          window_end: Optional[str] = None) -> dict:
     """Result for a caller that already knows the key.
 
     Keeps the same miss contract as :func:`cached_context`, without asking for a
@@ -1032,10 +1085,13 @@ def cached_context_by_key(key: str, product: str = "rainfall") -> dict:
     # polls and what /rainfall/forget needs in order to remove it. It used to be
     # returned only on a *miss*, so the key reached the browser only when there
     # was nothing stored -- which is precisely when there is nothing to delete.
-    return {"status": "ok", "cache_key": key, **payload}
+    result = {"status": "ok", "cache_key": key, **payload}
+    return _window_precomputed_payload(result, window_start, window_end)
 
 
-def cached_context(geojson_geom: dict, product: str = "rainfall") -> dict:
+def cached_context(geojson_geom: dict, product: str = "rainfall", *,
+                   window_start: Optional[str] = None,
+                   window_end: Optional[str] = None) -> dict:
     """Result for the request path: a cached series, or an explicit miss.
 
     The request path never computes. A local hit is served without any network
@@ -1062,7 +1118,8 @@ def cached_context(geojson_geom: dict, product: str = "rainfall") -> dict:
     # polls and what /rainfall/forget needs in order to remove it. It used to be
     # returned only on a *miss*, so the key reached the browser only when there
     # was nothing stored -- which is precisely when there is nothing to delete.
-    return {"status": "ok", "cache_key": key, **payload}
+    result = {"status": "ok", "cache_key": key, **payload}
+    return _window_precomputed_payload(result, window_start, window_end)
 
 
 # --------------------------------------------------------------- CHIRPS
@@ -1091,6 +1148,19 @@ CHIRPS_NATIVE_GRID_DEGREES = 0.05
 CHIRPS_NODATA = -9999.0
 CHIRPS_LATENCY_DAYS = "30-60"
 
+# CHIRPS provenance, mirroring the ERA5_* block above. compute_series used to
+# stamp every payload with ERA5's source/DOI/citation, so a CHIRPS series carried
+# the reanalysis's provenance under its own grid and "chirps" product -- the right
+# number under the wrong statement of where it came from. These match the
+# registry's RAINFALL_CHIRPS source and DOI so the two do not diverge.
+CHIRPS_SOURCE = "CHIRPS v2.0 (satellite and gauge, 0.05 degrees), via Digital Earth Africa"
+CHIRPS_DOI = "10.1038/sdata.2015.66"
+CHIRPS_CITATION = (
+    "Funk et al. 2015, The climate hazards infrared precipitation with stations, "
+    "Scientific Data 2:150066. https://doi.org/10.1038/sdata.2015.66. Mirrored by "
+    "Digital Earth Africa; served from the Earthmover Icechunk store."
+)
+
 
 def _month_range(start: str, end: str) -> list[str]:
     """Month starts from start to end inclusive."""
@@ -1103,22 +1173,100 @@ def _month_range(start: str, end: str) -> list[str]:
     return out
 
 
+def chirps_store_month_bounds() -> Optional[tuple[str, str]]:
+    """The store's first and last month (``YYYY-MM``), or None if unusable."""
+    dataset = chirps_store_dataset()
+    if dataset is None:
+        return None
+    try:
+        times = dataset.time.dt.strftime("%Y-%m").values
+        if times.size == 0:
+            return None
+        return (str(times[0]), str(times[-1]))
+    except Exception:  # noqa: BLE001 - a malformed axis falls back, not crashes
+        return None
+
+
 def chirps_cell_monthly(grid: dict, start: str, end: str):
     """Monthly CHIRPS totals per cell, averaged over the ERA5 cell's footprint.
 
-    Prefers the tensor store and falls back to the per-month GeoTIFFs, which are
-    still the authority when no store is configured. Both paths return the same
-    three values, so the caller cannot tell which one answered.
+    Prefers the tensor store and fills any remainder from the per-month
+    GeoTIFFs, which stay the authority for a publication-lag tail the store does
+    not yet hold and for a deployment with no store. It used to return the store
+    only when the *whole* window sat inside it, and otherwise fall back to the
+    GeoTIFFs for every month -- so any window that reached the present (always,
+    in practice, because CHIRPS lags) discarded the whole record and paid for
+    hundreds of object opens to rebuild most of what the store already had. Now
+    the store answers the months it holds and the GeoTIFFs answer only the gap.
 
     CHIRPS is 0.05 deg and an ERA5 cell is 0.25, so one CHIRPS cell covers 1/625
     of the ERA5 footprint. Averaging the whole footprint rather than reading one
     central CHIRPS pixel is deliberate: a point sample of a 5 km grid would be a
     different claim from the ERA5 cell it is being compared with.
     """
-    from_store = _chirps_cell_monthly_from_store(grid, start, end)
-    if from_store is not None:
-        return from_store
-    return _chirps_cell_monthly_from_geotiffs(grid, start, end)
+    import numpy as np
+
+    labels = _month_range(start, end)
+    if not labels:
+        return labels, np.empty((0, 0, 0)), _chirps_coverage(labels, [])
+
+    bounds = chirps_store_month_bounds()
+    store_first, store_last = bounds if bounds else (None, None)
+
+    def in_store(label: str) -> bool:
+        month = label[:7]
+        return ((store_first is None or month >= store_first)
+                and (store_last is None or month <= store_last))
+
+    covered = [label for label in labels if in_store(label)]
+    if bounds is None or not covered:
+        # No store, or none of the window overlaps it: the GeoTIFFs are the whole
+        # answer, exactly as before.
+        return _chirps_cell_monthly_from_geotiffs(grid, start, end)
+
+    # The store answers the months it holds.
+    store_labels, store_matrix, store_cov = _chirps_cell_monthly_from_store(
+        grid, covered[0], covered[-1])
+    if not store_labels or getattr(store_matrix, "ndim", 0) != 3:
+        return _chirps_cell_monthly_from_geotiffs(grid, start, end)
+
+    latitudes = len(grid["latitudes"])
+    longitudes = len(grid["longitudes"])
+    if store_matrix.shape[1:] != (latitudes, longitudes):
+        # A grid mismatch is not something to reconcile silently; read the whole
+        # window from the authority instead of pairing values with the wrong axis.
+        return _chirps_cell_monthly_from_geotiffs(grid, start, end)
+
+    matrix = np.full((len(labels), latitudes, longitudes), np.nan)
+    stored_position = {label: position for position, label in enumerate(store_labels)}
+    for index, label in enumerate(labels):
+        position = stored_position.get(label)
+        if position is not None:
+            matrix[index] = store_matrix[position]
+    unreadable = list(store_cov.get("unreadable_months") or [])
+
+    # Each gap is a run of months the store does not hold. Read every run from the
+    # GeoTIFFs and place it by its own months, so a gap cannot shift a later month
+    # into the wrong row.
+    runs: list[list[str]] = []
+    for index, label in enumerate(labels):
+        if in_store(label):
+            continue
+        if runs and runs[-1][-1] == labels[index - 1]:
+            runs[-1].append(label)
+        else:
+            runs.append([label])
+    for run in runs:
+        run_labels, run_matrix, run_cov = _chirps_cell_monthly_from_geotiffs(
+            grid, run[0], run[-1])
+        run_position = {label: position for position, label in enumerate(run_labels)}
+        for label in run:
+            position = run_position.get(label)
+            if position is not None:
+                matrix[labels.index(label)] = run_matrix[position]
+        unreadable.extend(run_cov.get("unreadable_months") or [])
+
+    return labels, matrix, _chirps_coverage(labels, sorted(set(unreadable)))
 
 
 def _chirps_cell_monthly_from_store(grid: dict, start: str, end: str):

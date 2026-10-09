@@ -92,6 +92,15 @@ class JobQueueTests(unittest.TestCase):
         else:
             os.environ["RAINFALL_CACHE_DIR"] = self.previous
 
+    def test_submission_records_the_window_it_was_asked_for(self):
+        # The window used to reach only the pricing estimate, so every offline
+        # job computed the hard default 2010-2026 whatever the reader asked for.
+        # Both ends must travel with the job now.
+        jobs.submit(GEOM, start="2024-01-01", end="2024-12-31")
+        job = jobs.read_job(rainfall.geometry_hash(GEOM))
+        self.assertEqual(job["start"], "2024-01-01")
+        self.assertEqual(job["end"], "2024-12-31")
+
     def test_an_unseen_area_is_not_submitted(self):
         self.assertEqual(jobs.status_for(rainfall.geometry_hash(GEOM))["state"],
                          "not_submitted")

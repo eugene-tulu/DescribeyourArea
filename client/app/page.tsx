@@ -1582,7 +1582,8 @@ export default function Home() {
     if (!cacheKey) return;
     try {
       const response = await fetch(
-        `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}`);
+        `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
+        `&window_start=${startDate}&window_end=${endDate}`);
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
         throw new Error(failure?.detail || `could not read the stored result (${response.status}).`);
