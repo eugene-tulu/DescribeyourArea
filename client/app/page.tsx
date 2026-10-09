@@ -1023,13 +1023,35 @@ export default function Home() {
    const [isSearching, setIsSearching] = useState(false);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
-  // How far back to ask for. The API already accepts an explicit range; this is
-  // the affordance that makes it reachable.
-  const [windowYears, setWindowYears] = useState<1 | 3 | 10 | 30>(10);
-  // A user-defined range. Empty means "use the preset above".
-  const [customStart, setCustomStart] = useState('');
+  const [periodAmount, setPeriodAmount] = useState<number>(1);
+  const [periodUnit, setPeriodUnit] = useState<'years' | 'months' | 'days'>('years');
   const [customEnd, setCustomEnd] = useState('');
-  const [selectedSensor, setSelectedSensor] = useState('auto');
+  // End-date + lookback model. The window is always (end − period): the reader
+  // sets an end date (default today) and a lookback (default one year), and the
+  // start is derived. This replaces the old preset + two-date-field arrangement,
+  // which made the dates and the period separate, competing questions. A legacy
+  // exact start/end link is still honoured (read into end + a days lookback), so
+  // shared links keep working.
+  function todayISO(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  function computeStartDate(endISO: string, amount: number, unit: 'years' | 'months' | 'days'): string {
+    const d = new Date(`${endISO}T00:00:00`);
+    const safeAmount = Math.max(1, Number(amount) || 1);
+    if (unit === 'months') d.setMonth(d.getMonth() - safeAmount);
+    else if (unit === 'days') d.setDate(d.getDate() - safeAmount);
+    else d.setFullYear(d.getFullYear() - safeAmount);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+  // The inclusive end of the window, in YYYY-MM-DD. A set value wins; otherwise
+  // the window ends at today.
+  const endDate = customEnd || todayISO();
+  const startDate = computeStartDate(endDate, periodAmount, periodUnit);
+  // A window ending in the future is a misread, not a refusal: the reader is
+  // stopped before the request rather than surprised by an empty result.
+  const customRangeValid = endDate <= todayISO();
+    const [selectedSensor, setSelectedSensor] = useState('auto');
   // Which precipitation product. Two providers for one measure, differing in
   // resolution, freshness and evidence class -- so it is a choice with a reason,
   // not a preference, and the reader is told what the choice costs.
@@ -1077,18 +1099,27 @@ export default function Home() {
     if (datasets.length) setSelectedDatasets(datasets);
     const sensor = params.get('sensor');
     if (sensor) setSelectedSensor(sensor);
-    // Prefer the dates the link was built with. `years` is still honoured for a
-    // link made before the switch, so an older shared link keeps working.
-    const start = params.get('window_start');
-    const end = params.get('window_end');
-    if (start && end) {
-      setCustomStart(start);
-      setCustomEnd(end);
-    } else {
-      const years = Number(params.get('years'));
-      if (years === 1 || years === 3 || years === 10 || years === 30) {
-        setWindowYears(years);
-      }
+    // Prefer the dates/period a link was built with. The new model is end +
+    // period; legacy links used start/end or a `years` preset, so both still
+    // round-trip (the link builder always writes absolute start/end dates).
+    const end = params.get('end') || params.get('window_end') || null;
+    const start = params.get('start') || params.get('window_start') || null;
+    const period = params.get('period');
+    const unit = params.get('unit');
+    const years = params.get('years');
+    if (end) setCustomEnd(end);
+    const unitValid = unit === 'years' || unit === 'months' || unit === 'days';
+    if (period && unitValid) {
+      setPeriodAmount(Number(period) || 1);
+      setPeriodUnit(unit as 'years' | 'months' | 'days');
+    } else if (years) {
+      setPeriodAmount(Math.max(1, Number(years) || 10));
+      setPeriodUnit('years');
+    } else if (start && end) {
+      // Legacy exact range: encode as end-date + days lookback.
+      const diff = Math.max(1, Math.round((Date.parse(end) - Date.parse(start)) / 86400000));
+      setPeriodAmount(diff);
+      setPeriodUnit('days');
     }
   }, []);
 
@@ -1274,16 +1305,14 @@ export default function Home() {
    * rather than choices offered beside them, so they are stated here.
    */
   const windowExplanation = (() => {
-    const start = customStart || windowStartISO();
-    const end = customEnd || windowEndISO();
-    const months = Math.max(1, (Number(end.slice(0, 4)) - Number(start.slice(0, 4))) * 12
-      + Number(end.slice(5, 7)) - Number(start.slice(5, 7)) + 1);
+    const months = Math.max(1, (Number(endDate.slice(0, 4)) - Number(startDate.slice(0, 4))) * 12
+      + Number(endDate.slice(5, 7)) - Number(startDate.slice(5, 7)) + 1);
     const parts: string[] = [];
-    parts.push(customStart && customEnd ? ' — dates you set' : ` — ${windowYears}-year preset`);
+    parts.push(` — ends ${endDate}, ${periodAmount} ${periodUnit.replace(/s$/, '')}${periodAmount === 1 ? '' : 's'} back`);
     // Landsat is the archive that reaches furthest back; if it cannot answer then
     // nothing can.
     const reaches = new Date('1982-08-22');
-    if (new Date(start) < reaches) {
+    if (new Date(startDate) < reaches) {
       parts.push(' — no sensor archive reaches back this far, so there will be no vegetation value');
     } else {
       parts.push(months > 120
@@ -1451,25 +1480,8 @@ export default function Home() {
 
 
   // Send request to backend
-  function windowEndISO(): string {
-    if (customStart && customEnd && customStart <= customEnd) return customEnd;
-    const today = new Date();
-    return `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`;
-  }
-
-  function windowStartISO(): string {
-    // A user-defined range wins over the presets. The backend has accepted an
-    // explicit range since 1.14.0; only the control was missing.
-    if (customStart && customEnd && customStart <= customEnd) return customStart;
-    const end = new Date(windowEndISO() + 'T00:00:00');
-    const start = new Date(end);
-    start.setFullYear(start.getFullYear() - windowYears);
-    return `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}-01`;
-  }
-
-  // A range the backend would reject, caught before the request rather than as a 422.
-  const customRangeValid =
-    !customStart || !customEnd || (customStart <= customEnd && customStart <= windowEndISO());
+  // The window bounds (startDate, endDate) are derived above from the end-date +
+  // lookback state, replacing the old windowStartISO()/windowEndISO() pair.
 
   // Queue any indicator for this area and report when it will be ready.
   //
@@ -1484,8 +1496,8 @@ export default function Home() {
     setPendingIndicator(indicator);
     try {
       const query = new URLSearchParams({
-        window_start: windowStartISO(),
-        window_end: windowEndISO(),
+        window_start: startDate,
+        window_end: endDate,
       });
       const response = await fetch(`${backendUrl}/rainfall/submit?${query.toString()}`, {
         method: 'POST',
@@ -1525,8 +1537,8 @@ export default function Home() {
       // rainfall alone -- so a user who selected every dataset was offered
       // "process 1 module offline" and only rainfall was ever queued.
       const query = new URLSearchParams({
-        window_start: windowStartISO(),
-        window_end: windowEndISO(),
+        window_start: startDate,
+        window_end: endDate,
       });
       const response = await fetch(`${backendUrl}/rainfall/plan?${query.toString()}`, {
         method: 'POST',
@@ -1782,12 +1794,12 @@ export default function Home() {
         ...(adminArea?.id ? { admin: adminArea.id, level: String(adminArea.level ?? 1) } : {}),
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
-        // The window that was actually analysed, not the preset it came from. A
-        // link encoded `years` while the reader could be looking at a custom
-        // range, so a shared link reproduced an approximation of what the sender
-        // saw rather than the thing itself.
-        window_start: windowStartISO(),
-        window_end: windowEndISO(),
+        // The window that was actually analysed, encoded as an end-date plus a
+        // lookback so a shared link reproduces the thing itself, not a preset
+        // the sender may no longer still be looking at.
+        end: endDate,
+        period: String(periodAmount),
+        unit: periodUnit,
       });
       const link = `${window.location.origin}${window.location.pathname}?${q.toString()}`;
       // A detailed boundary is a megabyte of coordinates and the link silently
@@ -1898,8 +1910,8 @@ export default function Home() {
         include_ndvi: String(selectedDatasets.includes('ndvi')),
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
-        window_start: windowStartISO(),
-        window_end: windowEndISO(),
+        window_start: startDate,
+        window_end: endDate,
       });
       const response = await fetch(`${backendUrl}/generate-context?${params.toString()}`, {
         method: 'POST',
@@ -2258,36 +2270,27 @@ export default function Home() {
                         manager's actual questions -- inexpressible without finding a
                         date field second. */}
                     <div className="mb-2.5 flex flex-wrap items-center gap-1.5">
-                      <Label className="mr-1 text-[0.8125rem] text-ink-2">Window</Label>
+                      <Label className="mr-1 text-[0.8125rem] text-ink-2">Window ends</Label>
                       <input
                         type="date"
-                        value={customStart}
-                        max={customEnd || windowEndISO()}
-                        onChange={(e) => setCustomStart(e.target.value)}
-                        aria-label="Window start"
-                        className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
-                      />
-                      <span className="text-[0.75rem] text-ink-3">to</span>
-                      <input
-                        type="date"
-                        value={customEnd}
-                        min={customStart || undefined}
-                        onChange={(e) => setCustomEnd(e.target.value)}
-                        aria-label="Window end"
+                        value={customEnd || endDate}
+                        max={todayISO()}
+                        onChange={(e) => { setCustomEnd(e.target.value); }}
+                        aria-label="Window end date"
                         className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
                       />
                     </div>
 
                     <div className="fig mb-2.5 flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
-                      <span>or</span>
+                      <span>lookback</span>
                       {([1, 3, 10, 30] as const).map((years) => (
                         <button
                           key={years}
                           type="button"
-                          aria-pressed={!customStart && windowYears === years}
-                          onClick={() => { setWindowYears(years); setCustomStart(''); setCustomEnd(''); }}
+                          aria-pressed={!customEnd && periodAmount === years && periodUnit === 'years'}
+                          onClick={() => { setPeriodAmount(years); setPeriodUnit('years'); setCustomEnd(''); }}
                           className={`fig h-7 rounded-lg border px-2.5 transition-colors duration-200 ${
-                            !customStart && windowYears === years
+                            !customEnd && periodAmount === years && periodUnit === 'years'
                               ? 'border-signal bg-signal/12 text-signal'
                               : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
                           }`}
@@ -2295,10 +2298,13 @@ export default function Home() {
                           {years}y
                         </button>
                       ))}
+                      {periodUnit !== 'years' && (
+                        <span className="text-ink-2">{periodAmount} {periodUnit.replace(/s$/, '')}{periodAmount === 1 ? '' : 's'}</span>
+                      )}
                     </div>
 
                     <p className="fig mt-2.5 text-[0.75rem] text-ink-2">
-                      {windowStartISO()} → {windowEndISO()}
+                      {startDate} → {endDate}
                       <span className="text-ink-3">{windowExplanation}</span>
                     </p>
                     {!customRangeValid && (
@@ -2712,8 +2718,8 @@ export default function Home() {
             <TimeSection
               rain={(analysisSummary.rainfall?.series ?? []) as RainPoint[]}
               vegetation={(vegetationSeries?.series ?? []) as VegPoint[]}
-              windowStart={windowStartISO()}
-              windowEnd={windowEndISO()}
+              windowStart={startDate}
+              windowEnd={endDate}
               vegetationSource={vegetationSeries?.source}
               thinMonths={vegetationSeries?.thin_months}
               onBuildVegetation={
