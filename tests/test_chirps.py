@@ -948,3 +948,70 @@ class ChirpsStoreRefreshTests(unittest.TestCase):
         self.assertEqual(appended["mode"], "a")
         self.assertEqual(appended["append_dim"], "time")
         commit.assert_called_once()
+
+class DropStaleChirpsTests(unittest.TestCase):
+    """Dropping the series computed before the provenance fix, keeping the rest.
+
+    A CHIRPS payload stamped with ERA5's source is the stale kind: it is dropped
+    along with its job record, so the area reads as not-computed and recomputes
+    cleanly. A payload with the real CHIRPS source is kept untouched.
+    """
+
+    def setUp(self):
+        import os
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        os.environ["RAINFALL_CACHE_DIR"] = self._tmp.name
+
+    def tearDown(self):
+        import os
+
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+        self._tmp.cleanup()
+
+    def _write_chirps(self, key, source):
+        import jobs
+
+        rainfall.write_cache(key, {
+            "product": "chirps",
+            "source": source,
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "series": [{"month": "2024-01-01", "precip_mm": 1.0}],
+        }, product="chirps")
+        jobs.write_job({"cache_key": key, "indicator": "rainfall",
+                        "product": "chirps", "state": jobs.READY})
+
+    def _run(self, argv):
+        from tools import drop_stale_chirps
+
+        return drop_stale_chirps.main(argv)
+
+    def test_a_dry_run_reports_without_deleting(self):
+        import jobs
+
+        stale = "a" * 32
+        self._write_chirps(stale, rainfall.ERA5_SOURCE)
+        self.assertEqual(self._run([]), 0)
+        self.assertIsNotNone(rainfall.read_cache(stale, "chirps"))
+        self.assertIsNotNone(jobs.read_job(stale, "rainfall"))
+
+    def test_apply_drops_the_stale_series_and_keeps_the_current_one(self):
+        import jobs
+
+        stale = "a" * 32
+        current = "b" * 32
+        self._write_chirps(stale, rainfall.ERA5_SOURCE)
+        self._write_chirps(current, rainfall.CHIRPS_SOURCE)
+        self.assertEqual(self._run(["--apply"]), 0)
+        # The stale series is gone and its job record dropped, so the area reads
+        # as not-computed and a resubmit will recompute it cleanly.
+        self.assertIsNone(rainfall.read_cache(stale, "chirps"))
+        self.assertIsNone(jobs.read_job(stale, "rainfall"))
+        # The current series is untouched.
+        self.assertIsNotNone(rainfall.read_cache(current, "chirps"))
+        self.assertIsNotNone(jobs.read_job(current, "rainfall"))

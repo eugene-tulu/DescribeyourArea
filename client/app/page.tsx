@@ -1590,7 +1590,52 @@ export default function Home() {
       }
       const data = await response.json() as { summary?: Summary };
       const summary = data.summary || {};
-      setAnalysisSummary(summary);
+      // Fold this read-from-artefacts result into what is already on screen;
+      // do not replace it. The synchronous read fills dem/landcover/ndvi, and
+      // this path fills rainfall once the worker wrote it (and the other modules
+      // for a fully offline area). Replacing dropped the synchronous modules the
+      // moment precipitation completed -- and /context names only the modules it
+      // assembled, so its analysis.datasets shrank to "rainfall" and the page
+      // showed rainfall alone. Keep the synchronous reading's analysis, datasets
+      // and caveats (which describe every module) and take only the modules this
+      // read now has; a fully offline area has nothing before this (previous is
+      // null) so it receives exactly what was stored.
+      setAnalysisSummary((previous) => {
+        if (!previous) return summary;
+        const merged: Summary = { ...previous };
+        if (summary.dem) merged.dem = summary.dem;
+        if (summary.landcover) merged.landcover = summary.landcover;
+        if (summary.ndvi) merged.ndvi = summary.ndvi;
+        if (summary.rainfall) merged.rainfall = summary.rainfall;
+        merged.analysis = {
+          ...previous.analysis,
+          ...summary.analysis,
+          datasets: [
+            ...new Set([
+              ...((previous.analysis?.datasets as string[] | undefined) ?? []),
+              ...((summary.analysis?.datasets as string[] | undefined) ?? []),
+            ]),
+          ],
+          bbox_area_km2:
+            previous.analysis?.bbox_area_km2 ?? summary.analysis?.bbox_area_km2,
+        };
+        const measures = new Map<string, MeasureSummary>();
+        for (const measure of previous.measures ?? []) {
+          measures.set(measure.product, measure);
+        }
+        for (const measure of summary.measures ?? []) {
+          measures.set(measure.product, measure);
+        }
+        merged.measures = [...measures.values()];
+        // /context's caveats describe its own modules; its "not yet available"
+        // line would contradict modules the synchronous read already shows, so
+        // adopt them only once the read covers everything on screen.
+        const coversAll = (['dem', 'landcover', 'ndvi', 'rainfall'] as const).every(
+          (key) => previous[key] == null || summary[key] != null,
+        );
+        if (coversAll) merged.caveats = summary.caveats ?? merged.caveats;
+        return merged;
+      });
       setAnalysisWarnings([]);
       setResultPhase('success');
       setActiveCacheKey(cacheKey);
@@ -1847,7 +1892,14 @@ export default function Home() {
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     setIsLoading(true);
     try {
-      const response = await fetch(`${backendUrl}/rainfall/submit`, {
+      // The window travels with the request. It used to be absent here, so the
+      // rain compute ran the default window whatever the reader had chosen --
+      // the compute ignoring the window that frames the price just above it.
+      const query = new URLSearchParams({
+        window_start: startDate,
+        window_end: endDate,
+      });
+      const response = await fetch(`${backendUrl}/rainfall/submit?${query.toString()}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ geojson, product: rainProduct }),
