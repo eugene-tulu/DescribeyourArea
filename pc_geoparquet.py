@@ -188,25 +188,27 @@ def _blob_list(prefix: str) -> list[str]:
     return re.findall(r"<Name>([^<]+)</Name>", body)
 
 
-def _part_specs(names: list[str]) -> list[tuple[str, int]]:
-    """`(name, first_year)` for each part, read from its filename.
+def _part_specs(names: list[str]) -> list[tuple[str, str, str]]:
+    """`(name, first_month, last_month)` for each part, read from its filename.
 
-    Planetary Computer names each part with the date range it covers, so the parts
-    a range needs can be chosen from the listing alone: no request per candidate
-    part, and no reading a part to find out what is in it.
+    Planetary Computer names each part with the date range it covers, and the
+    granularity is finer than a year -- the collection's own partition metadata
+    says weekly, so a recent year is many parts. Reading the range rather than
+    only the year means a window inside 2026 downloads the parts covering it
+    instead of all of 2026's, which is most of the difference between a cold read
+    costing 3 MB and costing 20.
     """
-    specs: list[tuple[str, int]] = []
+    specs: list[tuple[str, str, str]] = []
     for name in names:
         if not name.endswith(".parquet"):
             continue
         tail = name.rsplit("/", 1)[-1].replace(".parquet", "")
-        year = None
-        for token in tail.split("_"):
-            if len(token) >= 4 and token[:4].isdigit():
-                year = int(token[:4])
-                break
-        if year is not None:
-            specs.append((name, year))
+        months = [token[:7] for token in tail.split("_")
+                  if len(token) >= 7 and token[:4].isdigit() and token[4] == "-"]
+        if len(months) >= 2:
+            specs.append((name, months[0], months[1]))
+        elif months:
+            specs.append((name, months[0], months[0]))
     return specs
 
 
@@ -214,25 +216,24 @@ def _years_between(start: str, end: str) -> set[int]:
     return set(range(int(start[:4]), int(end[:4]) + 1))
 
 
-def _cached_specs(collection: str) -> list[tuple[str, int]]:
+def _cached_specs(collection: str) -> list[tuple[str, str, str]]:
     """The collection's parts, listed once and remembered.
 
-    The listing changes about once a year, when a new part appears. Asking Azure
+    The listing changes about once a week, when a new part appears. Asking Azure
     for it on every read is a request that answers the same thing, and Azure
     rate-limits it -- which is how a cached read comes back 429. It is re-listed
-    when a wanted year has no part yet, so a new month still turns up on its own.
+    when a wanted span has no part yet, so a new month still turns up on its own.
     """
     import json
 
     path = index_dir() / f"{collection}-parts.json"
     try:
-        stored = json.loads(path.read_text())
-        return [(entry[0], int(entry[1])) for entry in stored]
+        return [(entry[0], entry[1], entry[2]) for entry in json.loads(path.read_text())]
     except (OSError, ValueError, IndexError):
         return []
 
 
-def _remember_specs(collection: str, specs: list[tuple[str, int]]) -> None:
+def _remember_specs(collection: str, specs: list[tuple[str, str, str]]) -> None:
     import json
 
     try:
@@ -244,25 +245,26 @@ def _remember_specs(collection: str, specs: list[tuple[str, int]]) -> None:
 def ensure_index(collection: str, start: str, end: str) -> list[Path]:
     """The locally cached parts covering `start`..`end`, downloading any missing.
 
-    Returns whatever could be obtained. An empty list is not an error: the caller
-    falls back to searching, which is the honest degradation for a snapshot that
-    cannot be read. A part is written to a temp name and moved into place, so a
-    download cut short leaves no truncated file behind for the next read to trust.
+    A part is chosen by its own date range, not by its year, so a window inside a
+    year pulls only the parts covering it. Returns whatever could be obtained; an
+    empty list is not an error, because the caller falls back to searching. A part
+    is written to a temp name and moved into place, so a download cut short leaves
+    no truncated file behind for the next read to trust.
     """
     try:
         _container, blob = _collection_blob(collection)
-        wanted = _years_between(start, end)
+        span = (start[:7], end[:7])
         specs = _cached_specs(collection)
-        if not any(year in wanted for _name, year in specs):
-            # Nothing remembered covers this range -- either a cold cache or a
-            # year whose part has never been listed.
+        if not any(first <= span[1] and last >= span[0] for _n, first, last in specs):
+            # Nothing remembered covers this span -- a cold cache, or a part that
+            # has never been listed.
             specs = _part_specs(_blob_list(f"{blob}/"))
             _remember_specs(collection, specs)
         if not specs:
             return []
         local: list[Path] = []
-        for name, year in specs:
-            if year not in wanted:
+        for name, first, last in specs:
+            if last < span[0] or first > span[1]:
                 continue
             path = _part_path(collection, name.rsplit("/", 1)[-1])
             if not path.exists() or path.stat().st_size == 0:
