@@ -1835,12 +1835,23 @@ export default function Home() {
   async function showComputedResult(cacheKey: string | null) {
     if (!cacheKey) return;
     try {
-      const response = await fetch(
-        `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
-        `&window_start=${startDate}&window_end=${endDate}`);
-      if (!response.ok) {
-        const failure = await response.json().catch(() => null);
-        throw new Error(failure?.detail || `could not read the stored result (${response.status}).`);
+      // A single retry on a transient failure. The site is deployed while people
+      // are reading it, and the edge occasionally answers 503 for the one request
+      // in flight across a restart -- which used to dead-end the reader on an
+      // error over work that was actually finished and waiting. One immediate
+      // retry covers that; a genuine failure still surfaces, just once later.
+      let response: Response | null = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        response = await fetch(
+          `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
+          `&window_start=${startDate}&window_end=${endDate}`);
+        if (response.ok || response.status < 500) break;
+      }
+      if (!response || !response.ok) {
+        const failure = await response?.json().catch(() => null);
+        throw new Error(
+          failure?.detail ||
+          `could not read the stored result (${response?.status ?? 'no response'}).`);
       }
       const data = await response.json() as { summary?: Summary };
       const summary = data.summary || {};
