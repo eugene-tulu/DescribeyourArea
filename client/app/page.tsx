@@ -2080,16 +2080,19 @@ export default function Home() {
     if (!cacheKey) return;
     try {
       // A single retry on a transient failure. The site is deployed while people
-      // are reading it, and the edge occasionally answers 503 for the one request
-      // in flight across a restart -- which used to dead-end the reader on an
-      // error over work that was actually finished and waiting. One immediate
-      // retry covers that; a genuine failure still surfaces, just once later.
+      // are reading it, and nginx in front of the API caps concurrent connections
+      // per IP -- four. A reading that asks for more than that at once is refused
+      // with 503 before the request ever reaches the backend, and the refusal
+      // clears the moment the ones in flight finish, so a short pause then a
+      // retry is exactly the shape that recovers. Without it, a reader was shown
+      // a terminal error over a reading that was already finished.
       let response: Response | null = null;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
           `&window_start=${startDate}&window_end=${endDate}`);
         if (response.ok || response.status < 500) break;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
       }
       if (!response || !response.ok) {
         const failure = await response?.json().catch(() => null);
