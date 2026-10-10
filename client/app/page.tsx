@@ -720,6 +720,117 @@ function SourceDetail({
   );
 }
 
+/** What each module is called, for the reading room's rows. */
+const WORK_LABELS: Record<string, string> = {
+  dem: 'Elevation',
+  landcover: 'Land cover',
+  ndvi: 'Vegetation',
+  rainfall: 'Rainfall',
+  vegetation_series: 'Veg. series',
+};
+
+/* Words for the waiting, one per module, cycling while it reads.
+   These are not flavour text: each names the step the pipeline is actually taking
+   at that moment, so a reader who waits three minutes learns what the wait is
+   made of. That is the difference between a wait that feels served and one that
+   feels ignored -- the Underground's best satisfaction investment was not faster
+   trains, it was a board telling you when the next one came. */
+const WORKING_WORDS: Record<string, string[]> = {
+  rainfall: [
+    'reading one CHIRPS month at a time',
+    'each month is one 5.6 km grid cell',
+    'averaging the satellite band and the gauges',
+    'forming the 1991–2020 normal beside it',
+  ],
+  ndvi: [
+    'reading MODIS 16-day composites',
+    'NASA cloud-masked them, so no cloud call here',
+    'stacking the months into one series',
+    'building the normal the anomaly is measured against',
+  ],
+  vegetation_series: [
+    'reading MODIS 16-day composites',
+    'NASA cloud-masked them, so no cloud call here',
+    'stacking the months into one series',
+    'building the normal the anomaly is measured against',
+  ],
+  dem: [
+    'reading NASADEM at 30 m',
+    'void-filled SRTM and 3DEP, so no holes',
+    'taking the range across the outline',
+  ],
+  landcover: [
+    'reading ESA WorldCover at 10 m',
+    'one classified date, so it reflects the scene',
+    'sorting every pixel into its class',
+  ],
+};
+
+/** One module's row while it is being read in the reading room. */
+function WorkRow({
+  indicator,
+  label,
+  state,
+  reads,
+  startedAt,
+  submittedAt,
+}: {
+  indicator: string;
+  label: string;
+  state: 'waiting' | 'active' | 'refused';
+  reads?: number;
+  startedAt?: string | null;
+  submittedAt?: string | null;
+}) {
+  // A slow cycle on purpose: fast enough to feel alive, slow enough to be read.
+  const [tick, setTick] = useState(0);
+  const words = WORKING_WORDS[indicator] ?? ['reading'];
+  const live = state === 'active';
+  const elapsed = useElapsedSince(startedAt ?? submittedAt, live);
+
+  useEffect(() => {
+    if (!live) return;
+    const id = setInterval(() => setTick((value) => value + 1), 2600);
+    return () => clearInterval(id);
+  }, [live]);
+
+  const refused = state === 'refused';
+  return (
+    <div className="fig flex items-center gap-3 border-b border-rule/60 py-2.5 last:border-b-0">
+      <span className="w-[7.5rem] shrink-0 text-[0.8125rem] text-ink">{label}</span>
+      <span className="min-w-0 flex-1">
+        {refused ? (
+          <span className="text-[0.8125rem] text-bare">never reached the reading room</span>
+        ) : live ? (
+          <>
+            {/* Indeterminate, and said to be. There is no per-month progress to
+                report -- the worker publishes none -- so a percentage would be an
+                invention. What is real is that it is working, which months it is
+                working through, and how long it has been. */}
+            <span className="relative block h-1 w-full overflow-hidden rounded-full bg-surface">
+              <span
+                className="absolute inset-y-0 w-1/3 rounded-full bg-signal/70"
+                style={{ animation: 'sweep 1.4s var(--ease) infinite' }}
+              />
+            </span>
+            <span className="mt-1 block text-[0.75rem] text-ink-2">
+              {words[tick % words.length]}
+              {reads ? ` · ${reads} monthly reads` : ''}
+            </span>
+          </>
+        ) : (
+          <span className="text-[0.8125rem] text-ink-3">waiting its turn</span>
+        )}
+      </span>
+      {live && elapsed != null && (
+        <span className="w-16 shrink-0 text-right text-[0.75rem] tabular-nums text-ink-3">
+          {elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function JobProgressLine({
   progress,
   planned,
@@ -3080,21 +3191,47 @@ export default function Home() {
                       ))}
                     </dl>
                       {offline.queued.length ? (
-                        <div className="mt-3">
-                          <p className="fig text-sm text-ink">
-                            Queued {offline.queued.join(', ')} in the reading room. The
-                            progress line below reports each module as it finishes.
-                          </p>
-                          {offline.refused && offline.refused.length > 0 && (
-                            // Said out loud. The queued line used to be written
-                            // before any request was sent, so a module that was
-                            // never accepted was reported as queued and nothing
-                            // on the page ever contradicted it.
-                            <p className="fig mt-2 text-sm text-bare">
-                              Not queued: {offline.refused.join(', ')}. These never
-                              reached the reading room.
+                        <div className="mt-3" data-print-hide>
+                          <div className="mb-2 flex items-baseline justify-between gap-3">
+                            <p className="fig text-sm text-ink">
+                              Queued in the reading room
                             </p>
-                          )}
+                            <p className="fig text-[0.75rem] text-ink-3">
+                              {offline.queued.length} module
+                              {offline.queued.length === 1 ? '' : 's'}, one at a time
+                            </p>
+                          </div>
+                          {/* One row per module, with its own state. The flat
+                              "Queued dem, landcover, ndvi, rainfall" line told you
+                              four things were happening and showed you none of
+                              them; this shows which one is being read, what it is
+                              doing, and how long it has been at it. */}
+                          <div>
+                            {offline.queued.map((name) => {
+                              const plan = offline.plans.find((p) => p.indicator === name);
+                              const active = progress?.indicator === name
+                                && (progress.state === 'running' || progress.state === 'pending');
+                              return (
+                                <WorkRow
+                                  key={name}
+                                  indicator={name}
+                                  label={WORK_LABELS[name] ?? name}
+                                  state={active ? 'active' : 'waiting'}
+                                  reads={plan?.months_to_read ?? plan?.months}
+                                  startedAt={active ? progress?.startedAt : null}
+                                  submittedAt={active ? progress?.submittedAt : null}
+                                />
+                              );
+                            })}
+                            {(offline.refused ?? []).map((name) => (
+                              <WorkRow
+                                key={`refused-${name}`}
+                                indicator={name}
+                                label={WORK_LABELS[name] ?? name}
+                                state="refused"
+                              />
+                            ))}
+                          </div>
                         </div>
                       ) : (
                         <button
