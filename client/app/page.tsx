@@ -90,6 +90,8 @@ interface OfflineOffer {
   limitKm2: number;
   plans: Array<WorkPlan & { already_computed?: boolean }>;
   queued: string[];
+  /** Modules that were asked for and never reached the reading room. */
+  refused?: string[];
 }
 
 interface ClimateVegSeries {
@@ -1810,9 +1812,9 @@ export default function Home() {
   // of monthly reads, and a spinner over an unquantified wait is the thing this
   // replaces. The estimate is the backend's measured rate, and it is labelled an
   // estimate everywhere it appears.
-  async function submitIndicator(indicator: string) {
+  async function submitIndicator(indicator: string): Promise<boolean> {
     const geojson = currentGeojson();
-    if (!geojson) return;
+    if (!geojson) return false;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     setPendingIndicator(indicator);
     try {
@@ -1847,8 +1849,10 @@ export default function Home() {
         void showComputedResult(data.cache_key);
         void loadVegetationSeries(data.cache_key);
       }
+      return true;
     } catch (error) {
       reportError(error instanceof Error ? error.message : 'Submission failed');
+      return false;
     } finally {
       setPendingIndicator(null);
     }
@@ -1894,11 +1898,25 @@ export default function Home() {
 
   async function queueOffline() {
     if (!offline) return;
-    setOffline({ ...offline, queued: offline.plans.map((p) => p.indicator || '') });
+    // Reflect what actually happened, not what was intended. The queued line used
+    // to be written before a single request was sent, so a submission that failed
+    // was reported as queued -- the reader was told work was under way that had
+    // never begun, and nothing on the page ever contradicted it.
+    const submitted: string[] = [];
+    const refused: string[] = [];
     for (const plan of offline.plans) {
       const indicator = plan.indicator;
       if (!indicator) continue;
-      await submitIndicator(indicator);
+      const ok = await submitIndicator(indicator);
+      (ok ? submitted : refused).push(indicator);
+    }
+    setOffline({ ...offline, queued: submitted, refused });
+    if (refused.length > 0) {
+      toast({
+        title: `${refused.length} module${refused.length === 1 ? '' : 's'} could not be queued`,
+        description: `${refused.join(', ')} never reached the reading room. Read this area again, or draw a smaller boundary.`,
+        variant: 'destructive',
+      });
     }
   }
 
@@ -3062,10 +3080,22 @@ export default function Home() {
                       ))}
                     </dl>
                       {offline.queued.length ? (
-                        <p className="fig mt-3 text-sm text-ink">
-                          Queued {offline.queued.join(', ')} in the reading room. The
-                          progress line below reports each module as it finishes.
-                        </p>
+                        <div className="mt-3">
+                          <p className="fig text-sm text-ink">
+                            Queued {offline.queued.join(', ')} in the reading room. The
+                            progress line below reports each module as it finishes.
+                          </p>
+                          {offline.refused && offline.refused.length > 0 && (
+                            // Said out loud. The queued line used to be written
+                            // before any request was sent, so a module that was
+                            // never accepted was reported as queued and nothing
+                            // on the page ever contradicted it.
+                            <p className="fig mt-2 text-sm text-bare">
+                              Not queued: {offline.refused.join(', ')}. These never
+                              reached the reading room.
+                            </p>
+                          )}
+                        </div>
                       ) : (
                         <button
                           type="button"

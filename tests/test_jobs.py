@@ -308,3 +308,51 @@ class PublishResilienceTests(unittest.TestCase):
         key = rainfall.geometry_hash(geom)
         self.assertIsNotNone(rainfall.read_cache(key), "the series is still usable locally")
         self.assertFalse(jobs.read_job(key)["published"], "and the job records that it was not uploaded")
+
+    def test_modules_of_one_boundary_are_computed_overlapped(self):
+        # Four modules for one boundary used to be claimed and computed strictly
+        # one after another, so a county whose four reads took a few minutes each
+        # took the sum, not the longest. The claim is still serial -- that is what
+        # stops two workers doing the same work -- but the computing overlaps,
+        # because a MODIS read is a network wait and a waiting thread could be
+        # reading a different month for a different module.
+        import asyncio
+        import os
+        import time
+
+        started = []
+
+        async def slow(_job, **_kw):
+            started.append(time.monotonic())
+            await asyncio.sleep(0.4)
+            return {"processed": 1, "ready": 1, "failed": 0, "skipped": 0}
+
+        import jobs
+
+        def make(indicator):
+            return jobs.submit(GEOM, indicator=indicator)
+
+        for indicator in ("rainfall",):
+            make(indicator)
+        # Claim four, then hand them to the real runner with the compute body
+        # stubbed, so what is under test is the overlap and nothing else.
+        original = jobs._compute_job
+        jobs._compute_job = slow  # type: ignore[assignment]
+        try:
+            os.environ["JOBS_CONCURRENCY"] = "3"
+            for indicator in ("dem", "landcover", "ndvi", "vegetation_series"):
+                jobs.submit(GEOM, indicator=indicator)
+            wall = time.monotonic()
+            outcome = asyncio.run(jobs.run_pending(limit=10, publish=False))
+            elapsed = time.monotonic() - wall
+        finally:
+            jobs._compute_job = original  # type: ignore[assignment]
+            os.environ.pop("JOBS_CONCURRENCY", None)
+
+        self.assertEqual(outcome["ready"], 5, "every queued module was computed")
+        self.assertEqual(len(started), 5)
+        # Overlapped means the fourth starts before the first has finished:
+        # strictly sequential would push it past 1.6 s.
+        self.assertLess(started[3] - started[0], 1.2,
+                        "five 0.4 s jobs should overlap, not queue end to end")
+        self.assertLess(elapsed, 1.6, "the wall clock should track the longest path, not the sum")

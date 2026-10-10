@@ -16,6 +16,7 @@ running it from cron or a sidecar is the difference between "usually works" and
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import os
@@ -341,6 +342,159 @@ def published_upload(publish: bool) -> bool:
     return bool(publish and rainfall.remote_prefix() is not None)
 
 
+async def _compute_job(
+    job: dict,
+    *,
+    source: Optional[Callable] = None,
+    publish: bool = True,
+    progress: Optional[Callable[[str], None]] = None,
+) -> dict:
+    """One claimed job, start to finish. Returns its own counters.
+
+    Split out of ``run_pending`` so several jobs can be in flight at once. The
+    claiming still happens one at a time under the worker lock, so a second
+    worker cannot double-process; only the *computing* overlaps, which is where
+    the time is -- a MODIS read is network wait, and a thread waiting on the
+    network is a thread that could be reading a different month for a different
+    module of the same reading.
+    """
+    import indicators
+
+    counts = {"processed": 0, "ready": 0, "failed": 0, "skipped": 0}
+    key = job["cache_key"]
+    indicator = job.get("indicator") or "rainfall"
+    geometry = job.get("geometry")
+    if not geometry:
+        # Nothing to compute from; a deletion or a pruned record.
+        fail(key, "job record has no geometry; resubmit the area", indicator)
+        counts.update(processed=1, failed=1)
+        return counts
+    if indicator == "rainfall" and _product_ready(key, _job_product(key)):
+        complete(key, rainfall.read_cache(key), indicator)
+        counts.update(processed=1, skipped=1)
+        return counts
+    # A non-rainfall indicator is already done when its own artefact exists.
+    # It used to test the rainfall cache instead and, for any area that had a
+    # rainfall series, mark the job complete using the rainfall payload —
+    # through complete()'s default indicator, so the rainfall record was
+    # rewritten and this one was left marked running forever, with no
+    # artefact ever written. A vegetation series could therefore never be
+    # produced for any area that also had rainfall, which is every area
+    # anyone would ask for it on.
+    if indicator != "rainfall" and read_artefact(key, indicator) is not None:
+        complete(key, read_artefact(key, indicator), indicator)
+        counts.update(processed=1, skipped=1)
+        return counts
+    if progress:
+        progress(f"computing {indicator} for {job.get('label') or key[:12]}")
+    try:
+        if indicator == "rainfall":
+            # Which product was asked for. A job that chose CHIRPS and got
+            # ERA5 would answer a different question from the one queued, and
+            # nothing downstream would notice because both are "rainfall".
+            product = (job.get("product") or "rainfall").strip().lower()
+            if product == "rainfall":
+                union_source = source or rainfall.UnionReader(rainfall.union_grid([geometry]))
+            else:
+                # The *name* is passed through, not the reader it resolves
+                # to. Resolving here lost the identity: build_and_cache works
+                # out which cache slot to write from what it is given, so a
+                # callable arrived as "rainfall" and a CHIRPS series was
+                # written into the ERA5 slot -- the job reported ready and the
+                # reader found nothing.
+                union_source = source
+            payload = rainfall.build_and_cache(
+                geometry,
+                start=job.get("start", "2010-01-01"),
+                end=job.get("end"),
+                source=union_source,
+                product=product,
+                upload=publish,
+                label=job.get("label"),
+            )
+        else:
+            # The async path exists to answer what the request path had to
+            # refuse, so the area budget does not apply; the resolution policy does.
+            from main import _bbox_area_km2, aoi_bbox, canonicalize_geojson
+
+            canonical = canonicalize_geojson(
+                {"type": "Feature", "properties": {}, "geometry": geometry},
+                max_bytes=4_000_000, max_vertices=None,
+            )
+            bbox = aoi_bbox(canonical)
+            area = _bbox_area_km2(bbox)
+            resolution, reason = indicators.resolution_for(area, indicator)
+            payload = await indicators.compute_indicator(
+                indicator, bbox, geometry,
+                area_km2=area, resolution_m=resolution,
+                window_start=job.get("start"),
+                window_end=job.get("end"), enforce_budget=False,
+            )
+            # The resolution to report is the one actually read, not the policy
+            # target. A MODIS 250 m composite computed because the policy asked
+            # for 100 m must say 250 m, or the provenance is a lie.
+            applied = resolution
+            note = None
+            if indicator == "ndvi":
+                native = ((payload.get("sensor") or {}).get("native_resolution_m")
+                          or payload.get("resolution_m"))
+                if native:
+                    applied = max(resolution, int(native))
+                    if applied > resolution:
+                        note = (
+                            f"{resolution} m was requested, but "
+                            f"{(payload.get('sensor') or {}).get('label') or 'the chosen source'} "
+                            f"publishes a finished {applied} m product, so that is what was read. "
+                            "A product cannot be resampled finer without inventing detail."
+                        )
+            import main
+
+            payload = main.with_evidence(indicator, {
+                **payload,
+                "indicator": indicator,
+                "status": payload.get("status") or ("error" if payload.get("error") else "ok"),
+                "applied_resolution_m": applied,
+                "target_resolution_m": resolution,
+                "resolution_reason": reason,
+                "resolution_coarser_than_target": applied > resolution,
+                "resolution_note": note,
+                "pixels_analysed": indicators.pixels_for(area, applied),
+                "bbox": bbox,
+            })
+            write_artefact(key, indicator, payload)
+        record = complete(key, payload, indicator)
+        if indicator == "rainfall":
+            # A series computed but not uploaded is still ready locally; saying
+            # so keeps a store outage from failing work that succeeded.
+            record["published"] = (
+                rainfall.publish(key) if published_upload(publish) else False
+            )
+            write_job(record)
+        counts.update(processed=1, ready=1)
+    except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
+        if os.getenv("RAINFALL_JOB_DEBUG"):
+            # Surface the real traceback instead of a one-line reason: a bare
+            # "NameError" with no name is not a diagnosis.
+            raise
+        fail(key, f"{type(exc).__name__}: {exc}", indicator)
+        counts.update(processed=1, failed=1)
+        if progress:
+            progress(f"failed {key[:12]}: {type(exc).__name__}: {exc}")
+    except BaseException as exc:  # noqa: BLE001
+        # asyncio.CancelledError descends from BaseException, not Exception, so
+        # the branch above does not see it. A cancelled sweep therefore used to
+        # leave the job it was holding marked running with nothing written, and
+        # nothing would ever reclaim it. Record the outcome, then let the
+        # cancellation propagate.
+        if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+            fail(key, f"interrupted: {type(exc).__name__}", indicator)
+            raise
+        fail(key, f"cancelled: {type(exc).__name__}: {exc}", indicator)
+        counts.update(processed=1, failed=1)
+        raise
+    return counts
+
+
 async def run_pending(
     *,
     limit: int = 10,
@@ -354,144 +508,40 @@ async def run_pending(
     Skips anything that already has a result, so it is safe to run repeatedly and
     safe to interrupt: completed work is never redone. A job left in running by a
     dead worker is reclaimed once its lease expires.
+
+    Jobs are computed a few at a time rather than strictly one at a time. The
+    claim is still serial -- one read-modify-write per job, under the worker lock
+    -- because that is what stops two workers from doing the same work; but the
+    reads that follow are network waits, and a reading of four modules for one
+    boundary was paying for them end to end, so a county that should take a
+    couple of minutes took eight. JOBS_CONCURRENCY sets the width, defaulting to
+    three: enough to overlap the waits, small enough that a Planetary Computer
+    rate limit is a retry rather than an outage.
     """
-    import indicators
-
+    concurrency = max(1, int(os.getenv("JOBS_CONCURRENCY", "3")))
     processed = ready = failed = skipped = 0
-    for _ in range(limit):
-        job = claim_next()
-        if job is None:
+    while limit > 0:
+        batch = []
+        while len(batch) < min(concurrency, limit):
+            claimed = claim_next()
+            if claimed is None:
+                break
+            batch.append(claimed)
+        if not batch:
             break
-        key = job["cache_key"]
-        indicator = job.get("indicator") or "rainfall"
-        geometry = job.get("geometry")
-        if not geometry:
-            # Nothing to compute from; a deletion or a pruned record.
-            fail(key, "job record has no geometry; resubmit the area", indicator)
-            failed += 1
-            continue
-        if indicator == "rainfall" and _product_ready(key, _job_product(key)):
-            complete(key, rainfall.read_cache(key), indicator)
-            skipped += 1
-            continue
-        # A non-rainfall indicator is already done when its own artefact exists.
-        # It used to test the rainfall cache instead and, for any area that had a
-        # rainfall series, mark the job complete using the rainfall payload —
-        # through complete()'s default indicator, so the rainfall record was
-        # rewritten and this one was left marked running forever, with no
-        # artefact ever written. A vegetation series could therefore never be
-        # produced for any area that also had rainfall, which is every area
-        # anyone would ask for it on.
-        if indicator != "rainfall" and read_artefact(key, indicator) is not None:
-            complete(key, read_artefact(key, indicator), indicator)
-            skipped += 1
-            continue
-        if progress:
-            progress(f"computing {indicator} for {job.get('label') or key[:12]}")
-        try:
-            if indicator == "rainfall":
-                # Which product was asked for. A job that chose CHIRPS and got
-                # ERA5 would answer a different question from the one queued, and
-                # nothing downstream would notice because both are "rainfall".
-                product = (job.get("product") or "rainfall").strip().lower()
-                if product == "rainfall":
-                    union_source = source or rainfall.UnionReader(rainfall.union_grid([geometry]))
-                else:
-                    # The *name* is passed through, not the reader it resolves
-                    # to. Resolving here lost the identity: build_and_cache works
-                    # out which cache slot to write from what it is given, so a
-                    # callable arrived as "rainfall" and a CHIRPS series was
-                    # written into the ERA5 slot -- the job reported ready and the
-                    # reader found nothing.
-                    union_source = source
-                payload = rainfall.build_and_cache(
-                    geometry,
-                    start=job.get("start", "2010-01-01"),
-                    end=job.get("end"),
-                    source=union_source,
-                    product=product,
-                    upload=publish,
-                    label=job.get("label"),
-                )
-            else:
-                # The async path exists to answer what the request path had to
-                # refuse, so the area budget does not apply; the resolution policy does.
-                from main import _bbox_area_km2, aoi_bbox, canonicalize_geojson
-
-                canonical = canonicalize_geojson(
-                    {"type": "Feature", "properties": {}, "geometry": geometry},
-                    max_bytes=4_000_000, max_vertices=None,
-                )
-                bbox = aoi_bbox(canonical)
-                area = _bbox_area_km2(bbox)
-                resolution, reason = indicators.resolution_for(area, indicator)
-                payload = await indicators.compute_indicator(
-                    indicator, bbox, geometry,
-                    area_km2=area, resolution_m=resolution,
-                    window_start=job.get("start"),
-                    window_end=job.get("end"), enforce_budget=False,
-                )
-                # The resolution to report is the one actually read, not the policy
-                # target. A MODIS 250 m composite computed because the policy asked
-                # for 100 m must say 250 m, or the provenance is a lie.
-                applied = resolution
-                note = None
-                if indicator == "ndvi":
-                    native = ((payload.get("sensor") or {}).get("native_resolution_m")
-                              or payload.get("resolution_m"))
-                    if native:
-                        applied = max(resolution, int(native))
-                        if applied > resolution:
-                            note = (
-                                f"{resolution} m was requested, but "
-                                f"{(payload.get('sensor') or {}).get('label') or 'the chosen source'} "
-                                f"publishes a finished {applied} m product, so that is what was read. "
-                                "A product cannot be resampled finer without inventing detail."
-                            )
-                import main
-
-                payload = main.with_evidence(indicator, {
-                    **payload,
-                    "indicator": indicator,
-                    "status": payload.get("status") or ("error" if payload.get("error") else "ok"),
-                    "applied_resolution_m": applied,
-                    "target_resolution_m": resolution,
-                    "resolution_reason": reason,
-                    "resolution_coarser_than_target": applied > resolution,
-                    "resolution_note": note,
-                    "pixels_analysed": indicators.pixels_for(area, applied),
-                    "bbox": bbox,
-                })
-                write_artefact(key, indicator, payload)
-            record = complete(key, payload, indicator)
-            if indicator == "rainfall":
-                # A series computed but not uploaded is still ready locally; saying
-                # so keeps a store outage from failing work that succeeded.
-                record["published"] = (
-                    rainfall.publish(key) if published_upload(publish) else False
-                )
-                write_job(record)
-            ready += 1
-        except Exception as exc:  # noqa: BLE001 - one bad area must not stop the run
-            if os.getenv("RAINFALL_JOB_DEBUG"):
-                # Surface the real traceback instead of a one-line reason: a bare
-                # "NameError" with no name is not a diagnosis.
-                raise
-            fail(key, f"{type(exc).__name__}: {exc}", indicator)
-            failed += 1
-            if progress:
-                progress(f"failed {key[:12]}: {type(exc).__name__}: {exc}")
-        except BaseException as exc:  # noqa: BLE001
-            # asyncio.CancelledError descends from BaseException, not Exception, so
-            # the branch above does not see it. A cancelled sweep therefore used to
-            # leave the job it was holding marked running with nothing written, and
-            # nothing would ever reclaim it. Record the outcome, then let the
-            # cancellation propagate.
-            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
-                fail(key, f"interrupted: {type(exc).__name__}", indicator)
-                raise
-            fail(key, f"cancelled: {type(exc).__name__}: {exc}", indicator)
-            failed += 1
-            raise
-        processed += 1
+        limit -= len(batch)
+        # return_exceptions so one failure does not cancel its neighbours: each
+        # job already records its own outcome, and a cancelled sweep is re-raised
+        # after the batch has been accounted for.
+        results = await asyncio.gather(*[
+            _compute_job(job, source=source, publish=publish, progress=progress)
+            for job in batch
+        ], return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+            processed += result["processed"]
+            ready += result["ready"]
+            failed += result["failed"]
+            skipped += result["skipped"]
     return {"processed": processed, "ready": ready, "failed": failed, "skipped": skipped}
