@@ -356,3 +356,27 @@ class PublishResilienceTests(unittest.TestCase):
         self.assertLess(started[3] - started[0], 1.2,
                         "five 0.4 s jobs should overlap, not queue end to end")
         self.assertLess(elapsed, 1.6, "the wall clock should track the longest path, not the sum")
+
+    def test_a_queued_job_is_reported_as_queued_not_as_not_submitted(self):
+        # status_for defaults to the rainfall indicator, so submit() used to
+        # return the rainfall record for the area rather than the job it had just
+        # written. A DEM job queued successfully therefore replied
+        # "not_submitted", which is the whole reading room's modules -- and it also
+        # stopped the backend's autorun, which gates on state == pending.
+        import jobs
+
+        key = rainfall.geometry_hash(GEOM)
+        for indicator in ("dem", "landcover", "ndvi", "vegetation_series"):
+            jobs.drop(key, indicator)
+        try:
+            for indicator in ("dem", "landcover", "ndvi", "vegetation_series"):
+                state = jobs.submit(GEOM, indicator=indicator)
+                self.assertEqual(
+                    state["state"], jobs.PENDING,
+                    f"{indicator} was queued but reported as {state['state']!r}")
+                self.assertEqual(
+                    state.get("indicator"), indicator,
+                    f"{indicator} answered about {state.get('indicator')!r}")
+        finally:
+            for indicator in ("dem", "landcover", "ndvi", "vegetation_series"):
+                jobs.drop(key, indicator)

@@ -266,7 +266,14 @@ def submit(
     # once the job reaches a terminal state.
     job["geometry"] = geojson_geom
     write_job(job)
-    return status_for(key)
+    # Report the job that was just written, not the rainfall record for the same
+    # area. status_for defaults to rainfall, so asking it without the indicator
+    # returned "not_submitted" for a DEM job that had just been queued
+    # successfully -- the record existed with state pending while the reply said
+    # nothing had been submitted. Every non-rainfall indicator was affected, which
+    # is the whole multi-module reading room, and it also stopped the backend's
+    # autorun from firing for them because it gates on state == pending.
+    return status_for(key, indicator)
 
 
 def claim_next(*, retry_failed: bool = False) -> Optional[dict]:
