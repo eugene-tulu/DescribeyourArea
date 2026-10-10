@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -34,10 +35,15 @@ import rainfall
 # The account that hosts the published snapshots, named by each collection's
 # `geoparquet-items` asset in its `table:storage_options` block.
 ITEMS_ACCOUNT = os.getenv("PC_ITEMS_ACCOUNT", "pcstacitems")
+# The container holding the snapshots, from the ``abfs://<container>/<blob>``
+# href each collection publishes.
+ITEMS_CONTAINER = os.getenv("PC_ITEMS_CONTAINER", "items")
 INDEX_CACHE_DIRNAME = "stac-geoparquet"
+SAS_URL = "https://planetarycomputer.microsoft.com/api/sas/v1/token"
 _UA = "geocontextualize"
 
 _ROOT_CACHE: dict[str, str] = {}
+_TOKEN: dict[tuple[str, str], tuple[str, float]] = {}
 
 
 def index_dir() -> Path:
@@ -52,11 +58,95 @@ def _part_path(collection: str, name: str) -> Path:
     return index_dir() / f"{collection}-{safe}"
 
 
-def _signed_root(collection: str) -> str:
-    """The collection's published snapshot root, signed, resolved once per process."""
-    cached = _ROOT_CACHE.get(collection)
-    if cached:
-        return cached
+def _token_file(account: str, container: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in f"{account}-{container}")
+    return index_dir() / f"sas-{safe}.json"
+
+
+def _sas(account: str, container: str) -> str:
+    """A short-lived read token for one container, from the public SAS API.
+
+    Free and anonymous -- no Planetary Computer account, no login. The form is
+    ``/sas/v1/token/{account}/{container}``; getting the two the other way round
+    returns 404, which is a confusing way to learn the order.
+
+    Cached on disk until close to its expiry. The API rate-limits, so fetching a
+    token per read is both wasteful and, at volume, refused: a reading asks for a
+    token once an hour rather than once a request.
+    """
+    key = (account, container)
+    cached = _TOKEN.get(key)
+    if cached and cached[1] - time.time() > 60:
+        return cached[0]
+
+    path = _token_file(account, container)
+    try:
+        import json
+
+        stored = json.loads(path.read_text())
+        if stored.get("expiry", 0) - time.time() > 60:
+            _TOKEN[key] = (stored["token"], stored["expiry"])
+            return stored["token"]
+    except (OSError, ValueError, KeyError):
+        pass
+
+    token, expiry = _fetch_token(account, container)
+    _TOKEN[key] = (token, expiry)
+    try:
+        path.write_text(f'{{"token": {token!r}, "expiry": {expiry!r}}}')
+    except OSError:
+        pass  # a cache that cannot be written is not worth failing a read over
+    return token
+
+
+def _fetch_token(account: str, container: str) -> tuple[str, float]:
+    """One token from the SAS API, backing off when it says too many requests."""
+    import json
+
+    url = f"{SAS_URL}/{account}/{container}"
+    last: Exception | None = None
+    for attempt in range(4):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(
+                    url, headers={"User-Agent": _UA}), timeout=60) as response:
+                document = json.loads(response.read())
+            token = document.get("token") or ""
+            if not token:
+                raise RuntimeError(f"the SAS API returned no token for {account}/{container}")
+            expiry = document.get("msft:expiry") or ""
+            try:
+                epoch = time.mktime(time.strptime(expiry[:19], "%Y-%m-%dT%H:%M:%S"))
+            except ValueError:
+                epoch = time.time() + 3600
+            return token, epoch
+        except Exception as exc:  # noqa: BLE001 - 429 and 503 both clear on a retry
+            last = exc
+            time.sleep(1.5 * (attempt + 1))
+    raise last if last else RuntimeError("could not obtain a token")
+
+
+def _blob_url(path: str) -> str:
+    """A signed URL for one blob in the items account.
+
+    The container is named in the path, and the blob part is percent-encoded with
+    ``/`` kept as a separator: the part filenames carry timestamps, so they contain
+    ``+`` and ``:``. Those are legal in an Azure blob name and in a URL path, but a
+    ``+`` decodes to a space on the way in, so the resource is sought under a name
+    it does not have and Azure answers 400 "invalid characters" -- which reads as a
+    server problem rather than the encoding slip it is.
+    """
+    encoded = urllib.parse.quote(path, safe="/")
+    return (f"https://{ITEMS_ACCOUNT}.blob.core.windows.net/{ITEMS_CONTAINER}/{encoded}"
+            f"?{_sas(ITEMS_ACCOUNT, ITEMS_CONTAINER)}")
+
+
+def _collection_blob(collection: str) -> tuple[str, str]:
+    """The ``(container, blob)`` a collection's ``geoparquet-items`` asset names.
+
+    ``abfs://items/<collection>.parquet`` -- the path after ``://`` is container,
+    then blob. An abfs path is not a URL a blob client will read, so it is
+    separated here rather than being rebuilt into a URL and re-parsed later.
+    """
     import json
 
     url = (f"https://planetarycomputer.microsoft.com/api/stac/v1/collections/{collection}")
@@ -66,27 +156,32 @@ def _signed_root(collection: str) -> str:
     href = ((document.get("assets") or {}).get("geoparquet-items") or {}).get("href") or ""
     if not href:
         raise RuntimeError(f"{collection} publishes no geoparquet-items asset")
-    # ``abfs://items/<collection>.parquet`` names the dataset root: the path after
-    # ``://`` is container, then blob. An abfs path is not a URL, and the signer
-    # refuses it, so it is rebuilt as one against the items account.
     if href.startswith("abfs://"):
         _, _, rest = href.partition("://")
         container, _, blob = rest.partition("/")
-        href = f"https://{ITEMS_ACCOUNT}.blob.core.windows.net/{container}/{blob}"
+        return container, blob
+    parsed = urllib.parse.urlparse(href)
+    parts = parsed.path.lstrip("/").split("/", 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return ITEMS_CONTAINER, parts[0]
 
-    import planetary_computer
 
-    signed = planetary_computer.sign(href)
-    _ROOT_CACHE[collection] = signed
-    return signed
+def _blob_list(prefix: str) -> list[str]:
+    """The blob names under a dataset root, using Azure's own listing verb.
 
+    The prefix is relative to the container -- ``<collection>.parquet/``, not
+    ``items/<collection>.parquet/`` -- because the listing already names the
+    container in its path. Including it matches nothing, and every part then looks
+    absent, which reads as "this collection publishes nothing".
 
-def _blob_list(prefix: str, sas_query: str) -> list[str]:
-    """The blob names under a dataset root, using Azure's own listing verb."""
-    url = (f"https://{ITEMS_ACCOUNT}.blob.core.windows.net/items"
-           f"?restype=container&comp=list&prefix={urllib.parse.quote(prefix)}")
-    if sas_query:
-        url += f"&{sas_query}"
+    The slash in the prefix is percent-encoded. Azure accepts either form, but a
+    literal one puts the separator inside the query string, where it reads as the
+    end of the resource name and the request is refused.
+    """
+    url = (f"https://{ITEMS_ACCOUNT}.blob.core.windows.net/{ITEMS_CONTAINER}"
+           f"?restype=container&comp=list&prefix={urllib.parse.quote(prefix)}"
+           f"&maxresults=5000&{_sas(ITEMS_ACCOUNT, ITEMS_CONTAINER)}")
     with urllib.request.urlopen(
             urllib.request.Request(url, headers={"User-Agent": _UA}), timeout=60) as response:
         body = response.read().decode("utf-8", "replace")
@@ -119,6 +214,33 @@ def _years_between(start: str, end: str) -> set[int]:
     return set(range(int(start[:4]), int(end[:4]) + 1))
 
 
+def _cached_specs(collection: str) -> list[tuple[str, int]]:
+    """The collection's parts, listed once and remembered.
+
+    The listing changes about once a year, when a new part appears. Asking Azure
+    for it on every read is a request that answers the same thing, and Azure
+    rate-limits it -- which is how a cached read comes back 429. It is re-listed
+    when a wanted year has no part yet, so a new month still turns up on its own.
+    """
+    import json
+
+    path = index_dir() / f"{collection}-parts.json"
+    try:
+        stored = json.loads(path.read_text())
+        return [(entry[0], int(entry[1])) for entry in stored]
+    except (OSError, ValueError, IndexError):
+        return []
+
+
+def _remember_specs(collection: str, specs: list[tuple[str, int]]) -> None:
+    import json
+
+    try:
+        (index_dir() / f"{collection}-parts.json").write_text(json.dumps(specs))
+    except OSError:
+        pass
+
+
 def ensure_index(collection: str, start: str, end: str) -> list[Path]:
     """The locally cached parts covering `start`..`end`, downloading any missing.
 
@@ -128,21 +250,25 @@ def ensure_index(collection: str, start: str, end: str) -> list[Path]:
     download cut short leaves no truncated file behind for the next read to trust.
     """
     try:
-        root = _signed_root(collection)
-        sas_query = root.split("?", 1)[1] if "?" in root else ""
-        specs = _part_specs(_blob_list(f"{collection}.parquet/", sas_query))
+        _container, blob = _collection_blob(collection)
+        wanted = _years_between(start, end)
+        specs = _cached_specs(collection)
+        if not any(year in wanted for _name, year in specs):
+            # Nothing remembered covers this range -- either a cold cache or a
+            # year whose part has never been listed.
+            specs = _part_specs(_blob_list(f"{blob}/"))
+            _remember_specs(collection, specs)
         if not specs:
             return []
-        wanted = _years_between(start, end)
         local: list[Path] = []
         for name, year in specs:
             if year not in wanted:
                 continue
             path = _part_path(collection, name.rsplit("/", 1)[-1])
             if not path.exists() or path.stat().st_size == 0:
-                url = _signed_one(name)
                 with urllib.request.urlopen(
-                        urllib.request.Request(url, headers={"User-Agent": _UA}),
+                        urllib.request.Request(_blob_url(name),
+                                               headers={"User-Agent": _UA}),
                         timeout=300) as response:
                     tmp = path.with_suffix(".part")
                     tmp.write_bytes(response.read())
@@ -153,13 +279,6 @@ def ensure_index(collection: str, start: str, end: str) -> list[Path]:
         print(f"stac-geoparquet: index unavailable ({type(exc).__name__}: {exc}); "
               "searching the STAC API instead", flush=True)
         return []
-
-
-def _signed_one(name: str) -> str:
-    import planetary_computer
-
-    return planetary_computer.sign(
-        f"https://{ITEMS_ACCOUNT}.blob.core.windows.net/{name}")
 
 
 def month_assets(collection: str, bbox: list[float], start: str, end: str,
@@ -203,6 +322,11 @@ def month_assets(collection: str, bbox: list[float], start: str, end: str,
             # Disjoint means the item cannot cover any part of the area.
             if x1 < minx or x0 > maxx or y1 < miny or y0 > maxy:
                 continue
+            # The snapshot stores UTC timestamps without their offset, and the
+            # bounds carry one. Comparing them as they arrive raises, so the naive
+            # stamp is read as the UTC it is rather than being coerced by luck.
+            if isinstance(stamp, _dt.datetime) and stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=_dt.timezone.utc)
             if not isinstance(stamp, _dt.datetime):
                 continue
             if stamp < lo or stamp > hi:
@@ -214,13 +338,20 @@ def month_assets(collection: str, bbox: list[float], start: str, end: str,
     return found
 
 
-def signed_hrefs(found: dict[str, str]) -> dict[str, str]:
-    """Sign each href the index handed back.
+def sign_blob(href: str) -> str:
+    """Sign one asset href, deriving its account and container from the URL.
 
-    The snapshot stores unsigned blob URLs -- the STAC API signs its own on the way
-    out -- so signing here is what makes the COGs readable, and it is the same step
-    the search path already takes per item.
+    The snapshot's hrefs point at whatever account holds that collection's pixels,
+    which is a different account from the one holding the snapshot -- MODIS's COGs
+    live in ``modiseuwest``. Both are readable with a token from the same public
+    API, so the account and container come from the href rather than being assumed.
+    An href already carrying a query is returned as it is: it is signed already.
     """
-    import planetary_computer
-
-    return {month: planetary_computer.sign(href) for month, href in found.items()}
+    parsed = urllib.parse.urlparse(href)
+    if parsed.query or not parsed.netloc.endswith("blob.core.windows.net"):
+        return href
+    account, _, _rest = parsed.netloc.partition(".")
+    container, _, _blob = parsed.path.lstrip("/").partition("/")
+    if not container:
+        return href
+    return f"{href}?{_sas(account, container)}"
