@@ -279,11 +279,31 @@ class ApiPlumbingTests(unittest.TestCase):
 
         response = self.client.get(f"/context?cache_key={self.KEY}")
         self.assertEqual(response.status_code, 200, response.text[:300])
-        rain = response.json()["summary"]["rainfall"]
+        summary = response.json()["summary"]
+        rain = summary["rainfall"]
         self.assertEqual(rain["status"], "ok", rain)
         self.assertEqual(rain["evidence"]["status"], "observed",
                          "the assembled reading labelled a CHIRPS series as "
                          "something other than observed")
+        # The read-from-artefacts path ships the same uniform measures the
+        # synchronous one does, so a completed CHIRPS reading shows a rainfall
+        # measure rather than rainfall alone.
+        units = [m.get("units") for m in (summary.get("measures") or [])]
+        self.assertIn("mm", units, "the offline reading is missing a rainfall measure")
+
+    def test_build_measures_carries_a_rainfall_measure(self):
+        import main
+
+        rainfall_ok = {"status": "ok", "product": "chirps",
+                       "window": {"start": "2024-01-01", "end": "2024-06-30"},
+                       "series": [{"value": 10.0}, {"value": 20.0}]}
+        measures = main._build_measures(None, None, rainfall_ok, 0.42)
+        self.assertEqual(len(measures), 1, "expected only a rainfall measure")
+        self.assertEqual(measures[0]["units"], "mm")
+        self.assertEqual(measures[0]["value"], 30.0)
+        self.assertEqual(measures[0]["product"], "chirps")
+        # Nothing to measure -> no measure, not a null row.
+        self.assertEqual(main._build_measures(None, None, {"status": "not_computed"}, 0.42), [])
 
     def test_an_unknown_product_is_refused_with_the_ones_that_exist(self):
         response = self.client.post(

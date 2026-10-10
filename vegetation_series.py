@@ -122,7 +122,8 @@ def _items_by_month(bbox, months) -> dict[str, Any]:
             MODIS_NDVI_ASSET,
         )
         if found:
-            return pc_geoparquet.signed_hrefs(found)
+            return {m: pc_geoparquet.sign_blob(h)
+                    for m, h in found.items()}
     except Exception as exc:  # noqa: BLE001 - the search below is the answer then
         print(f"vegetation series: GeoParquet index unavailable "
               f"({type(exc).__name__}: {exc}); searching instead", flush=True)
