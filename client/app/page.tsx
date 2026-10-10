@@ -2079,19 +2079,18 @@ export default function Home() {
   async function showComputedResult(cacheKey: string | null) {
     if (!cacheKey) return;
     try {
-      // A single retry on a transient failure. The site is deployed while people
-      // are reading it, and nginx in front of the API caps concurrent connections
-      // per IP -- four. A reading that asks for more than that at once is refused
-      // with 503 before the request ever reaches the backend, and the refusal
-      // clears the moment the ones in flight finish, so a short pause then a
-      // retry is exactly the shape that recovers. Without it, a reader was shown
-      // a terminal error over a reading that was already finished.
+      // Retried on anything transient, not only 5xx. nginx in front of the API
+      // caps concurrency and rate per reader and answers 429 when either is
+      // exceeded -- a "slow down", not a "broken" -- and it clears the moment the
+      // requests in flight finish, so a short pause then a retry recovers. A 429
+      // read as terminal sent a reader an error over a finished reading.
+      const retryable = (status: number) => status >= 500 || status === 429;
       let response: Response | null = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
           `&window_start=${startDate}&window_end=${endDate}`);
-        if (response.ok || response.status < 500) break;
+        if (response.ok || !retryable(response.status)) break;
         if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
       }
       if (!response || !response.ok) {
