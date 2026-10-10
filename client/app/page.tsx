@@ -777,7 +777,7 @@ function WorkRow({
 }: {
   indicator: string;
   label: string;
-  state: 'waiting' | 'active' | 'refused';
+  state: 'waiting' | 'active' | 'refused' | 'already';
   reads?: number;
   startedAt?: string | null;
   submittedAt?: string | null;
@@ -801,6 +801,11 @@ function WorkRow({
       <span className="min-w-0 flex-1">
         {refused ? (
           <span className="text-[0.8125rem] text-bare">never reached the reading room</span>
+        ) : state === 'already' ? (
+          // The plan above already says the module is computed, so the row says
+          // the same thing. "Waiting its turn" over a finished module is the
+          // page contradicting itself.
+          <span className="text-[0.8125rem] text-ink-3">already read</span>
         ) : live ? (
           <>
             {/* Indeterminate, and said to be. There is no per-month progress to
@@ -1923,9 +1928,20 @@ export default function Home() {
   // of monthly reads, and a spinner over an unquantified wait is the thing this
   // replaces. The estimate is the backend's measured rate, and it is labelled an
   // estimate everywhere it appears.
-  async function submitIndicator(indicator: string): Promise<boolean> {
+  /* Submits one module. Returns the area's cache key, or null if it was refused.
+     The key doubles as the success signal: a submission the server accepted
+     always names the area it was recorded against. */
+  async function submitIndicator(
+    indicator: string,
+    options?: { reveal?: boolean },
+  ): Promise<string | null> {
     const geojson = currentGeojson();
-    if (!geojson) return false;
+    if (!geojson) return null;
+    // A caller submitting a batch of modules reveals once at the end. Revealing
+    // per module re-read the same reading once per module -- four identical
+    // /context calls and four identical /rainfall calls for one result, which is
+    // eight duplicated requests before the first has even been shown.
+    const reveal = options?.reveal ?? true;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     setPendingIndicator(indicator);
     try {
@@ -1942,6 +1958,8 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data?.detail || 'Submission failed');
       }
+      const key: string | null = data.cache_key ?? null;
+      setActiveCacheKey(key);
       setPlan(data.planned || null);
       setProgress({
         state: data.submission?.state || 'pending',
@@ -1949,21 +1967,23 @@ export default function Home() {
         attempts: 0,
         reason: data.submission?.reason ?? null,
       });
-      if (data.submission?.state !== 'ready') {
-        void pollSubmission(data.cache_key, indicator);
-      } else {
+      if (data.submission?.state === 'ready') {
         // Already read. A cached area comes back `ready` before any polling
         // happens -- the worker is never involved -- so the reading still has to
         // be fetched and shown. Reaching only for the vegetation series here left
         // the pane on its empty state, so an area whose modules were already
         // computed looked stuck while nothing was wrong at all.
-        void showComputedResult(data.cache_key);
-        void loadVegetationSeries(data.cache_key);
+        if (reveal && key) {
+          void showComputedResult(key);
+          void loadVegetationSeries(key);
+        }
+      } else if (key) {
+        void pollSubmission(key, indicator);
       }
-      return true;
+      return key;
     } catch (error) {
       reportError(error instanceof Error ? error.message : 'Submission failed');
-      return false;
+      return null;
     } finally {
       setPendingIndicator(null);
     }
@@ -2015,13 +2035,28 @@ export default function Home() {
     // never begun, and nothing on the page ever contradicted it.
     const submitted: string[] = [];
     const refused: string[] = [];
+    let key: string | null = null;
     for (const plan of offline.plans) {
       const indicator = plan.indicator;
       if (!indicator) continue;
-      const ok = await submitIndicator(indicator);
-      (ok ? submitted : refused).push(indicator);
+      const accepted = await submitIndicator(indicator, { reveal: false });
+      if (accepted) {
+        submitted.push(indicator);
+        key = accepted;
+      } else {
+        refused.push(indicator);
+      }
     }
     setOffline({ ...offline, queued: submitted, refused });
+    // One reading, read once. Every module of one boundary shares a key, so the
+    // reading is revealed after the batch rather than once per module -- four
+    // identical reads of the same thing was both wasteful and enough of a storm
+    // for the proxy in front of the API to refuse the last one.
+    if (key) {
+      setActiveCacheKey(key);
+      void showComputedResult(key);
+      void loadVegetationSeries(key);
+    }
     if (refused.length > 0) {
       toast({
         title: `${refused.length} module${refused.length === 1 ? '' : 's'} could not be queued`,
@@ -3216,7 +3251,11 @@ export default function Home() {
                                   key={name}
                                   indicator={name}
                                   label={WORK_LABELS[name] ?? name}
-                                  state={active ? 'active' : 'waiting'}
+                                  state={
+                                    active ? 'active'
+                                      : plan?.already_computed ? 'already'
+                                      : 'waiting'
+                                  }
                                   reads={plan?.months_to_read ?? plan?.months}
                                   startedAt={active ? progress?.startedAt : null}
                                   submittedAt={active ? progress?.submittedAt : null}
