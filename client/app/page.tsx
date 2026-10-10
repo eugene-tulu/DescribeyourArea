@@ -1388,6 +1388,17 @@ export default function Home() {
   const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
   const [adminQuery, setAdminQuery] = useState('');
   const [adminBusy, setAdminBusy] = useState(false);
+  /* The boundary browser: country -> level -> unit, rather than a typed name.
+     Searching needs you to already know the spelling, and "Meru" is not a
+     spelling a visitor arrives with. Drilling down means the list of what exists
+     is itself the answer, and the desired unit is one or two clicks away. */
+  const [browseCountry, setBrowseCountry] = useState('Kenya');
+  const [browseLevel, setBrowseLevel] = useState(1);
+  const [browseCountries, setBrowseCountries] = useState<string[]>([]);
+  const [browseUnits, setBrowseUnits] = useState<Array<{ id: string; name: string; parent_name?: string | null }>>([]);
+  const [browseFilter, setBrowseFilter] = useState('');
+  const [browseBusy, setBrowseBusy] = useState<'countries' | 'units' | 'outline' | null>(null);
+  const [browseError, setBrowseError] = useState<string | null>(null);
   // "Which administrative unit is this in?", asked once the user has drawn
   // something. Answered for a point at the outline's centroid, and offered
   // rather than automatic: snapping replaces the outline the person drew, and
@@ -1533,6 +1544,75 @@ export default function Home() {
       setAdminBusy(false);
     }
   };
+
+  /* --- the boundary browser -------------------------------------------------
+     Country -> level -> unit. Each rung is one request and the unit list is the
+     index, so the reader never has to know a spelling to find a boundary -- which
+     is the whole point over the typed search above it. */
+  const loadBrowseCountries = useCallback(async () => {
+    setBrowseBusy('countries');
+    setBrowseError(null);
+    try {
+      const response = await fetch('/api/areas/countries');
+      if (!response.ok) throw new Error('could not list countries');
+      const body = await response.json();
+      setBrowseCountries(body.countries ?? []);
+      if (body.countries?.length && !body.countries.includes(browseCountry)) {
+        setBrowseCountry(body.countries.includes('Kenya') ? 'Kenya' : body.countries[0]);
+      }
+    } catch {
+      setBrowseError('Countries could not be listed. The box above still takes a name.');
+    } finally {
+      setBrowseBusy(null);
+    }
+  }, [browseCountry]);
+
+  const loadBrowseUnits = useCallback(async (country: string, level: number) => {
+    setBrowseBusy('units');
+    setBrowseError(null);
+    try {
+      const response = await fetch(
+        `/api/areas/browse?country=${encodeURIComponent(country)}&level=${level}`);
+      if (!response.ok) throw new Error('could not list units');
+      const body = await response.json();
+      setBrowseUnits(body.units ?? []);
+    } catch {
+      setBrowseUnits([]);
+      setBrowseError('That level could not be listed for this country.');
+    } finally {
+      setBrowseBusy(null);
+    }
+  }, []);
+
+  const adoptBoundary = useCallback(async (unit: { id: string; name: string }, level: number) => {
+    setBrowseBusy('outline');
+    setBrowseError(null);
+    try {
+      const response = await fetch(
+        `/api/areas/outline?id=${encodeURIComponent(unit.id)}&level=${level}&simplify=0.02`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || 'that outline could not be read');
+      }
+      const feature = await response.json();
+      const geometry = (feature.geometry ?? feature) as GeoJsonObject;
+      setUploadedGeojson(geometry);
+      setAdminArea({ id: unit.id, name: unit.name, level });
+    } catch (error) {
+      setBrowseError(error instanceof Error ? error.message : 'that outline could not be read');
+    } finally {
+      setBrowseBusy(null);
+    }
+  }, [setUploadedGeojson, setAdminArea]);
+
+  useEffect(() => {
+    void loadBrowseCountries();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void loadBrowseUnits(browseCountry, browseLevel);
+  }, [browseCountry, browseLevel, loadBrowseUnits]);
 
   // Handle search input changes with debouncing
   /** What the chosen window means, in the words the person chose it with.
@@ -2456,6 +2536,117 @@ export default function Home() {
                     Using {adminArea.name}, administrative level {adminArea.level}.
                     Its outline is the whole unit, not something you drew.
                   </p>
+                )}
+              </div>
+
+              {/* The boundary browser. Country -> level -> unit, so a boundary is
+                  found by choosing from what exists rather than by typing a name
+                  you have to already know. Sits above the typed search, which is
+                  still there for the reader who knows the name. */}
+              <div className="rule-t px-5 py-5">
+                <Label className="label mb-2.5 block">Or pick a boundary</Label>
+
+                <div className="mb-3">
+                  <label htmlFor="browse-country" className="fig mb-1.5 block text-[0.75rem] text-ink-3">
+                    Country
+                  </label>
+                  <select
+                    id="browse-country"
+                    value={browseCountry}
+                    onChange={(event) => { setBrowseCountry(event.target.value); setBrowseFilter(''); }}
+                    className="fig h-9 w-full rounded-lg border border-rule bg-raised px-2.5 text-[0.8125rem] text-ink-2"
+                  >
+                    {browseCountries.length === 0 && <option value={browseCountry}>{browseCountry}</option>}
+                    {browseCountries.map((country) => (
+                      <option key={country} value={country}>{country}</option>
+                    ))}
+                    {browseBusy === 'countries' && <option value="">Loading…</option>}
+                  </select>
+                </div>
+
+                <div className="mb-3">
+                  <span className="fig mb-1.5 block text-[0.75rem] text-ink-3">Level</span>
+                  <div className="flex gap-1.5" role="group" aria-label="Administrative level">
+                    {([
+                      [0, 'Countries'],
+                      [1, 'Regions'],
+                      [2, 'Districts'],
+                    ] as const).map(([value, label]) => (
+                      <button
+                        key={value}
+                        type="button"
+                        aria-pressed={browseLevel === value}
+                        onClick={() => { setBrowseLevel(value); setBrowseFilter(''); }}
+                        className={`fig h-7 flex-1 rounded-lg border px-2 text-[0.75rem] transition-colors duration-200 ${
+                          browseLevel === value
+                            ? 'border-signal bg-signal/12 text-signal'
+                            : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mb-2 relative">
+                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" />
+                  <Input
+                    type="text"
+                    aria-label="Filter these boundaries"
+                    placeholder={`Filter ${browseLevel === 2 ? 'districts' : browseLevel === 1 ? 'regions' : 'countries'}…`}
+                    value={browseFilter}
+                    onChange={(event) => setBrowseFilter(event.target.value)}
+                    className="h-8 pl-9 text-[0.8125rem]"
+                  />
+                </div>
+
+                <div className="max-h-56 overflow-y-auto rounded-xl border border-rule">
+                  {browseBusy === 'units' && (
+                    <p className="fig px-3.5 py-3 text-[0.75rem] text-ink-3">Listing…</p>
+                  )}
+                  {browseBusy !== 'units' && browseUnits.length === 0 && (
+                    <p className="fig px-3.5 py-3 text-[0.75rem] text-ink-3">
+                      No {browseLevel === 2 ? 'districts' : 'regions'} of {browseCountry} match.
+                    </p>
+                  )}
+                  {browseUnits.map((unit) => {
+                    const name = String(unit.name ?? '');
+                    if (browseFilter.trim() && !name.toLowerCase().includes(browseFilter.trim().toLowerCase())) {
+                      return null;
+                    }
+                    const chosen = adminArea?.id === unit.id;
+                    return (
+                      <button
+                        key={unit.id}
+                        type="button"
+                        onClick={() => void adoptBoundary(unit, browseLevel)}
+                        className={`hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2 text-left last:border-b-0 ${
+                          chosen ? 'bg-signal/8' : ''
+                        }`}
+                      >
+                        <MapPin className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${chosen ? 'text-signal' : 'text-ink-3'}`} />
+                        <span className="text-[0.8125rem] leading-snug text-ink-2">
+                          {name}
+                          {unit.parent_name && (
+                            <span className="fig text-ink-3"> · {String(unit.parent_name)}</span>
+                          )}
+                        </span>
+                        {browseBusy === 'outline' && chosen && (
+                          <Loader2 className="ml-auto h-3.5 w-3.5 shrink-0 animate-spin text-ink-3" />
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                  Choose one and its exact outline becomes the area you read. No
+                  drawing, no coordinates — the whole unit, as the boundary
+                  service holds it.
+                </p>
+                {browseError && (
+                  <p className="fig mt-2 text-[0.75rem] text-bare">{browseError}</p>
                 )}
               </div>
 

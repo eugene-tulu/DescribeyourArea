@@ -2036,6 +2036,84 @@ class ForgetRequest(BaseModel):
     cache_key: Optional[str] = None
 
 
+@app.get("/areas/countries")
+async def areas_countries():
+    """The countries the boundary service can name, for the boundary browser.
+
+    Resolving by name needs the reader to already know the spelling; browsing
+    does not. This is the first rung of the country -> region -> district picker,
+    so a reader can drill down to a unit instead of typing one.
+    """
+    import areas
+
+    resolver = areas.GaulResolver()
+    try:
+        payload = await asyncio.to_thread(resolver.get, "countries", {})
+    except Exception as exc:  # noqa: BLE001 - degrade to the search path
+        raise HTTPException(status_code=503, detail=f"could not list countries: {exc}") from exc
+    entries = payload.get("countries") if isinstance(payload, dict) else payload
+    names = sorted(str(entry.get("name")) for entry in entries if isinstance(entry, dict) and entry.get("name"))
+    return {"countries": names}
+
+
+@app.get("/areas/browse")
+async def areas_browse(country: str, level: int = 1, query: Optional[str] = None):
+    """The units of one country at one level, as a list rather than a search.
+
+    Returns names, ids and parents -- no geometry. A picker needs to show what
+    can be chosen; a district outline is a few hundred points and sending those
+    for a list would make the list slow to render and no easier to read from.
+    The outline is fetched once, when the reader commits to a unit.
+
+    ADM2 carries the ADM1 it sits under, so a reader can narrow to a district by
+    region without a separate request.
+    """
+    import areas
+
+    resolver = areas.GaulResolver()
+    try:
+        items = await asyncio.to_thread(
+            resolver.get, "boundary-index", {"country": country, "level": level})
+    except areas.ResolverUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except areas.ResolverError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    rows = [
+        {
+            "id": item.get("id"),
+            "name": item.get("name"),
+            "parent_name": item.get("parent_name"),
+        }
+        for item in (items.get("items") or [])
+        if item.get("name")
+    ]
+    if query:
+        needle = query.strip().lower()
+        rows = [row for row in rows if needle in str(row["name"]).lower()]
+    return {"country": country, "level": level, "units": rows}
+
+
+@app.get("/areas/outline")
+async def areas_outline(id: str, level: int = 1, simplify: float = 0.02):
+    """One unit's outline, ready to become the study area.
+
+    Committing to a unit is the moment geometry is wanted, and the last moment a
+    request is made -- so it is a separate route from the list rather than folded
+    into it.
+    """
+    import areas
+
+    resolver = areas.GaulResolver()
+    try:
+        feature = await asyncio.to_thread(resolver.by_id, id, level, simplify)
+    except areas.ResolverUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except areas.ResolverError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return feature
+
+
 def _rainfall_by_key(key: str, indicator: str, *,
                      window_start: Optional[str] = None,
                      window_end: Optional[str] = None) -> dict:

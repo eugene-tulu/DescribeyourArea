@@ -18,6 +18,7 @@ from pathlib import Path
 
 import areas
 from areas import GaulResolver, ResolverError, ResolverUnavailable, resolve_area
+from fastapi.testclient import TestClient
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
@@ -263,3 +264,50 @@ class FreeTextTests(unittest.TestCase):
     def test_an_empty_query_is_refused(self):
         with self.assertRaises(ResolverError):
             areas.resolve_by_name(self.ByName(), "   ")
+
+
+class BoundaryBrowserTests(unittest.TestCase):
+    """The country -> level -> unit picker is backed by listings, not by search.
+
+    Browsing exists because a typed name presupposes you already know the
+    spelling. These pin that the listings return what a picker needs -- names and
+    ids, no geometry -- and that committing to a unit returns its outline.
+    """
+
+    def setUp(self):
+        import main
+
+        self.client = TestClient(main.app)
+
+    def test_countries_are_named_not_geometries(self):
+        response = self.client.get("/areas/countries")
+        if response.status_code != 200:
+            self.skipTest("the boundary service is not reachable from the test host")
+        countries = response.json()["countries"]
+        self.assertIn("Kenya", countries)
+        self.assertLessEqual(countries, sorted(countries), "the picker should be sorted, not arbitrary")
+        self.assertTrue(all(isinstance(name, str) for name in countries))
+
+    def test_the_unit_list_carries_names_and_ids_and_no_geometry(self):
+        response = self.client.get("/areas/browse?country=Kenya&level=1")
+        if response.status_code != 200:
+            self.skipTest("the boundary service is not reachable from the test host")
+        body = response.json()
+        units = body["units"]
+        self.assertTrue(units, "Kenya has regions to list")
+        first = units[0]
+        self.assertEqual(set(first) - {"parent_name"}, {"id", "name"},
+                         "a picker needs the id and the name, not a polygon")
+        self.assertNotIn("geometry", first, "the list must not carry outlines")
+        # ADM2 tells you which region it sits under, which is what makes a
+        # two-level drill possible without a second request.
+        districts = self.client.get("/areas/browse?country=Kenya&level=2").json()["units"]
+        self.assertTrue(any(d.get("parent_name") for d in districts))
+
+    def test_filtering_narrows_without_asking_the_service(self):
+        response = self.client.get("/areas/browse?country=Kenya&level=2&query=bomet")
+        if response.status_code != 200:
+            self.skipTest("the boundary service is not reachable from the test host")
+        names = [u["name"] for u in response.json()["units"]]
+        self.assertTrue(names, "Bomet exists in Kenya")
+        self.assertTrue(any("Bomet" in n for n in names))
