@@ -1759,6 +1759,12 @@ export default function Home() {
       if (data.submission?.state !== 'ready') {
         void pollSubmission(data.cache_key, indicator);
       } else {
+        // Already read. A cached area comes back `ready` before any polling
+        // happens -- the worker is never involved -- so the reading still has to
+        // be fetched and shown. Reaching only for the vegetation series here left
+        // the pane on its empty state, so an area whose modules were already
+        // computed looked stuck while nothing was wrong at all.
+        void showComputedResult(data.cache_key);
         void loadVegetationSeries(data.cache_key);
       }
     } catch (error) {
