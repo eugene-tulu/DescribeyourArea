@@ -94,19 +94,43 @@ def _month_range(start: str, end: str) -> list[str]:
 
 
 def _items_by_month(bbox, months) -> dict[str, Any]:
-    """One MOD13Q1 item per month, from a single paged search.
+    """One MOD13Q1 item per month, from the published GeoParquet index.
 
-    Querying month by month meant 420 requests for a 35-year span, which is both
-    wasteful and rude to a shared public service -- one of them came back as a
-    connection reset. One search for the whole range is bucketed locally instead.
-    A month with nothing is absent, not zero.
+    Querying month by month meant 420 requests for a 35-year span -- wasteful, and
+    rude to a shared public service, where one of them once came back as a
+    connection reset. It became one paged search for the whole range; it is now
+    one local columnar read of the parts Planetary Computer publishes per
+    collection-year, so a twelve-year baseline is a dozen small reads the first
+    time and nothing after that, because only the index is cached and never the
+    imagery.
+
+    The STAC search stays as the fallback, for a read the index cannot serve -- the
+    index missing, pyarrow missing, or a part that fails to download. A month with
+    nothing is absent, not zero.
     """
     import time
 
+    if not months:
+        return {}
+
+    # The index first. It is the same metadata the search returns, read locally.
+    try:
+        import pc_geoparquet
+
+        found = pc_geoparquet.month_assets(
+            MODIS_COLLECTION, list(bbox), f"{months[0]}-01", f"{months[-1]}-28",
+            MODIS_NDVI_ASSET,
+        )
+        if found:
+            return pc_geoparquet.signed_hrefs(found)
+    except Exception as exc:  # noqa: BLE001 - the search below is the answer then
+        print(f"vegetation series: GeoParquet index unavailable "
+              f"({type(exc).__name__}: {exc}); searching instead", flush=True)
+
+    wanted = set(months)
     import planetary_computer
     import pystac_client
 
-    wanted = set(months)
     catalog = pystac_client.Client.open(main.STAC_URL)
 
     def run() -> dict[str, Any]:
