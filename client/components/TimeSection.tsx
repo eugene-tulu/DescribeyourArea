@@ -725,7 +725,7 @@ export default function TimeSection({
   const months = hasRain ? shownRain.map((d) => d.month) : shownVeg.map((d) => d.month);
 
   return (
-    <section className="panel overflow-hidden p-0">
+    <section id="rainfall-results" className="panel overflow-hidden p-0 scroll-mt-24">
       <header className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4 border-b border-rule px-6 py-5 sm:px-8 sm:py-6">
         <div>
           <p className="label">Over time</p>

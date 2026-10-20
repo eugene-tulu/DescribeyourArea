@@ -28,7 +28,6 @@ interface BoundingBox {
 }
 
 interface MapComponentProps {
-  selectedLocation: { lat: number; lng: number } | null;
   onBoundingBoxCreated: (bbox: BoundingBox | null) => void;
   uploadedGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
@@ -36,10 +35,8 @@ interface MapComponentProps {
 
 /** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
  *
- * Handles the shapes a study area can actually be -- Polygon, MultiPolygon and
- * FeatureCollection of either -- because a named administrative boundary may
- * arrive as any of the three, and a fit that silently does nothing for two of them
- * is the same defect as no fit at all.
+ * Handles Polygon, MultiPolygon and FeatureCollection uploads so the map can
+ * frame each supported GeoJSON shape.
  */
 function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, number]] | null {
   const positions: number[][] = [];
@@ -87,7 +84,6 @@ function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Create
 }
 
 function MapController({
-  selectedLocation,
   uploadedGeoJSON,
   onBoundingBoxCreated,
   onSaveFeatures,
@@ -169,12 +165,6 @@ function MapController({
       }
     }
   }, [onSaveFeatures, convertToGeoJSON]);
-
-  useEffect(() => {
-    if (selectedLocation) {
-      map.setView([selectedLocation.lat, selectedLocation.lng], 12);
-    }
-  }, [selectedLocation, map]);
 
   // Move the map to an area that was named rather than drawn.
   //
@@ -274,7 +264,6 @@ function MapController({
 }
 
 export default function MapComponent({
-  selectedLocation,
   onBoundingBoxCreated,
   uploadedGeoJSON,
   onSaveFeatures,
@@ -303,7 +292,6 @@ export default function MapComponent({
         />
 
         <MapController
-          selectedLocation={selectedLocation}
           uploadedGeoJSON={uploadedGeoJSON}
           onBoundingBoxCreated={onBoundingBoxCreated}
           onSaveFeatures={onSaveFeatures}

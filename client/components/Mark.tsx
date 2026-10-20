@@ -52,18 +52,12 @@ export function Mark({ size = 18, className }: { size?: number; className?: stri
   );
 }
 
-/* The wordmark. Set in the display serif rather than the UI sans, which is the
-   whole reason it reads as a name and not as a label: the interface is set in
-   Inter, so anything in Instrument Serif at the same size already looks like
-   something chosen rather than something inherited. */
+/* Keep the wordmark in the same sans-serif as the interface. */
 export function Wordmark({ className }: { className?: string }) {
   return (
     <span className={`flex items-center gap-2.5 ${className ?? ''}`}>
       <Mark size={16} />
-      <span
-        className="font-serif text-[1.0625rem] leading-none tracking-[-0.01em]"
-        style={{ fontFamily: '"Instrument Serif", "Iowan Old Style", Georgia, serif' }}
-      >
+      <span className="text-[1.0625rem] font-semibold leading-none tracking-[-0.02em]">
         GeoContextualize
       </span>
     </span>
