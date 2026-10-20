@@ -3,11 +3,10 @@
 import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import {
-  Search, MapPin, Loader2, Globe, Satellite, ArrowDown, Download,
+  MapPin, Globe, Satellite, ArrowDown, Download,
   Link2, Printer, Info, Upload, Share2, ChevronDown, Check, X,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
@@ -45,14 +44,6 @@ const SOURCES = [
   { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
   { id: 'era5', label: 'ERA5', role: 'Precipitation · monthly' },
 ] as const;
-
-interface SearchResult {
-  place_id: number;
-  display_name: string;
-  lat: string;
-  lon: string;
-  boundingbox: [string, string, string, string];
-}
 
 interface BoundingBox {
   north: number;
@@ -132,10 +123,10 @@ const DATASET_OPTIONS: Array<{
   label: string;
   description: string;
 }> = [
-  { id: 'dem', label: 'Elevation & terrain', description: 'How much ground there is to work with' },
-  { id: 'landcover', label: 'Land cover', description: 'ESA WorldCover, one date, classed' },
-  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'What is alive, right now' },
-  { id: 'rainfall', label: 'Rainfall & drought', description: 'Against the normal, not against hope' },
+  { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain type' },
+  { id: 'landcover', label: 'Land cover', description: 'Land-cover classes from ESA WorldCover' },
+  { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Vegetation greenness from satellite imagery' },
+  { id: 'rainfall', label: 'Rainfall & drought', description: 'Rainfall totals and comparison with the long-term average' },
 ];
 
 const LANDCOVER_LABELS: Record<string, string> = {
@@ -420,7 +411,7 @@ const ERROR_COPY: Record<string, string> = {
     // both the DEM and the land-cover readers take their tiles at native
     // resolution, so a large area queued for them still reads 10 m. Saying so is
     // better than offering a remedy that does not exist.
-    'Land cover is read at 10 m and a large area still is, so drawing a smaller boundary is the only way to get it. Elevation and vegetation answer large areas at a coarser resolution.',
+    'Land cover is read at 10 m and a large area still is, so drawing a smaller boundary is the only way to get it. Elevation and vegetation layers cover large areas at a coarser resolution.',
 };
 
 /** An untranslated code is a defect, so never render one. */
@@ -429,7 +420,7 @@ function readableNote(note?: string | null): string | null {
   const known = ERROR_COPY[note];
   if (known) return known;
   if (/^[a-z0-9]+(_[a-z0-9]+)+$/.test(note)) {
-    return 'This source could not be read for the area. Try a smaller or differently placed boundary.';
+    return 'This source could not be read for the area. Try a smaller boundary.';
   }
   return note;
 }
@@ -667,17 +658,16 @@ function SourceDetail({
   summary,
   selectedDatasets,
   submission,
-  onSubmitForRainfall,
   vegetationSeries,
 }: {
   summary: Summary;
   selectedDatasets: string[];
   submission?: SubmissionState;
-  onSubmitForRainfall: () => void;
   vegetationSeries?: ClimateVegSeries | null;
 }) {
-  const [open, setOpen] = useState(false);
-  const datasets = (summary.analysis?.datasets || selectedDatasets).filter(isDatasetId);
+  const [open, setOpen] = useState(true);
+  const requested = new Set((summary.analysis?.datasets || selectedDatasets).filter(isDatasetId));
+  const datasets = DATASET_IDS.filter((dataset) => requested.has(dataset));
   const read = datasets.filter(
     (dataset) => (summary[dataset as keyof Summary] as { status?: string } | undefined)?.status === 'ok',
   );
@@ -690,10 +680,11 @@ function SourceDetail({
         className="group flex w-full items-baseline justify-between gap-4 text-left"
       >
         <span>
-          <span className="label">{open ? 'Hide' : 'Show'} every source</span>
-          <span className="fig mt-1 block text-[0.8125rem] text-ink-2">
-            {read.length} of {datasets.length} sources read, each with the grid it was
-            read at and what kind of number it is.
+          <span className="block text-sm font-semibold text-ink">
+            {open ? 'Hide data details' : 'Show data details'}
+          </span>
+          <span className="mt-1 block text-sm font-medium text-ink-2">
+            {read.length} of {datasets.length} selected data sources available, with resolution and method.
           </span>
         </span>
         <ChevronDown
@@ -703,14 +694,13 @@ function SourceDetail({
         />
       </button>
       {open && (
-        <div className="grid gap-x-10 gap-y-2 pt-5 xl:grid-cols-2">
+        <div className="grid gap-x-10 gap-y-2 pt-5">
           {datasets.map((dataset) => (
             <DatasetResultCard
               key={dataset}
               dataset={dataset}
               summary={summary}
               submission={submission}
-              onSubmit={dataset === 'rainfall' ? onSubmitForRainfall : undefined}
               vegetationSeries={vegetationSeries}
             />
           ))}
@@ -950,9 +940,9 @@ function ModuleBlock({
 }) {
   return (
     <section className="module rule-t py-7">
-      <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-        <h3 className="headline text-[1.125rem]">{title}</h3>
-        <p className="label">{description}</p>
+      <div>
+        <h3 className="headline text-[1.125rem] font-semibold">{title}</h3>
+        <p className="mt-1 text-sm font-semibold leading-relaxed text-ink-2">{description}</p>
       </div>
       <div className="mt-4">{children}</div>
     </section>
@@ -974,7 +964,7 @@ function Headline({ value, caption }: { value: string; caption: string }) {
       <p className="text-[clamp(2.25rem,5.5vw,3.5rem)] font-medium leading-[0.9] tracking-[-0.03em] text-signal">
         {value}
       </p>
-      <p className="label mt-2.5">{caption}</p>
+      <p className="mt-2.5 text-sm font-semibold leading-relaxed text-ink-2">{caption}</p>
     </div>
   );
 }
@@ -1037,13 +1027,11 @@ function DatasetResultCard({
   dataset,
   summary,
   submission,
-  onSubmit,
   vegetationSeries,
 }: {
   dataset: DatasetId;
   summary: Summary;
   submission?: SubmissionState;
-  onSubmit?: () => void;
   vegetationSeries?: ClimateVegSeries | null;
 }) {
   const option = DATASET_OPTIONS.find((item) => item.id === dataset);
@@ -1134,15 +1122,6 @@ function DatasetResultCard({
                 ? submission?.reason || 'The queue is full at the moment. Try again shortly.'
                 : 'This exact outline has not been read yet.'}
           </p>
-          {!pending && onSubmit && (
-            <button
-              type="button"
-              onClick={onSubmit}
-                        className="btn btn-primary mt-4 h-10 px-4 text-[0.8125rem]"
-            >
-              {rejected ? 'Try again' : 'Read rainfall for this outline'}
-            </button>
-          )}
           <EvidenceLine evidence={rain?.evidence} status={rain?.status || 'not_computed'} />
         </ModuleBlock>
       );
@@ -1344,8 +1323,7 @@ function ErrorView({ error, onRetry }: { error: ResultError; onRetry: () => void
         <p className="text-sm text-bare/90">{error.detail}</p>
       )}
       <p className="mt-2 text-xs text-bare/75">
-        Nothing was charged for a failed read — we would rather refuse than
-        approximate. Try a smaller boundary, or press Read this area again.
+        Try a smaller boundary, or press Read this area again.
       </p>
       <Button size="sm" variant="outline" className="mt-3.5" onClick={onRetry}>
         Try again
@@ -1357,16 +1335,12 @@ function ErrorView({ error, onRetry }: { error: ResultError; onRetry: () => void
 function EmptyState() {
   return (
     <div className="flex flex-col items-start gap-5 py-10">
-      <div className="ramp w-28" aria-hidden />
       <p className="display display-md max-w-[24ch] text-ink">
-        Nothing here yet. That is normal.
+        Choose an area to get started.
       </p>
       <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
-        Draw a boundary on the map, or search for a place, and this fills in
-        within seconds. You get terrain, land cover, vegetation and rainfall —
-        each one naming the instrument it came from, and each one saying what
-        kind of number it is. That second part is the point: a figure nobody
-        can check is a figure nobody should act on.
+        Draw an area on the map or upload a GeoJSON file. You’ll see its terrain,
+        land cover, vegetation and rainfall, with the data sources shown.
       </p>
     </div>
   );
@@ -1374,16 +1348,11 @@ function EmptyState() {
 
 export default function Home() {
    const { toast } = useToast();
-    const [searchQuery, setSearchQuery] = useState('');
-    const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-    const [showResults, setShowResults] = useState(false);
-   const [selectedLocation, setSelectedLocation] = useState<{lat: number, lng: number} | null>(null);
    const [boundingBox, setBoundingBox] = useState<BoundingBox | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [resultPhase, setResultPhase] = useState<ResultPhase>('idle');
   const [resultError, setResultError] = useState<ResultError | null>(null);
   const [analysisWarnings, setAnalysisWarnings] = useState<AnalysisWarning[]>([]);
-   const [isSearching, setIsSearching] = useState(false);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
   const [periodAmount, setPeriodAmount] = useState<number>(1);
@@ -1425,24 +1394,6 @@ export default function Home() {
   // ever decoded any of it, so a colleague opened a blank page.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const adminId = params.get('admin');
-    if (adminId) {
-      // Resolve the id rather than carrying the geometry, so a link from another
-      // system stays small and stays correct if the boundary service updates.
-      void (async () => {
-        try {
-          const response = await fetch(
-            `/api/areas/resolve?id=${encodeURIComponent(adminId)}&level=${params.get('level') ?? '1'}`);
-          if (!response.ok) return;
-          const area = await response.json();
-          setUploadedGeojson(area.geometry as GeoJsonObject);
-          setAdminArea({ id: area.id ?? adminId, name: area.name ?? null, level: area.level ?? null });
-        } catch {
-          // A stale or unreachable boundary service must not leave a blank page;
-          // the drawn and uploaded paths still work.
-        }
-      })();
-    }
     const area = params.get('area');
     if (!area) return;
     try {
@@ -1497,33 +1448,8 @@ export default function Home() {
   // hard-code 100 km², which meant a deployment that raised or lowered the cap
   // published a number its own API disagreed with. The plan response carries the
   // real value, so prefer that and fall back to the documented default.
-  const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
-   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
+   const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
-  // An administrative boundary, named rather than drawn. The planner thinks in
-  // wards and sub-counties and does not have the file; before this the only ways
-  // in were drawing it or uploading it.
-  const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
-  const [adminQuery, setAdminQuery] = useState('');
-  const [adminBusy, setAdminBusy] = useState(false);
-  /* The boundary browser: country -> level -> unit, rather than a typed name.
-     Searching needs you to already know the spelling, and "Meru" is not a
-     spelling a visitor arrives with. Drilling down means the list of what exists
-     is itself the answer, and the desired unit is one or two clicks away. */
-  const [browseCountry, setBrowseCountry] = useState('Kenya');
-  const [browseLevel, setBrowseLevel] = useState(1);
-  const [browseCountries, setBrowseCountries] = useState<string[]>([]);
-  const [browseUnits, setBrowseUnits] = useState<Array<{ id: string; name: string; parent_name?: string | null }>>([]);
-  const [browseFilter, setBrowseFilter] = useState('');
-  const [browseBusy, setBrowseBusy] = useState<'countries' | 'units' | 'outline' | null>(null);
-  const [browseError, setBrowseError] = useState<string | null>(null);
-  // "Which administrative unit is this in?", asked once the user has drawn
-  // something. Answered for a point at the outline's centroid, and offered
-  // rather than automatic: snapping replaces the outline the person drew, and
-  // that has to be their choice.
-  const [drawnInfo, setDrawnInfo] = useState<{ areaKm2: number; lon: number; lat: number } | null>(null);
-  const [containingArea, setContainingArea] = useState<{ name: string; level: number; id: string | null; area_km2: number } | null>(null);
-  const [containingBusy, setContainingBusy] = useState(false);
 
   // The copy target is derived from `summary` rather than mirrored from the
   // prose string. `summaryText` used to track `response` in three places; one of
@@ -1536,203 +1462,6 @@ export default function Home() {
   );
 
 
-  // Search for places using Nominatim
-  const searchPlaces = async (query: string) => {
-    if (query.length < 3) {
-      setSearchResults([]);
-      return;
-    }
-
-    setIsSearching(true);
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`
-      );
-      const data = await response.json();
-      setSearchResults(data);
-      setShowResults(true);
-    } catch (error) {
-      console.error('Search error:', error);
-      setSearchResults([]);
-      setShowResults(false);
-      toast({
-        title: 'Place search is unavailable',
-        description:
-          'Could not reach the search service. You can still draw the area on the map, or upload a GeoJSON file.',
-      });
-    } finally {
-      setIsSearching(false);
-    }
-  };
-
-  /** Ask the boundary service what this outline sits inside, and offer to use it. */
-  const findContainingArea = async () => {
-    if (!drawnInfo) return;
-    setContainingBusy(true);
-    try {
-      const response = await fetch(
-        `/api/areas/resolve?lat=${drawnInfo.lat}&lon=${drawnInfo.lon}`);
-      if (!response.ok) {
-        const failure = await response.json().catch(() => null);
-        throw new Error(failure?.detail || 'no administrative unit contains that point');
-      }
-      const area = await response.json();
-      setContainingArea({ name: area.name ?? 'that area', level: area.level ?? 0,
-                          id: area.id ?? null, area_km2: area.area_km2 ?? 0 });
-    } catch (error) {
-      setContainingArea(null);
-      toast({
-        title: 'Could not find a containing area',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
-      });
-    } finally {
-      setContainingBusy(false);
-    }
-  };
-
-  /** Adopt the containing unit, replacing the drawn outline with it. */
-  const adoptContainingArea = async () => {
-    if (!containingArea?.id) return;
-    setContainingBusy(true);
-    try {
-      const response = await fetch(
-        `/api/areas/resolve?id=${encodeURIComponent(containingArea.id)}&level=${containingArea.level}`);
-      if (!response.ok) throw new Error('could not fetch that boundary');
-      const area = await response.json();
-      setUploadedGeojson(area.geometry as GeoJsonObject);
-      setAdminArea({ id: area.id ?? containingArea.id, name: area.name ?? containingArea.name,
-                     level: area.level ?? containingArea.level });
-      setContainingArea(null);
-      toast({
-        title: 'Area replaced',
-        description: `Now using ${area.name}. Its outline is the whole administrative unit, which covers ${Math.round(area.area_km2).toLocaleString()} km² rather than the ${Math.round(drawnInfo!.areaKm2).toLocaleString()} km² you drew.`,
-      });
-    } catch (error) {
-      toast({
-        title: 'Could not use that area',
-        description: error instanceof Error ? error.message : 'Unknown error',
-        variant: 'destructive',
-      });
-    } finally {
-      setContainingBusy(false);
-    }
-  };
-
-  /** Resolve a place name to an administrative boundary and use it as the area. */
-  const resolveAdminArea = async () => {
-    const query = adminQuery.trim();
-    if (!query) return;
-    setAdminBusy(true);
-    try {
-      // Free text. The server translates 'Narok' or 'Kenya, Narok' into the
-      // country-plus-area form the boundary service needs.
-      const response = await fetch(`/api/areas/resolve?name=${encodeURIComponent(query)}`);
-      if (!response.ok) {
-        const failure = await response.json().catch(() => null);
-        throw new Error(failure?.detail || `no administrative area named ${query}`);
-      }
-      const area = await response.json();
-      setUploadedGeojson(area.geometry as GeoJsonObject);
-      setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
-      setAdminQuery('');
-      // Say what kind of thing this is while the reader is still looking at the
-      // control that chose it. A county is about 780 km2 and needs the queue;
-      // a sub-county may not. Finding that out from a 100 km2 limit and an
-      // "offline" panel is a worse way to learn it than being told.
-      const km2 = Math.round(area.area_km2 ?? 0);
-      const level = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
-        ?? `level ${area.level ?? '?'}`;
-      toast({
-        title: `${area.name} — ${km2.toLocaleString()} km²`,
-        description: km2 > (syncLimitKm2 ?? 100)
-          ? `That is the whole ${level}, too large to read live, so it is read offline at a coarser resolution and you will be told which. The map has moved to it.`
-          : `A ${level}, small enough to read live. The map has moved to it.`,
-        duration: 9000,
-      });
-    } catch (error) {
-      toast({
-        title: 'Could not resolve that area',
-        description: error instanceof Error
-          ? `${error.message} You can still draw it on the map or upload a file.`
-          : 'You can still draw it on the map or upload a file.',
-        variant: 'destructive',
-      });
-    } finally {
-      setAdminBusy(false);
-    }
-  };
-
-  /* --- the boundary browser -------------------------------------------------
-     Country -> level -> unit. Each rung is one request and the unit list is the
-     index, so the reader never has to know a spelling to find a boundary -- which
-     is the whole point over the typed search above it. */
-  const loadBrowseCountries = useCallback(async () => {
-    setBrowseBusy('countries');
-    setBrowseError(null);
-    try {
-      const response = await fetch('/api/areas/countries');
-      if (!response.ok) throw new Error('could not list countries');
-      const body = await response.json();
-      setBrowseCountries(body.countries ?? []);
-      if (body.countries?.length && !body.countries.includes(browseCountry)) {
-        setBrowseCountry(body.countries.includes('Kenya') ? 'Kenya' : body.countries[0]);
-      }
-    } catch {
-      setBrowseError('Countries could not be listed. The box above still takes a name.');
-    } finally {
-      setBrowseBusy(null);
-    }
-  }, [browseCountry]);
-
-  const loadBrowseUnits = useCallback(async (country: string, level: number) => {
-    setBrowseBusy('units');
-    setBrowseError(null);
-    try {
-      const response = await fetch(
-        `/api/areas/browse?country=${encodeURIComponent(country)}&level=${level}`);
-      if (!response.ok) throw new Error('could not list units');
-      const body = await response.json();
-      setBrowseUnits(body.units ?? []);
-    } catch {
-      setBrowseUnits([]);
-      setBrowseError('That level could not be listed for this country.');
-    } finally {
-      setBrowseBusy(null);
-    }
-  }, []);
-
-  const adoptBoundary = useCallback(async (unit: { id: string; name: string }, level: number) => {
-    setBrowseBusy('outline');
-    setBrowseError(null);
-    try {
-      const response = await fetch(
-        `/api/areas/outline?id=${encodeURIComponent(unit.id)}&level=${level}&simplify=0.02`);
-      if (!response.ok) {
-        const failure = await response.json().catch(() => null);
-        throw new Error(failure?.detail || 'that outline could not be read');
-      }
-      const feature = await response.json();
-      const geometry = (feature.geometry ?? feature) as GeoJsonObject;
-      setUploadedGeojson(geometry);
-      setAdminArea({ id: unit.id, name: unit.name, level });
-    } catch (error) {
-      setBrowseError(error instanceof Error ? error.message : 'that outline could not be read');
-    } finally {
-      setBrowseBusy(null);
-    }
-  }, [setUploadedGeojson, setAdminArea]);
-
-  useEffect(() => {
-    void loadBrowseCountries();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    void loadBrowseUnits(browseCountry, browseLevel);
-  }, [browseCountry, browseLevel, loadBrowseUnits]);
-
-  // Handle search input changes with debouncing
   /** What the chosen window means, in the words the person chose it with.
    *
    * A window is more than a pair of dates: a bar every month and a bar every year
@@ -1760,29 +1489,6 @@ export default function Home() {
     return parts.join('');
   })();
 
-  const handleSearchChange = (value: string) => {
-    setSearchQuery(value);
-    
-    if (searchTimeout.current) {
-      clearTimeout(searchTimeout.current);
-    }
-
-    searchTimeout.current = setTimeout(() => {
-      searchPlaces(value);
-    }, 300);
-  };
-
-  // Handle location selection
-  const handleLocationSelect = (result: SearchResult) => {
-    const lat = parseFloat(result.lat);
-    const lng = parseFloat(result.lon);
-    
-    setSelectedLocation({ lat, lng });
-    setSearchQuery(result.display_name);
-    setShowResults(false);
-    setSearchResults([]);
-  };
-
   // Handle bounding box creation from map
   // Stable identity: the map's draw-control effect depends on these, and a new
   // function on every render tore down and re-registered the control each time.
@@ -1801,7 +1507,6 @@ export default function Home() {
     setSubmission({});
     setActiveCacheKey(null);
     setVegetationSeries(null);
-    setContainingArea(null);
   }, []);
 
   const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
@@ -1914,7 +1619,7 @@ export default function Home() {
     }
   }
 
-  return lines.join(' ') || 'None of the chosen sources have anything to say about this outline. That is an answer too — it usually means open water, or outside the reach of the instruments.';
+  return lines.join(' ') || 'None of the chosen sources have anything to say about this outline.';
 }
 
 
@@ -2341,7 +2046,6 @@ export default function Home() {
         // An administrative id is stable, short, and is what another system
         // already holds -- so a link from globe or a colleague's bookmark
         // resolves rather than carrying a megabyte of coordinates.
-        ...(adminArea?.id ? { admin: adminArea.id, level: String(adminArea.level ?? 1) } : {}),
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
         // The window that was actually analysed, encoded as an end-date plus a
@@ -2419,19 +2123,27 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(data?.detail || 'Submission failed');
       }
+      const cacheKey: string | null = data.cache_key ?? null;
+      if (!cacheKey) throw new Error('The rainfall request returned no result key.');
+      setActiveCacheKey(cacheKey);
       setPlan(data.planned || null);
       setSubmission((previous) => ({
         ...previous,
-        [data.cache_key]: {
+        [cacheKey]: {
           state: data.submission?.state || 'pending',
           reason: data.submission?.reason,
-          cacheKey: data.cache_key,
+          cacheKey,
         },
       }));
       if (data.submission?.state === 'ready') {
+        // The series may already be cached even though this reading's summary
+        // was assembled before it existed (or for a different product). A ready
+        // submission does not start the poller, so refresh the canvas here too.
         setProgress(null);
+        void showComputedResult(cacheKey);
+        void loadVegetationSeries(cacheKey);
       } else {
-        void pollSubmission(data.cache_key, data.indicator || 'rainfall');
+        void pollSubmission(cacheKey, data.indicator || 'rainfall');
       }
     } catch (error) {
       reportError(error instanceof Error ? error.message : 'Submission failed');
@@ -2506,21 +2218,6 @@ export default function Home() {
       }
 
       const data = await response.json() as { summary?: Summary };
-      // The analysis block lives *inside* summary. Read at the top level it was
-      // always undefined, which is why the containing-unit offer never appeared
-      // -- found by driving the page rather than by reading the payload shape.
-      // Remember where this outline is, so "which administrative unit is this?"
-      // can be asked from the server's own figure rather than a second estimate
-      // of the same outline made in the browser.
-      const analysis = data.summary?.analysis;
-      const box = analysis?.bbox;
-      if (Array.isArray(box) && box.length === 4 && analysis?.bbox_area_km2 != null) {
-        setDrawnInfo({
-          areaKm2: analysis.bbox_area_km2,
-          lon: (Number(box[0]) + Number(box[2])) / 2,
-          lat: (Number(box[1]) + Number(box[3])) / 2,
-        });
-      }
       const summary = data.summary || {};
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
@@ -2540,6 +2237,15 @@ export default function Home() {
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
 
+  const rainfallSubmission = activeCacheKey ? submission[activeCacheKey] : undefined;
+  const rainfallPending = rainfallSubmission?.state === 'queued'
+    || rainfallSubmission?.state === 'pending'
+    || rainfallSubmission?.state === 'running'
+    || (progress?.indicator === 'rainfall'
+      && (progress.state === 'pending' || progress.state === 'running'));
+  const rainfallFailed = rainfallSubmission?.state === 'rejected'
+    || (progress?.indicator === 'rainfall' && progress.state === 'failed');
+
   return (
     <div className="min-h-screen bg-void text-ink">
       {/* The glow off the instrument. One radial in the signal hue, low enough
@@ -2549,8 +2255,8 @@ export default function Home() {
         className="pointer-events-none fixed inset-x-0 top-0 z-0 h-[560px]"
         style={{
           background:
-            'radial-gradient(1200px 460px at 16% -12%, rgba(185,232,75,0.11), transparent 62%),' +
-            'radial-gradient(900px 400px at 84% -16%, rgba(79,168,60,0.09), transparent 60%)',
+            'radial-gradient(1200px 460px at 16% -12%, rgba(135,158,225,0.13), transparent 62%),' +
+            'radial-gradient(900px 400px at 84% -16%, rgba(91,112,170,0.09), transparent 60%)',
         }}
       />
 
@@ -2594,7 +2300,7 @@ export default function Home() {
               far larger than anything else on the page, with the italic doing
               the work a second colour would otherwise do. */}
           <h1 className="display display-xl mt-7 max-w-[19ch]">
-            Point at a piece of land. <span className="mark">Get the truth about it.</span>
+            Land and climate data for any area
           </h1>
 
           <div
@@ -2602,15 +2308,11 @@ export default function Home() {
             className="mt-9 grid gap-10 border-t border-rule pt-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)] lg:gap-16"
           >
             <p className="max-w-[54ch] text-[1.0625rem] leading-relaxed text-ink-2">
-              Terrain, vegetation, rainfall and drought for any boundary you draw on
-              Earth — read from the same public sources a satellite report would
-              use, with the provenance attached to every number. No account, no
-              upload, no survey licence.
+              Explore terrain, vegetation, rainfall and drought for an area you
+              draw or upload. The figures come from public satellite and climate
+              data. No account needed.
             </p>
 
-            {/* The four modules, named before anyone has to discover them. A
-                stranger should know what the product does in under a second,
-                which is the only honest place to spend a first impression. */}
             <ul className="grid grid-cols-2 gap-x-6 gap-y-4 self-start">
               {SOURCES.map((source, index) => (
                 <li key={source.id} className="border-l border-rule pl-3.5">
@@ -2624,10 +2326,6 @@ export default function Home() {
             </ul>
           </div>
 
-          <div data-print-hide className="mt-10 flex items-center gap-4">
-            <div className="ramp w-40" aria-hidden />
-            <span className="label">the false-colour scale this reads</span>
-          </div>
         </section>
 
         {/* --------------------------------------------------------- workspace */}
@@ -2652,255 +2350,22 @@ export default function Home() {
             {/* ---------------------------------------------------- the rail */}
             <aside
               data-print-hide
-              className="rail lg:sticky lg:top-20 lg:max-h-[calc(100vh-6rem)] lg:overflow-y-auto"
+              className="rail self-start"
             >
               <div className="border-b border-rule px-5 py-4">
+                <p className="fig mb-1 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">01 · Area</p>
                 <h2 className="text-[0.9375rem] font-semibold tracking-[-0.01em]">
                   Choose your area
                 </h2>
                 <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">
-                  Name it, find a place, draw on the map, or bring your own
-                  boundary.
+                  Draw on the map, or upload a GeoJSON file.
                 </p>
-              </div>
-
-              {/* Naming an area leads. It is what a county planner, a
-                  conservancy manager and anyone with a boundary already knows
-                  their area by name actually types, and it was the third control
-                  in the rail behind a place search that only zooms -- so the one
-                  input that produces a ready-made boundary was the hardest to
-                  find. The four ways in are now ordered by how much work they save
-                  the reader. */}
-              <div className="px-5 pt-5">
-                <Label htmlFor="admin-area" className="label mb-2.5 block">
-                  Name your area
-                </Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="admin-area"
-                    type="text"
-                    placeholder="Narok, Isiolo, Meru…"
-                    value={adminQuery}
-                    onChange={(e) => setAdminQuery(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }}
-                  />
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={adminBusy || adminQuery.trim().length === 0}
-                    onClick={() => void resolveAdminArea()}
-                  >
-                    {adminBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Find'}
-                  </Button>
-                </div>
-                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
-                  A county, district or region. You get its exact boundary and
-                  the map moves to it.
-                </p>
-                {adminArea && (
-                  <p className="fig mt-2 text-xs text-ink-2">
-                    Using {adminArea.name}, administrative level {adminArea.level}.
-                    Its outline is the whole unit, not something you drew.
-                  </p>
-                )}
-              </div>
-
-              {/* The boundary browser. Country -> level -> unit, so a boundary is
-                  found by choosing from what exists rather than by typing a name
-                  you have to already know. Sits above the typed search, which is
-                  still there for the reader who knows the name. */}
-              <div className="rule-t px-5 py-5">
-                <Label className="label mb-2.5 block">Or pick a boundary</Label>
-
-                <div className="mb-3">
-                  <label htmlFor="browse-country" className="fig mb-1.5 block text-[0.75rem] text-ink-3">
-                    Country
-                  </label>
-                  <select
-                    id="browse-country"
-                    value={browseCountry}
-                    onChange={(event) => { setBrowseCountry(event.target.value); setBrowseFilter(''); }}
-                    className="fig h-9 w-full rounded-lg border border-rule bg-raised px-2.5 text-[0.8125rem] text-ink-2"
-                  >
-                    {browseCountries.length === 0 && <option value={browseCountry}>{browseCountry}</option>}
-                    {browseCountries.map((country) => (
-                      <option key={country} value={country}>{country}</option>
-                    ))}
-                    {browseBusy === 'countries' && <option value="">Loading…</option>}
-                  </select>
-                </div>
-
-                <div className="mb-3">
-                  <span className="fig mb-1.5 block text-[0.75rem] text-ink-3">Level</span>
-                  <div className="flex gap-1.5" role="group" aria-label="Administrative level">
-                    {([
-                      [0, 'Countries'],
-                      [1, 'Regions'],
-                      [2, 'Districts'],
-                    ] as const).map(([value, label]) => (
-                      <button
-                        key={value}
-                        type="button"
-                        aria-pressed={browseLevel === value}
-                        onClick={() => { setBrowseLevel(value); setBrowseFilter(''); }}
-                        className={`fig h-7 flex-1 rounded-lg border px-2 text-[0.75rem] transition-colors duration-200 ${
-                          browseLevel === value
-                            ? 'border-signal bg-signal/12 text-signal'
-                            : 'border-rule text-ink-3 hover:border-line-2 hover:text-ink-2'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="mb-2 relative">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ink-3" />
-                  <Input
-                    type="text"
-                    aria-label="Filter these boundaries"
-                    placeholder={`Filter ${browseLevel === 2 ? 'districts' : browseLevel === 1 ? 'regions' : 'countries'}…`}
-                    value={browseFilter}
-                    onChange={(event) => setBrowseFilter(event.target.value)}
-                    className="h-8 pl-9 text-[0.8125rem]"
-                  />
-                </div>
-
-                <div className="max-h-56 overflow-y-auto rounded-xl border border-rule">
-                  {browseBusy === 'units' && (
-                    <p className="fig px-3.5 py-3 text-[0.75rem] text-ink-3">Listing…</p>
-                  )}
-                  {browseBusy !== 'units' && browseUnits.length === 0 && (
-                    <p className="fig px-3.5 py-3 text-[0.75rem] text-ink-3">
-                      No {browseLevel === 2 ? 'districts' : 'regions'} of {browseCountry} match.
-                    </p>
-                  )}
-                  {browseUnits.map((unit) => {
-                    const name = String(unit.name ?? '');
-                    if (browseFilter.trim() && !name.toLowerCase().includes(browseFilter.trim().toLowerCase())) {
-                      return null;
-                    }
-                    const chosen = adminArea?.id === unit.id;
-                    return (
-                      <button
-                        key={unit.id}
-                        type="button"
-                        onClick={() => void adoptBoundary(unit, browseLevel)}
-                        className={`hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2 text-left last:border-b-0 ${
-                          chosen ? 'bg-signal/8' : ''
-                        }`}
-                      >
-                        <MapPin className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${chosen ? 'text-signal' : 'text-ink-3'}`} />
-                        <span className="text-[0.8125rem] leading-snug text-ink-2">
-                          {name}
-                          {unit.parent_name && (
-                            <span className="fig text-ink-3"> · {String(unit.parent_name)}</span>
-                          )}
-                        </span>
-                        {browseBusy === 'outline' && chosen && (
-                          <Loader2 className="ml-auto h-3.5 w-3.5 shrink-0 animate-spin text-ink-3" />
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-
-                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
-                  Choose one and its exact outline becomes the area you read. No
-                  drawing, no coordinates — the whole unit, as the boundary
-                  service holds it.
-                </p>
-                {browseError && (
-                  <p className="fig mt-2 text-[0.75rem] text-bare">{browseError}</p>
-                )}
-              </div>
-
-              {/* Search */}
-              <div className="rule-t px-5 py-5">
-                <Label htmlFor="place-search" className="label mb-2.5 block">
-                  Or find a place
-                </Label>
-                <div className="relative">
-                  <Search className="pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-3" />
-                  <Input
-                    id="place-search"
-                    type="text"
-                    placeholder="Nairobi, Kajiado, Mara North…"
-                    value={searchQuery}
-                    onChange={(e) => handleSearchChange(e.target.value)}
-                    className="pl-10 pr-10"
-                    onFocus={() => searchResults.length > 0 && setShowResults(true)}
-                  />
-                  {isSearching && (
-                    <Loader2 className="absolute right-3.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-ink-3" />
-                  )}
-                </div>
-
-                {showResults && searchResults.length > 0 && (
-                  <div className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
-                    {searchResults.map((result) => (
-                      <button
-                        key={result.place_id}
-                        type="button"
-                        onClick={() => handleLocationSelect(result)}
-                        className="hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2.5 text-left last:border-b-0"
-                      >
-                        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-signal-dim" />
-                        <span className="text-[0.8125rem] leading-snug text-ink-2">
-                          {result.display_name}
-                        </span>
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* The other direction. Having drawn something, it is worth knowing
-                  which administrative unit it sits in -- and worth being able to
-                  adopt that unit, because a conservancy's drought is a question
-                  about the whole unit rather than about the 60 km2 someone
-                  circled. Offered, never automatic: snapping replaces the outline
-                  the person drew. */}
-              <div className="rule-t px-5 py-5">
-                {drawnInfo && !adminArea && (
-                  <div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={containingBusy}
-                      onClick={() => void findContainingArea()}
-                    >
-                      {containingBusy
-                        ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        : 'Which unit is this in?'}
-                    </Button>
-                    {containingArea && (
-                      <div className="mt-2">
-                        <p className="fig text-xs text-ink-2">
-                          Your {formatNumber(drawnInfo.areaKm2, 0)} km² outline sits
-                          inside {containingArea.name}, which covers{' '}
-                          {formatNumber(containingArea.area_km2, 0)} km².
-                        </p>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="mt-1.5"
-                          disabled={containingBusy}
-                          onClick={() => void adoptContainingArea()}
-                        >
-                          Use the whole {containingArea.name} instead
-                        </Button>
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
 
               {/* Upload */}
-              <div className="rule-t px-5 py-5">
-                <Label htmlFor="geojson-upload" className="label mb-2.5 block">
-                  Or bring a boundary
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="geojson-upload" className="label mb-2 block">
+                  Or upload GeoJSON
                 </Label>
                 <input
                   id="geojson-upload"
@@ -2920,20 +2385,16 @@ export default function Home() {
                   <Upload className="h-4 w-4" />
                   Choose a .geojson
                 </label>
-                <p className="mt-2.5 text-[0.75rem] leading-relaxed text-ink-3">
-                  A <span className="fig">.geojson</span> Polygon, MultiPolygon or
-                  FeatureCollection, up to 4 MB. The server and the proxy were raised
-                  together, so a large conservancy boundary can be posted rather than
-                  refused at the door.
+                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                  Polygon or MultiPolygon, up to 4 MB.
                 </p>
               </div>
 
-              {/* Options */}
-              <div className="rule-t px-5 py-5">
-                <p className="label mb-4">Options</p>
+              <div className="rule-t px-5 py-4">
+                <p className="fig mb-3 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">02 · Time window</p>
 
                 <div className="space-y-5">
-                  <div>
+                  <div className="space-y-2">
                     {/* Dates first and presets second, because the dates are the
                         question. The preset row used to lead, which made "the 2019/20
                         drought" and "since the last rains" -- the ranger's and the NRT
@@ -2993,22 +2454,16 @@ export default function Home() {
                         The start date is after the end date, or the end date is in the future.
                       </p>
                     )}
-                    <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
-                      This window selects the vegetation period, and sets how finely
-                      precipitation is sampled. The rainfall record behind it is always
-                      the full monthly series — the charts below simply show the part
-                      of it you asked to see. Elevation and land cover have no time
-                      dimension, so no window changes them.
-                    </p>
                   </div>
 
-                  <div>
+                  <div className="border-t border-rule pt-4">
                     {/* Which precipitation product. Not a preference: they differ
                         in resolution, freshness and evidence class, and the reader
                         is told what choosing costs. */}
-                    <div className="mb-2.5 flex items-center gap-2">
+                    <p className="fig mb-2 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">03 · Rainfall</p>
+                    <div className="mb-2 flex items-center gap-2">
                       <Label htmlFor="rain-product" className="text-[0.8125rem] text-ink-2">
-                        Rainfall source
+                        Source
                       </Label>
                       <select
                         id="rain-product"
@@ -3022,11 +2477,14 @@ export default function Home() {
                     </div>
                     <p className="text-[0.75rem] leading-relaxed text-ink-3">
                       {rainProduct === 'chirps'
-                        ? 'CHIRPS is a satellite-and-gauge blend at 0.05°, so a small area is described by one 5.6 km cell rather than by a cell covering about 780 km². It is about five months fresher than ERA5. Measured against ERA5 here it reads 0–24% higher, the difference growing as the land gets drier.'
-                        : 'ERA5 is a reanalysis at 0.25°. It is modelled output, not a gauge reading, and below about 780 km² the figure is one grid cell rather than this outline. CHIRPS is finer, fresher and classified observed — switch above if your area is small.'}
+                        ? 'CHIRPS uses satellite and gauge data at about 5.6 km resolution.'
+                        : 'ERA5 is modelled rainfall at about 28 km resolution. Choose CHIRPS for more detail on smaller areas.'}
                     </p>
                   </div>
 
+                  <details className="border-t border-rule pt-4">
+                    <summary className="label cursor-pointer">More settings</summary>
+                    <div className="mt-4 space-y-5">
                   <div>
                     <div className="mb-2.5 flex items-center gap-2">
                       <Label htmlFor="vegetation-source" className="text-[0.8125rem] text-ink-2">
@@ -3051,7 +2509,7 @@ export default function Home() {
                   </div>
 
                   <div>
-                    <p className="label mb-2.5">Read</p>
+                    <p className="label mb-2.5">Data to include</p>
                     <div className="space-y-0.5">
                       {DATASET_OPTIONS.map((dataset) => (
                         <label
@@ -3088,10 +2546,12 @@ export default function Home() {
                       ))}
                     </div>
                   </div>
+                    </div>
+                  </details>
                 </div>
               </div>
 
-              <div className="rule-t px-5 py-5">
+              <div className="sticky bottom-0 z-20 border-t border-rule bg-surface/95 px-5 py-4 backdrop-blur">
                 <Button
                   onClick={handleAnalyze}
                   disabled={
@@ -3114,9 +2574,8 @@ export default function Home() {
                     </>
                   )}
                 </Button>
-                <p className="mt-2.5 text-center text-[0.75rem] text-ink-3">
-                  Nothing is stored against an account. The boundary is hashed into
-                  a key, and you can withdraw it whenever you like.
+                <p className="mt-2 text-center text-[0.75rem] text-ink-3">
+                  Choose an area and data, then start the read.
                 </p>
               </div>
             </aside>
@@ -3139,7 +2598,6 @@ export default function Home() {
 
                 <div className="relative">
                   <MapComponent
-                    selectedLocation={selectedLocation}
                     onBoundingBoxCreated={handleBoundingBoxCreated}
                     uploadedGeoJSON={uploadedGeojson}
                     onSaveFeatures={handleFeaturesChange}
@@ -3317,6 +2775,7 @@ export default function Home() {
                   ) : prose ? (
                     <>
                       <div className="max-w-[68ch] text-[1.0625rem] leading-relaxed text-ink-2">
+                        <h3 className="mb-2 text-sm font-semibold text-ink">Overview</h3>
                         {prose.split('\n').map((paragraph, index) => (
                           <p key={index} className="mb-3 last:mb-0">{paragraph}</p>
                         ))}
@@ -3325,7 +2784,7 @@ export default function Home() {
                       {analysisSummary && (
                         <div className="mt-8 border-t border-rule pt-7">
                           <div className="mb-6 flex flex-wrap items-baseline gap-x-5 gap-y-1.5">
-                            <h3 className="display display-md">Selected data</h3>
+                            <h3 className="text-2xl font-semibold tracking-tight text-ink">Selected data</h3>
                             {locationLabel(analysisSummary) && (
                               <span className="text-[0.9375rem] text-ink-2">
                                 {locationLabel(analysisSummary)}
@@ -3352,7 +2811,7 @@ export default function Home() {
                           )}
                           {analysisSummary.measures && analysisSummary.measures.length > 0 && (
                             <div className="mb-7">
-                              <h4 className="label mb-3">Measures</h4>
+                              <h4 className="mb-3 text-base font-semibold text-ink">Measures</h4>
                               <dl className="grid gap-3 sm:grid-cols-2">
                                 {analysisSummary.measures.map((m) => (
                                   <MeasureCard key={m.product} measure={m} />
@@ -3374,9 +2833,54 @@ export default function Home() {
                             summary={analysisSummary}
                             selectedDatasets={selectedDatasets}
                             submission={activeCacheKey ? submission[activeCacheKey] : undefined}
-                            onSubmitForRainfall={submitForPreprocessing}
                             vegetationSeries={vegetationSeries}
                           />
+                          <section className="mt-6 rounded-xl border border-rule bg-raised/55 p-4 sm:p-5">
+                            <h4 className="text-base font-semibold text-ink">Rainfall reading</h4>
+                            <p className="mt-1 max-w-[60ch] text-sm leading-relaxed text-ink-2">
+                              {analysisSummary.rainfall?.status === 'ok'
+                                ? 'Rainfall results are ready. Open the charts below to review the monthly totals and trends.'
+                                : 'Rainfall is processed separately for this area. Start the reading to add rainfall results and charts.'}
+                            </p>
+                            {analysisSummary.rainfall?.status === 'ok' ? (
+                              <a href="#rainfall-results" className="btn btn-ghost mt-4 h-10 px-4 text-sm font-semibold">
+                                View rainfall charts
+                              </a>
+                            ) : (
+                              <Button
+                                onClick={submitForPreprocessing}
+                                disabled={isLoading || rainfallPending}
+                                className="btn-primary mt-4 h-10 px-4 text-sm font-semibold"
+                              >
+                                {isLoading || rainfallPending
+                                  ? 'Rainfall reading in progress'
+                                  : rainfallFailed ? 'Try rainfall again' : 'Read rainfall for this area'}
+                              </Button>
+                            )}
+                          </section>
+                          {resultPhase === 'success' && (
+                            <div id="rainfall-results" className="mt-6 scroll-mt-24">
+                              <TimeSection
+                                rain={(analysisSummary.rainfall?.series ?? []) as RainPoint[]}
+                                vegetation={(vegetationSeries?.series ?? []) as VegPoint[]}
+                                windowStart={startDate}
+                                windowEnd={endDate}
+                                vegetationSource={vegetationSeries?.source}
+                                thinMonths={vegetationSeries?.thin_months}
+                                onBuildVegetation={
+                                  activeCacheKey
+                                    ? () => submitIndicator('vegetation_series')
+                                    : undefined
+                                }
+                                buildingVegetation={pendingIndicator === 'vegetation_series'}
+                                jobState={
+                                  progress?.indicator === 'vegetation_series' ? progress.state : null
+                                }
+                                jobMonths={progress?.months ?? null}
+                                vegetationNotice={vegetationSeries?.caveat ?? null}
+                              />
+                            </div>
+                          )}
                         </div>
                       )}
                     </>
@@ -3388,36 +2892,6 @@ export default function Home() {
             </div>
           </div>
 
-          {/* The time section sits after the grid, not inside it.
-
-              It used to be the third child of a two-column grid, so it
-              auto-placed into column one, row two: the 380px rail column,
-              directly beneath the sticky rail rather than below the dossier.
-              The charts were rendered down there at 380px wide, which is where
-              they looked like something hidden behind the controls. A comment
-              here claimed it was full width for several deploys; only the
-              structure was wrong. */}
-          {resultPhase === 'success' && analysisSummary && (
-            <TimeSection
-              rain={(analysisSummary.rainfall?.series ?? []) as RainPoint[]}
-              vegetation={(vegetationSeries?.series ?? []) as VegPoint[]}
-              windowStart={startDate}
-              windowEnd={endDate}
-              vegetationSource={vegetationSeries?.source}
-              thinMonths={vegetationSeries?.thin_months}
-              onBuildVegetation={
-                activeCacheKey
-                  ? () => submitIndicator('vegetation_series')
-                  : undefined
-              }
-              buildingVegetation={pendingIndicator === 'vegetation_series'}
-              jobState={
-                progress?.indicator === 'vegetation_series' ? progress.state : null
-              }
-              jobMonths={progress?.months ?? null}
-              vegetationNotice={vegetationSeries?.caveat ?? null}
-            />
-          )}
         </section>
       </main>
 
@@ -3430,7 +2904,7 @@ export default function Home() {
             NASADEM · ESA WorldCover · Sentinel-2 · ERA5
           </p>
           <p className="text-[0.75rem] text-ink-3">
-            Read, not estimated. Every figure keeps its provenance.
+            Data from NASADEM, ESA WorldCover, Sentinel-2 and ERA5.
           </p>
         </div>
       </footer>
