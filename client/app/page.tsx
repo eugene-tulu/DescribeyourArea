@@ -4,7 +4,7 @@ import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } fro
 import dynamic from 'next/dynamic';
 import {
   MapPin, Globe, Satellite, ArrowDown, Download,
-  Link2, Printer, Info, Upload, Share2, ChevronDown, Check, X,
+  Link2, Printer, Info, Upload, Share2, ChevronDown, Check, X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -16,6 +16,7 @@ import { Wordmark } from '@/components/Mark';
 import { useToast } from '@/hooks/use-toast';
 import { computeStartDate } from '@/lib/window';
 import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
+import { trackEvent } from '@/lib/analytics';
 
 
 // Dynamic imports to avoid SSR issues with Leaflet
@@ -1511,11 +1512,13 @@ export default function Home() {
 
   const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
     setBoundingBox(bbox);
+    if (bbox) trackEvent('area_selected', { source: 'map_bounds' });
     clearAnalysis();
   }, [clearAnalysis]);
 
   const handleFeaturesChange = useCallback((geojson: FeatureCollection) => {
     setDrawnFeatures(geojson);
+    trackEvent('area_selected', { source: 'drawn', feature_count: geojson.features.length });
     clearAnalysis();
   }, [clearAnalysis]);
 
@@ -1542,6 +1545,7 @@ export default function Home() {
           throw new Error('The file is not a GeoJSON object.');
         }
         setUploadedGeojson(parsed as GeoJsonObject);
+        trackEvent('area_selected', { source: 'geojson_upload' });
         toast({
           title: "Success",
           description: "GeoJSON file uploaded successfully.",
@@ -2017,6 +2021,7 @@ export default function Home() {
   }
 
   function download(filename: string, contents: string, type: string) {
+    trackEvent('result_exported', { format: type === 'text/csv' ? 'csv' : 'json' });
     // A data URL keeps this a single click with no round trip and no server
     // round trip to hold a file. The byte cap matters: a 195-month series is
     // small, but an unbounded summary is not something to base64 into a URL.
@@ -2147,7 +2152,6 @@ export default function Home() {
       }
     } catch (error) {
       reportError(error instanceof Error ? error.message : 'Submission failed');
-      setShowResults(true);
     } finally {
       setIsLoading(false);
     }
@@ -2165,6 +2169,11 @@ export default function Home() {
     }
 
     setIsLoading(true);
+    trackEvent('analysis_started', {
+      datasets: selectedDatasets,
+      sensor: selectedSensor,
+      period_unit: periodUnit,
+    });
     setResultPhase('searching');
     setResultError(null);
     setAnalysisWarnings([]);
@@ -2223,11 +2232,16 @@ export default function Home() {
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
       setAnalysisSummary(summary);
       setResultPhase('success');
+      trackEvent('analysis_completed', {
+        datasets: selectedDatasets,
+        result_modules: Object.keys(summary),
+      });
       const areaKey = (summary.rainfall as { cache_key?: string } | undefined)?.cache_key;
       setActiveCacheKey(areaKey ?? null);
       if (areaKey) void loadVegetationSeries(areaKey);
     } catch (err) {
       console.error(err);
+      trackEvent('analysis_failed', { datasets: selectedDatasets });
       reportError((err as Error).message);
     } finally {
       setIsLoading(false);
@@ -2645,12 +2659,13 @@ export default function Home() {
                         linkCopied={linkCopied}
                         onCopyLink={() => {
                           navigator.clipboard?.writeText(shareLink);
+                          trackEvent('share_link_copied');
                           setLinkCopied(true);
                           window.setTimeout(() => setLinkCopied(false), 2000);
                         }}
                         onCsv={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
                         onJson={() => download('analysis.json', exportJson(), 'application/json')}
-                        onPrint={() => window.print()}
+                        onPrint={() => { trackEvent('result_printed'); window.print(); }}
                         onRemove={activeCacheKey ? () => void forgetThisArea() : undefined}
                       />
                     </div>

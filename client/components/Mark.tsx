@@ -53,12 +53,14 @@ export function Mark({ size = 18, className }: { size?: number; className?: stri
 }
 
 /* Keep the wordmark in the same sans-serif as the interface. */
+import { Globe } from 'lucide-react';
+
 export function Wordmark({ className }: { className?: string }) {
   return (
-    <span className={`flex items-center gap-2.5 ${className ?? ''}`}>
-      <Mark size={16} />
-      <span className="text-[1.0625rem] font-semibold leading-none tracking-[-0.02em]">
-        GeoContextualize
+    <span className={`flex items-center gap-3 ${className ?? ''}`}>
+      <Globe aria-hidden="true" className="h-12 w-12 shrink-0 text-blue-400" />
+      <span className="text-4xl font-bold leading-none tracking-tight text-white">
+        Geo<span className="text-blue-400">Contextualize</span>
       </span>
     </span>
   );
