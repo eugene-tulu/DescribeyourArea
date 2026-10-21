@@ -1485,6 +1485,8 @@ export default function Home() {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [showResults, setShowResults] = useState(false);
+  const [placeBounds, setPlaceBounds] = useState<[[number, number], [number, number]] | null>(null);
+  const [placeSearching, setPlaceSearching] = useState(false);
   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
 
   // The copy target is derived from `summary` rather than mirrored from the
@@ -1529,15 +1531,18 @@ export default function Home() {
   const searchPlaces = async (query: string) => {
     if (query.length < 3) {
       setSearchResults([]);
+      setShowResults(false);
       return;
     }
 
     try {
+      setPlaceSearching(true);
       const response = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`
       );
+      if (!response.ok) throw new Error('Place search failed');
       const data = await response.json();
-      setSearchResults(data);
+      setSearchResults(Array.isArray(data) ? data : []);
       setShowResults(true);
     } catch (error) {
       console.error('Search error:', error);
@@ -1549,6 +1554,7 @@ export default function Home() {
           'Could not reach the search service. You can still draw the area on the map, or upload a GeoJSON file.',
       });
     } finally {
+      setPlaceSearching(false);
     }
   };
 
@@ -1606,43 +1612,35 @@ export default function Home() {
     }
   };
 
-  /** Resolve a place name to an administrative boundary and use it as the area. */
+  /** Resolve a country and administrative area through the GAUL name resolver. */
   const resolveAdminArea = async () => {
     const query = adminQuery.trim();
     if (!query) return;
     setAdminBusy(true);
     try {
-      // Free text. The server translates 'Narok' or 'Kenya, Narok' into the
-      // country-plus-area form the boundary service needs.
       const response = await fetch(`/api/areas/resolve?name=${encodeURIComponent(query)}`);
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
-        throw new Error(failure?.detail || `no administrative area named ${query}`);
+        throw new Error(failure?.detail || `No administrative area found for ${query}`);
       }
       const area = await response.json();
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
       setAdminQuery('');
-      // Say what kind of thing this is while the reader is still looking at the
-      // control that chose it. A county is about 780 km2 and needs the queue;
-      // a sub-county may not. Finding that out from a 100 km2 limit and an
-      // "offline" panel is a worse way to learn it than being told.
       const km2 = Math.round(area.area_km2 ?? 0);
-      const level = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
+      const levelName = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
         ?? `level ${area.level ?? '?'}`;
       toast({
-        title: `${area.name} — ${km2.toLocaleString()} km²`,
+        title: `${area.name} selected`,
         description: km2 > (syncLimitKm2 ?? 100)
-          ? `That is the whole ${level}, too large to read live, so it is read offline at a coarser resolution and you will be told which. The map has moved to it.`
-          : `A ${level}, small enough to read live. The map has moved to it.`,
+          ? `The full ${levelName} boundary covers ${km2.toLocaleString()} km² and will be read offline at a coarser resolution.`
+          : `The full ${levelName} boundary covers ${km2.toLocaleString()} km². The map has moved to it.`,
         duration: 9000,
       });
     } catch (error) {
       toast({
-        title: 'Could not resolve that area',
-        description: error instanceof Error
-          ? `${error.message} You can still draw it on the map or upload a file.`
-          : 'You can still draw it on the map or upload a file.',
+        title: 'Could not find that administrative area',
+        description: error instanceof Error ? error.message : 'Try a country and area, for example “Kenya, Nairobi”.',
         variant: 'destructive',
       });
     } finally {
@@ -1650,10 +1648,7 @@ export default function Home() {
     }
   };
 
-  /* --- the boundary browser -------------------------------------------------
-     Country -> level -> unit. Each rung is one request and the unit list is the
-     index, so the reader never has to know a spelling to find a boundary -- which
-     is the whole point over the typed search above it. */
+  /* --- place suggestions --------------------------------------------------- */
   const handleSearchChange = (value: string) => {
     setSearchQuery(value);
     if (searchTimeout.current) {
@@ -1668,6 +1663,15 @@ export default function Home() {
     setSearchQuery(result.display_name);
     setShowResults(false);
     setSearchResults([]);
+    const [south, north, west, east] = result.boundingbox.map(Number);
+    if ([south, north, west, east].every(Number.isFinite)) {
+      setPlaceBounds([[south, west], [north, east]]);
+    } else {
+      const lat = Number(result.lat), lon = Number(result.lon);
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        setPlaceBounds([[lat - 0.08, lon - 0.08], [lat + 0.08, lon + 0.08]]);
+      }
+    }
   };
 
   // Handle bounding box creation from map
@@ -2453,6 +2457,20 @@ export default function Home() {
   const rainfallFailed = rainfallSubmission?.state === 'rejected'
     || (progress?.indicator === 'rainfall' && progress.state === 'failed');
 
+  // A rainfall request can take long enough that its result is added well below
+  // the fold. Move the reader to the chart when that result first arrives.
+  const rainfallScrollKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeCacheKey || analysisSummary?.rainfall?.status !== 'ok'
+        || rainfallScrollKey.current === activeCacheKey) return;
+    rainfallScrollKey.current = activeCacheKey;
+    requestAnimationFrame(() => {
+      document.getElementById('rainfall-results')?.scrollIntoView({
+        behavior: 'smooth', block: 'start',
+      });
+    });
+  }, [activeCacheKey, analysisSummary?.rainfall?.status]);
+
   return (
     <div className="min-h-screen bg-void text-ink">
       {/* The glow off the instrument. One radial in the signal hue, low enough
@@ -2520,17 +2538,23 @@ export default function Home() {
               data. No account needed.
             </p>
 
-            <ul className="grid grid-cols-2 gap-x-6 gap-y-4 self-start">
-              {SOURCES.map((source, index) => (
-                <li key={source.id} className="border-l border-rule pl-3.5">
-                  <span className="fig text-[0.6875rem] text-ink-3">
-                    {String(index + 1).padStart(2, '0')}
-                  </span>
-                  <p className="mt-1 text-[0.8125rem] font-medium leading-tight">{source.label}</p>
-                  <p className="fig mt-0.5 text-[0.6875rem] text-ink-3">{source.role}</p>
-                </li>
-              ))}
-            </ul>
+            <ol className="grid gap-3 self-start sm:grid-cols-3">
+              <li className="border-l border-signal pl-3.5">
+                <span className="fig text-[0.6875rem] text-signal">01 · FIND</span>
+                <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Search a place</p>
+                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Type a town or landmark and choose a suggestion to zoom the map there.</p>
+              </li>
+              <li className="border-l border-rule pl-3.5">
+                <span className="fig text-[0.6875rem] text-ink-3">02 · SELECT</span>
+                <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Choose your boundary</p>
+                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Use an administrative area, draw an outline on the map, or upload a GeoJSON polygon.</p>
+              </li>
+              <li className="border-l border-rule pl-3.5">
+                <span className="fig text-[0.6875rem] text-ink-3">03 · READ</span>
+                <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Explore the results</p>
+                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Once an area is selected, choose the time period and read its land and climate data.</p>
+              </li>
+            </ol>
           </div>
 
         </section>
@@ -2565,40 +2589,67 @@ export default function Home() {
                   Choose your area
                 </h2>
                 <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">
-                  Draw on the map, or upload a GeoJSON file.
+                  Pick the whole administrative area or define your own outline.
                 </p>
-              </div>
-
-              {/* Name your area */}
-              <div className="rule-t px-5 py-4">
-                <Label htmlFor="admin-area" className="label mb-2 block">Name your area</Label>
-                <div className="flex gap-2">
-                  <Input id="admin-area" type="text" placeholder="Narok, Isiolo, Meru…" value={adminQuery} onChange={(e) => setAdminQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }} />
-                  <Button size="sm" variant="outline" disabled={adminBusy || adminQuery.trim().length === 0} onClick={() => void resolveAdminArea()}>Find</Button>
-                </div>
-                {adminArea && (
-                  <p className="fig mt-2 text-xs text-ink-2">
-                    Using {adminArea.name}, administrative level {adminArea.level}. Its outline is the whole unit, not something you drew.
-                  </p>
-                )}
               </div>
 
               {/* Find a place */}
               <div className="rule-t px-5 py-4">
-                <Label htmlFor="place-search" className="label mb-2 block">Or find a place</Label>
+                <Label htmlFor="place-search" className="label mb-2 block">Search the map</Label>
                 <div className="relative">
                   <Input id="place-search" type="text" placeholder="Nairobi, Kajiado, Mara North…" value={searchQuery} onChange={(e) => handleSearchChange(e.target.value)} />
                 </div>
+                <p className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Search a town or landmark to move the map. This finds a place to look at; choose an area below or draw its outline to select what to analyse.</p>
+                {placeSearching && <p className="mt-2 flex items-center gap-2 text-xs text-ink-3"><Loader2 className="h-3 w-3 animate-spin" />Searching places…</p>}
                 {showResults && searchResults.length > 0 && (
-                  <div className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
+                  <div role="listbox" aria-label="Place suggestions" className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
                     {searchResults.map((result) => (
-                      <button key={result.place_id} type="button" onClick={() => handleLocationSelect(result)} className="hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2.5 text-left last:border-b-0">
+                      <button role="option" aria-selected="false" key={result.place_id} type="button" onClick={() => handleLocationSelect(result)} className="hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2.5 text-left last:border-b-0">
                         <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-signal-dim" />
                         <span className="text-[0.8125rem] leading-snug text-ink-2">{result.display_name}</span>
                       </button>
                     ))}
                   </div>
                 )}
+              </div>
+
+              {/* Upload */}
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="geojson-upload" className="label mb-2 block">
+                  Upload a GeoJSON area
+                </Label>
+                <input
+                  id="geojson-upload"
+                  type="file"
+                  accept=".geojson,application/geo+json,application/json"
+                  onChange={handleGeojsonUpload}
+                  className="peer sr-only"
+                />
+                {/* The native file input renders an unstyleable "Choose File /
+                    No file chosen" pair. It is kept in the DOM for the label and
+                    for keyboard focus, and replaced by a control that can
+                    actually be designed. */}
+                <label
+                  htmlFor="geojson-upload"
+                  className="btn btn-ghost h-10 w-full cursor-pointer px-3.5 text-[0.8125rem] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-signal"
+                >
+                  <Upload className="h-4 w-4" />
+                  Choose a .geojson
+                </label>
+                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                  Upload a GeoJSON Polygon or MultiPolygon (up to 500 KB). It becomes the selected analysis area.
+                </p>
+              </div>
+
+              {/* Administrative boundary search */}
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="admin-area" className="label mb-2 block">Find an administrative area</Label>
+                <div className="flex gap-2">
+                  <Input id="admin-area" type="text" aria-describedby="admin-area-help" placeholder="Kenya, Nairobi" value={adminQuery} onChange={(event) => setAdminQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void resolveAdminArea(); }} />
+                  <Button size="sm" variant="outline" disabled={adminBusy || !adminQuery.trim()} onClick={() => void resolveAdminArea()}>{adminBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Find area'}</Button>
+                </div>
+                <p id="admin-area-help" className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Searches FAO GAUL first, then the live geoBoundaries open dataset if GAUL cannot resolve it. Enter the country first, then the area, for example <span className="text-ink-2">Kenya, Nairobi</span>.</p>
+                {adminArea && <p className="fig mt-2 text-xs text-ink-2">Using {adminArea.name}, administrative level {adminArea.level}. The full unit boundary is selected.</p>}
               </div>
 
               {/* Containing unit */}
@@ -2620,34 +2671,6 @@ export default function Home() {
                     )}
                   </div>
                 )}
-              </div>
-
-              {/* Upload */}
-              <div className="rule-t px-5 py-4">
-                <Label htmlFor="geojson-upload" className="label mb-2 block">
-                  Or upload GeoJSON
-                </Label>
-                <input
-                  id="geojson-upload"
-                  type="file"
-                  accept=".geojson,application/geo+json,application/json"
-                  onChange={handleGeojsonUpload}
-                  className="peer sr-only"
-                />
-                {/* The native file input renders an unstyleable "Choose File /
-                    No file chosen" pair. It is kept in the DOM for the label and
-                    for keyboard focus, and replaced by a control that can
-                    actually be designed. */}
-                <label
-                  htmlFor="geojson-upload"
-                  className="btn btn-ghost h-10 w-full cursor-pointer px-3.5 text-[0.8125rem] peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-signal"
-                >
-                  <Upload className="h-4 w-4" />
-                  Choose a .geojson
-                </label>
-                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
-                  Polygon or MultiPolygon, up to 4 MB.
-                </p>
               </div>
 
               <div className="rule-t px-5 py-4">
@@ -2865,6 +2888,7 @@ export default function Home() {
                     onBoundingBoxCreated={handleBoundingBoxCreated}
                     uploadedGeoJSON={uploadedGeojson}
                     onSaveFeatures={handleFeaturesChange}
+                    viewBounds={placeBounds}
                   />
                   {drawnFeatures && drawnFeatures.features.length > 0 && (
                     <button

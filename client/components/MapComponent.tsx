@@ -31,6 +31,7 @@ interface MapComponentProps {
   onBoundingBoxCreated: (bbox: BoundingBox | null) => void;
   uploadedGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
+  viewBounds?: [[number, number], [number, number]] | null;
 }
 
 /** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
@@ -85,6 +86,7 @@ function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Create
 
 function MapController({
   uploadedGeoJSON,
+  viewBounds,
   onBoundingBoxCreated,
   onSaveFeatures,
 }: MapComponentProps) {
@@ -181,6 +183,10 @@ function MapController({
   }, [uploadedGeoJSON, map]);
 
   useEffect(() => {
+    if (viewBounds) map.fitBounds(viewBounds, { padding: [36, 36], maxZoom: 13 });
+  }, [viewBounds, map]);
+
+  useEffect(() => {
     // Graticule lives in its own effect with no handler dependencies. It used to be
     // added in the draw-control effect, whose handlers change identity on every
     // parent render, so a fresh graticule was added and never removed.
@@ -267,6 +273,7 @@ export default function MapComponent({
   onBoundingBoxCreated,
   uploadedGeoJSON,
   onSaveFeatures,
+  viewBounds,
 }: MapComponentProps) {
   return (
     <div className="h-[440px] w-full relative sm:h-[540px] xl:h-[620px]">
@@ -293,6 +300,7 @@ export default function MapComponent({
 
         <MapController
           uploadedGeoJSON={uploadedGeoJSON}
+          viewBounds={viewBounds}
           onBoundingBoxCreated={onBoundingBoxCreated}
           onSaveFeatures={onSaveFeatures}
         />

@@ -37,10 +37,11 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-DEFAULT_BASE_URL = os.getenv("GAUL_API_URL", "http://gaul-api:8000")
-"""Default assumes a compose network. The droplet's copy is on loopback at
-127.0.0.1:8002 and nginx does not publish it, so the two deployments configure
-this differently -- which is why it is one setting rather than a constant."""
+DEFAULT_BASE_URL = os.getenv("GAUL_API_URL", "http://127.0.0.1:8002")
+"""Use the local service port when the backend runs directly on the host.
+Docker deployments set ``GAUL_API_URL`` to the boundary service's container
+name and port in docker-compose.yml. The service is intentionally not exposed
+through the public proxy."""
 
 
 class ResolverError(Exception):
@@ -159,6 +160,80 @@ class GaulResolver:
 
     def containing(self, lat: float, lon: float) -> dict:
         return self.get("containing", {"lat": lat, "lon": lon})
+
+
+class GeoBoundariesResolver:
+    """Small live fallback for name lookup using the geoBoundaries public API.
+
+    geoBoundaries publishes current per-country boundary metadata and GeoJSON,
+    rather than a text search endpoint. Fetch the country index and the selected
+    country's ADM0/ADM1 layer on demand; the API responses are intentionally not
+    persisted so callers see the current release.
+    """
+
+    name = "geoBoundaries"
+    base_url = "https://www.geoboundaries.org/api/current/gbOpen"
+
+    def get(self, path: str, params: dict) -> Any:
+        url = path
+        try:
+            with urllib.request.urlopen(url, timeout=20) as response:
+                return json.loads(response.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+            raise ResolverUnavailable(f"geoBoundaries did not answer ({exc})",
+                                      reason="unavailable") from exc
+
+    def by_name(self, country: str, level: int, admin1: Optional[str] = None,
+                admin2: Optional[str] = None, simplify: Optional[float] = None) -> dict:
+        # geoBoundaries uses ISO3 country codes and currently exposes ADM0–ADM2.
+        index = self.get(f"{self.base_url}/ALL/ADM0/", {})
+        countries = index if isinstance(index, list) else [index]
+        needle = country.strip().casefold()
+        meta = next((row for row in countries if needle in {
+            str(row.get("boundaryName", "")).casefold(),
+            str(row.get("boundaryISO", "")).casefold(),
+        }), None)
+        if not meta:
+            raise ResolverError(f"no country named {country!r}", reason="not_found")
+        iso = str(meta.get("boundaryISO", ""))
+        adm = min(max(int(level), 0), 2)
+        layer = self.get(f"{self.base_url}/{urllib.parse.quote(iso)}/ADM{adm}/", {})
+        gj_url = layer.get("gjDownloadURL") if isinstance(layer, dict) else None
+        if not gj_url:
+            raise ResolverError(f"no ADM{adm} boundaries for {country}", reason="not_found")
+        collection = self.get(str(gj_url), {})
+        requested = (admin2 or admin1 or "").strip().casefold()
+        features = collection.get("features") or []
+        if adm == 0:
+            matches = features[:1]
+        else:
+            matches = []
+            for feature in features:
+                props = feature.get("properties") or {}
+                names = [str(v).strip().casefold() for k, v in props.items()
+                         if "name" in str(k).casefold() and v]
+                if requested in names:
+                    matches.append(feature)
+        if not matches:
+            raise ResolverError(f"no administrative area named {requested!r} in {country}",
+                                reason="not_found")
+        if len(matches) > 1:
+            raise ResolverError(f"multiple areas named {requested!r} in {country}",
+                                reason="ambiguous")
+        feature = dict(matches[0])
+        props = dict(feature.get("properties") or {})
+        raw_name = next((v for k, v in props.items()
+                         if "name" in str(k).casefold() and v), country)
+        # Normalise the fields understood by the shared Area parser.
+        props["gaul0_name"] = country
+        if adm == 1:
+            props["gaul1_name"] = raw_name
+        elif adm == 2:
+            props["gaul2_name"] = raw_name
+        feature["properties"] = props
+        feature["id"] = str(props.get("shapeID") or props.get("shapeISO")
+                            or feature.get("id") or f"{iso}:ADM{adm}:{raw_name}")
+        return feature
 
 
 def resolve_by_name(resolver, query: str, *,

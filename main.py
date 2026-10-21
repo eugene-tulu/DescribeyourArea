@@ -2679,7 +2679,24 @@ async def resolve_study_area(
         # translator rather than being passed through and silently missing.
         if country is None and not (id or lat is not None or bbox
                                     or (admin1 and admin2)):
-            area = areas.resolve_by_name(resolver, name, simplify=simplify)
+            try:
+                area = areas.resolve_by_name(resolver, name, simplify=simplify)
+            except areas.ResolverError as gaul_error:
+                # GAUL remains the primary source. If its index/service cannot
+                # resolve a typed name, try the live geoBoundaries catalog.
+                parts = [part.strip() for part in (name or "").split(",") if part.strip()]
+                try:
+                    fallback = areas.GeoBoundariesResolver()
+                    if len(parts) > 1:
+                        feature = fallback.by_name(parts[0], 1, admin1=parts[1])
+                    else:
+                        feature = fallback.by_name(parts[0], 0)
+                    area = areas._area_from_feature(
+                        feature, source="name", resolver=fallback.name,
+                        notes=("Resolved from the live geoBoundaries open dataset; "
+                               "boundary currency and source vary by country.",))
+                except areas.ResolverUnavailable:
+                    raise gaul_error
         else:
             area = areas.resolve_area(
                 resolver, id=id, level=level, country=country,
