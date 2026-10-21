@@ -1419,7 +1419,7 @@ def _build_measures(dem, landcover, rainfall_context, requested_area_km2) -> lis
         window = rainfall_context.get("window", {})
         observed_through = window.get("end")
         if series:
-            total = round(sum(m.get("value", 0) for m in series), 1)
+            total = round(sum(m.get("precip_mm", m.get("value", 0)) for m in series), 1)
             measures.append(measure.Measure(
                 product_key=rainfall_context.get("product", "rainfall"),
                 value=total,

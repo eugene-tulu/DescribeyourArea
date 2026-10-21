@@ -567,7 +567,7 @@ function ReadingActions({
   onRemove,
   linkCopied,
 }: {
-  shareLink: string;
+  shareLink?: string;
   onCopyLink: () => void;
   onCsv: () => void;
   onJson: () => void;
@@ -617,10 +617,12 @@ function ReadingActions({
           className="fig absolute left-0 z-30 mt-2 w-64 overflow-hidden rounded-xl border border-rule bg-raised p-1.5 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.65)]"
         >
           <p className="label px-2.5 pb-1.5 pt-1 text-ink-3">Share this reading</p>
-          <button type="button" role="menuitem" className={item} onClick={onCopyLink}>
-            {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
-            {linkCopied ? 'Link copied' : 'Copy the link'}
-          </button>
+          {shareLink ? (
+            <button type="button" role="menuitem" className={item} onClick={onCopyLink}>
+              {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+              {linkCopied ? 'Link copied' : 'Copy the link'}
+            </button>
+          ) : null}
           <button type="button" role="menuitem" className={item} onClick={onCsv}>
             <Download className="h-3.5 w-3.5" />
             Download the series (CSV)
@@ -633,9 +635,11 @@ function ReadingActions({
             <Printer className="h-3.5 w-3.5" />
             Print, or save as PDF
           </button>
-          <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
-            {shareLink}
-          </code>
+          {shareLink ? (
+            <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
+              {shareLink}
+            </code>
+          ) : null}
           {onRemove && (
             <>
               <div className="mx-1 my-1 border-t border-rule" />
@@ -1190,9 +1194,16 @@ function DatasetResultCard({
             one row and can be six months apart; a reader deserves to see that
             without opening anything. */}
         <p className="fig mt-2 text-xs text-ink-2">
-          {rain.grid_cells != null
-            ? `${rain.grid_cells} ${(rain.product === 'chirps' ? 'CHIRPS' : 'ERA5')} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`
-            : `${rain.product === 'chirps' ? 'CHIRPS' : 'ERA5'} grid of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`}
+          {(() => {
+            const isChirps = rain.product === 'chirps'
+              || (rain.source || '').toLowerCase().includes('chirps')
+              || rain.resolution_km === 5.6;
+            const name = isChirps ? 'CHIRPS' : 'ERA5';
+            const res = rain.resolution_km ?? (isChirps ? 5.6 : 27.8);
+            return rain.grid_cells != null
+              ? `${rain.grid_cells} ${name} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${res} km`
+              : `${name} grid of ${res} km`;
+          })()}
           {(() => {
             // The month the data actually stops, not the end of the window that
             // was asked for. Reading window.end claimed a series ran to today
@@ -2933,7 +2944,7 @@ export default function Home() {
                       {shareLinkUnavailable}
                     </div>
                   )}
-                  {shareLink && (
+                  {currentGeojson() && (
                     <div data-print-hide className="mb-6 flex items-center gap-2">
                       <ReadingActions
                         shareLink={shareLink}
@@ -3162,7 +3173,10 @@ export default function Home() {
                                 windowStart={startDate}
                                 windowEnd={endDate}
                                 vegetationSource={vegetationSeries?.source}
-                                rainfallProduct={analysisSummary?.rainfall?.product}
+                                rainfallProduct={analysisSummary?.rainfall?.product
+                                  || ((analysisSummary?.rainfall?.source || '').toLowerCase().includes('chirps')
+                                      || analysisSummary?.rainfall?.resolution_km === 5.6
+                                    ? 'chirps' : 'rainfall')}
                                 thinMonths={vegetationSeries?.thin_months}
                                 onBuildVegetation={
                                   activeCacheKey
