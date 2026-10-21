@@ -3131,6 +3131,7 @@ export default function Home() {
                                 windowStart={startDate}
                                 windowEnd={endDate}
                                 vegetationSource={vegetationSeries?.source}
+                                rainfallProduct={analysisSummary?.rainfall?.product}
                                 thinMonths={vegetationSeries?.thin_months}
                                 onBuildVegetation={
                                   activeCacheKey

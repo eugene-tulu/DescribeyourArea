@@ -645,6 +645,7 @@ export default function TimeSection({
   windowStart,
   windowEnd,
   vegetationSource,
+  rainfallProduct,
   thinMonths,
   onBuildVegetation,
   buildingVegetation,
@@ -657,6 +658,7 @@ export default function TimeSection({
   windowStart: string;
   windowEnd: string;
   vegetationSource?: string | null;
+  rainfallProduct?: string | null;
   thinMonths?: string[];
   onBuildVegetation?: () => void;
   buildingVegetation?: boolean;
@@ -838,8 +840,8 @@ export default function TimeSection({
 
       <footer className="border-t border-rule px-6 py-4 sm:px-8">
         <p className="max-w-[76ch] text-[0.75rem] leading-relaxed text-ink-3">
-          Rainfall is ERA5, a reanalysis that assimilates observations rather than a
-          gauge reading. Vegetation is MODIS MOD13Q1 at 250 m. Co-variation between the
+          Rainfall is {rainfallProduct === 'chirps' ? 'CHIRPS, a satellite-and-gauge blend' : 'ERA5, a reanalysis that assimilates observations'},
+          rather than a gauge reading. Vegetation is MODIS MOD13Q1 at 250 m. Co-variation between the
           two is not attribution: vegetation responds to rain with a lag that varies by
           season, and water is not always the limiting factor in semi-arid rangeland.
         </p>
