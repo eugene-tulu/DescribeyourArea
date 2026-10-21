@@ -44,7 +44,7 @@ const SOURCES = [
   { id: 'nasadem', label: 'NASADEM', role: 'Elevation · 30 m' },
   { id: 'worldcover', label: 'ESA WorldCover', role: 'Land cover · 10 m' },
   { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
-  { id: 'era5', label: 'ERA5', role: 'Precipitation · monthly' },
+  { id: 'era5', label: 'ERA5 / CHIRPS', role: 'Precipitation · monthly' },
 ] as const;
 
 interface SearchResult {
@@ -3167,10 +3167,10 @@ export default function Home() {
       <footer className="relative z-10 mt-24 border-t border-rule">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4 px-5 py-8 sm:px-8">
           <p className="fig text-[0.75rem] text-ink-3">
-            NASADEM · ESA WorldCover · Sentinel-2 · ERA5
+            NASADEM · ESA WorldCover · Sentinel-2 · ERA5 / CHIRPS
           </p>
           <p className="text-[0.75rem] text-ink-3">
-            Data from NASADEM, ESA WorldCover, Sentinel-2 and ERA5.
+            Data from NASADEM, ESA WorldCover, Sentinel-2 and ERA5 or CHIRPS.
           </p>
         </div>
       </footer>
