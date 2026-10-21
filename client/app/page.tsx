@@ -268,6 +268,7 @@ interface RainfallResult {
   retrieved?: string | null;
   resolution_km?: number | null;
   grid_cells?: number | null;
+  product?: string | null;
   processing_version?: string | null;
   window?: { start?: string; end?: string } | null;
   climatology?: RainfallClimatology | null;
@@ -1190,8 +1191,8 @@ function DatasetResultCard({
             without opening anything. */}
         <p className="fig mt-2 text-xs text-ink-2">
           {rain.grid_cells != null
-            ? `${rain.grid_cells} ERA5 grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? 27.8} km`
-            : `ERA5 grid of ${rain.resolution_km ?? 27.8} km`}
+            ? `${rain.grid_cells} ${(rain.product === 'chirps' ? 'CHIRPS' : 'ERA5')} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`
+            : `${rain.product === 'chirps' ? 'CHIRPS' : 'ERA5'} grid of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`}
           {(() => {
             // The month the data actually stops, not the end of the window that
             // was asked for. Reading window.end claimed a series ran to today
