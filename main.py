@@ -2681,7 +2681,7 @@ async def resolve_study_area(
                                     or (admin1 and admin2)):
             try:
                 area = areas.resolve_by_name(resolver, name, simplify=simplify)
-            except areas.ResolverError as gaul_error:
+            except (areas.ResolverError, areas.ResolverUnavailable) as gaul_error:
                 # GAUL remains the primary source. If its index/service cannot
                 # resolve a typed name, try the live geoBoundaries catalog.
                 parts = [part.strip() for part in (name or "").split(",") if part.strip()]
