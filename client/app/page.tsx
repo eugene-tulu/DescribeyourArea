@@ -1633,14 +1633,16 @@ export default function Home() {
       toast({
         title: `${area.name} selected`,
         description: km2 > (syncLimitKm2 ?? 100)
-          ? `The full ${levelName} boundary covers ${km2.toLocaleString()} km² and will be read offline at a coarser resolution.`
+          ? `The full ${levelName} boundary covers ${km2.toLocaleString()} km², too large to read live, so it is read offline at a coarser resolution.`
           : `The full ${levelName} boundary covers ${km2.toLocaleString()} km². The map has moved to it.`,
         duration: 9000,
       });
     } catch (error) {
       toast({
-        title: 'Could not find that administrative area',
-        description: error instanceof Error ? error.message : 'Try a country and area, for example “Kenya, Nairobi”.',
+        title: 'Could not resolve that area',
+        description: error instanceof Error
+          ? `${error.message} You can still draw it on the map or upload a file.`
+          : 'You can still draw it on the map or upload a file.',
         variant: 'destructive',
       });
     } finally {
@@ -2471,6 +2473,11 @@ export default function Home() {
     });
   }, [activeCacheKey, analysisSummary?.rainfall?.status]);
 
+  // Keep a restored share-link area in the state the map and analysis read.
+  useEffect(() => {
+    if (uploadedGeojson) setUploadedGeojson(uploadedGeojson);
+  }, [uploadedGeojson]);
+
   return (
     <div className="min-h-screen bg-void text-ink">
       {/* The glow off the instrument. One radial in the signal hue, low enough
@@ -2593,6 +2600,17 @@ export default function Home() {
                 </p>
               </div>
 
+              {/* Administrative boundary search */}
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="admin-area" className="label mb-2 block">Find an administrative area</Label>
+                <div className="flex gap-2">
+                  <Input id="admin-area" type="text" aria-describedby="admin-area-help" placeholder="Kenya, Nairobi" value={adminQuery} onChange={(event) => setAdminQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void resolveAdminArea(); }} />
+                  <Button size="sm" variant="outline" disabled={adminBusy || !adminQuery.trim()} onClick={() => void resolveAdminArea()}>{adminBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Find area'}</Button>
+                </div>
+                <p id="admin-area-help" className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Searches FAO GAUL first, then the live geoBoundaries open dataset if GAUL cannot resolve it. Enter the country first, then the area, for example <span className="text-ink-2">Kenya, Nairobi</span>.</p>
+                {adminArea && <p className="fig mt-2 text-xs text-ink-2">Using {adminArea.name}, administrative level {adminArea.level}. Its outline is the whole unit, not something you drew.</p>}
+              </div>
+
               {/* Find a place */}
               <div className="rule-t px-5 py-4">
                 <Label htmlFor="place-search" className="label mb-2 block">Search the map</Label>
@@ -2639,17 +2657,6 @@ export default function Home() {
                 <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
                   Upload a GeoJSON Polygon or MultiPolygon (up to 500 KB). It becomes the selected analysis area.
                 </p>
-              </div>
-
-              {/* Administrative boundary search */}
-              <div className="rule-t px-5 py-4">
-                <Label htmlFor="admin-area" className="label mb-2 block">Find an administrative area</Label>
-                <div className="flex gap-2">
-                  <Input id="admin-area" type="text" aria-describedby="admin-area-help" placeholder="Kenya, Nairobi" value={adminQuery} onChange={(event) => setAdminQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void resolveAdminArea(); }} />
-                  <Button size="sm" variant="outline" disabled={adminBusy || !adminQuery.trim()} onClick={() => void resolveAdminArea()}>{adminBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Find area'}</Button>
-                </div>
-                <p id="admin-area-help" className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Searches FAO GAUL first, then the live geoBoundaries open dataset if GAUL cannot resolve it. Enter the country first, then the area, for example <span className="text-ink-2">Kenya, Nairobi</span>.</p>
-                {adminArea && <p className="fig mt-2 text-xs text-ink-2">Using {adminArea.name}, administrative level {adminArea.level}. The full unit boundary is selected.</p>}
               </div>
 
               {/* Containing unit */}
