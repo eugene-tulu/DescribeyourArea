@@ -3,10 +3,11 @@
 import { useState, useRef, useCallback, useEffect, useMemo, type ReactNode } from 'react';
 import dynamic from 'next/dynamic';
 import {
-  MapPin, Globe, Satellite, ArrowDown, Download,
+  MapPin, Loader2, Globe, Satellite, ArrowDown, Download,
   Link2, Printer, Info, Upload, Share2, ChevronDown, Check, X
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
@@ -45,6 +46,14 @@ const SOURCES = [
   { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
   { id: 'era5', label: 'ERA5', role: 'Precipitation · monthly' },
 ] as const;
+
+interface SearchResult {
+  place_id: number;
+  display_name: string;
+  lat: string;
+  lon: string;
+  boundingbox: [string, string, string, string];
+}
 
 interface BoundingBox {
   north: number;
@@ -1395,6 +1404,20 @@ export default function Home() {
   // ever decoded any of it, so a colleague opened a blank page.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
+    const adminId = params.get('admin');
+    if (adminId) {
+      void (async () => {
+        try {
+          const response = await fetch(
+            `/api/areas/resolve?id=${encodeURIComponent(adminId)}&level=${params.get('level') ?? '1'}`);
+          if (!response.ok) return;
+          const area = await response.json();
+          setUploadedGeojson(area.geometry as GeoJsonObject);
+          setAdminArea({ id: area.id ?? adminId, name: area.name ?? null, level: area.level ?? null });
+        } catch {
+        }
+      })();
+    }
     const area = params.get('area');
     if (!area) return;
     try {
@@ -1451,6 +1474,17 @@ export default function Home() {
   // real value, so prefer that and fall back to the documented default.
    const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
+  // An administrative boundary, named rather than drawn.
+  const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
+  const [adminQuery, setAdminQuery] = useState('');
+  const [adminBusy, setAdminBusy] = useState(false);
+  const [drawnInfo, setDrawnInfo] = useState<{ areaKm2: number; lon: number; lat: number } | null>(null);
+  const [containingArea, setContainingArea] = useState<{ name: string; level: number; id: string | null; area_km2: number } | null>(null);
+  const [containingBusy, setContainingBusy] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [showResults, setShowResults] = useState(false);
+  const searchTimeout = useRef<NodeJS.Timeout | null>(null);
 
   // The copy target is derived from `summary` rather than mirrored from the
   // prose string. `summaryText` used to track `response` in three places; one of
@@ -1489,6 +1523,151 @@ export default function Home() {
     }
     return parts.join('');
   })();
+
+  // Search for places using Nominatim
+  const searchPlaces = async (query: string) => {
+    if (query.length < 3) {
+      setSearchResults([]);
+      return;
+    }
+
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&addressdetails=1`
+      );
+      const data = await response.json();
+      setSearchResults(data);
+      setShowResults(true);
+    } catch (error) {
+      console.error('Search error:', error);
+      setSearchResults([]);
+      setShowResults(false);
+      toast({
+        title: 'Place search is unavailable',
+        description:
+          'Could not reach the search service. You can still draw the area on the map, or upload a GeoJSON file.',
+      });
+    } finally {
+    }
+  };
+
+  /** Ask the boundary service what this outline sits inside, and offer to use it. */
+  const findContainingArea = async () => {
+    if (!drawnInfo) return;
+    setContainingBusy(true);
+    try {
+      const response = await fetch(
+        `/api/areas/resolve?lat=${drawnInfo.lat}&lon=${drawnInfo.lon}`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || 'no administrative unit contains that point');
+      }
+      const area = await response.json();
+      setContainingArea({ name: area.name ?? 'that area', level: area.level ?? 0,
+                          id: area.id ?? null, area_km2: area.area_km2 ?? 0 });
+    } catch (error) {
+      setContainingArea(null);
+      toast({
+        title: 'Could not find a containing area',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setContainingBusy(false);
+    }
+  };
+
+  /** Adopt the containing unit, replacing the drawn outline with it. */
+  const adoptContainingArea = async () => {
+    if (!containingArea?.id) return;
+    setContainingBusy(true);
+    try {
+      const response = await fetch(
+        `/api/areas/resolve?id=${encodeURIComponent(containingArea.id)}&level=${containingArea.level}`);
+      if (!response.ok) throw new Error('could not fetch that boundary');
+      const area = await response.json();
+      setUploadedGeojson(area.geometry as GeoJsonObject);
+      setAdminArea({ id: area.id ?? containingArea.id, name: area.name ?? containingArea.name,
+                     level: area.level ?? containingArea.level });
+      setContainingArea(null);
+      toast({
+        title: 'Area replaced',
+        description: `Now using ${area.name}. Its outline is the whole administrative unit, which covers ${Math.round(area.area_km2).toLocaleString()} km² rather than the ${Math.round(drawnInfo!.areaKm2).toLocaleString()} km² you drew.`,
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not use that area',
+        description: error instanceof Error ? error.message : 'Unknown error',
+        variant: 'destructive',
+      });
+    } finally {
+      setContainingBusy(false);
+    }
+  };
+
+  /** Resolve a place name to an administrative boundary and use it as the area. */
+  const resolveAdminArea = async () => {
+    const query = adminQuery.trim();
+    if (!query) return;
+    setAdminBusy(true);
+    try {
+      // Free text. The server translates 'Narok' or 'Kenya, Narok' into the
+      // country-plus-area form the boundary service needs.
+      const response = await fetch(`/api/areas/resolve?name=${encodeURIComponent(query)}`);
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(failure?.detail || `no administrative area named ${query}`);
+      }
+      const area = await response.json();
+      setUploadedGeojson(area.geometry as GeoJsonObject);
+      setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
+      setAdminQuery('');
+      // Say what kind of thing this is while the reader is still looking at the
+      // control that chose it. A county is about 780 km2 and needs the queue;
+      // a sub-county may not. Finding that out from a 100 km2 limit and an
+      // "offline" panel is a worse way to learn it than being told.
+      const km2 = Math.round(area.area_km2 ?? 0);
+      const level = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
+        ?? `level ${area.level ?? '?'}`;
+      toast({
+        title: `${area.name} — ${km2.toLocaleString()} km²`,
+        description: km2 > (syncLimitKm2 ?? 100)
+          ? `That is the whole ${level}, too large to read live, so it is read offline at a coarser resolution and you will be told which. The map has moved to it.`
+          : `A ${level}, small enough to read live. The map has moved to it.`,
+        duration: 9000,
+      });
+    } catch (error) {
+      toast({
+        title: 'Could not resolve that area',
+        description: error instanceof Error
+          ? `${error.message} You can still draw it on the map or upload a file.`
+          : 'You can still draw it on the map or upload a file.',
+        variant: 'destructive',
+      });
+    } finally {
+      setAdminBusy(false);
+    }
+  };
+
+  /* --- the boundary browser -------------------------------------------------
+     Country -> level -> unit. Each rung is one request and the unit list is the
+     index, so the reader never has to know a spelling to find a boundary -- which
+     is the whole point over the typed search above it. */
+  const handleSearchChange = (value: string) => {
+    setSearchQuery(value);
+    if (searchTimeout.current) {
+      clearTimeout(searchTimeout.current);
+    }
+    searchTimeout.current = setTimeout(() => {
+      searchPlaces(value);
+    }, 300);
+  };
+
+  const handleLocationSelect = (result: SearchResult) => {
+    setSearchQuery(result.display_name);
+    setShowResults(false);
+    setSearchResults([]);
+  };
 
   // Handle bounding box creation from map
   // Stable identity: the map's draw-control effect depends on these, and a new
@@ -2053,6 +2232,10 @@ export default function Home() {
         // resolves rather than carrying a megabyte of coordinates.
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
+        // An administrative id is stable, short, and is what another system
+        // already holds -- so a link from globe or a colleague's bookmark
+        // resolves rather than carrying a megabyte of coordinates.
+        ...(adminArea?.id ? { admin: adminArea.id, level: String(adminArea.level ?? 1) } : {}),
         // The window that was actually analysed, encoded as an end-date plus a
         // lookback (and a custom start, when one was set) so a shared link
         // reproduces the thing itself, not a preset the sender may no longer
@@ -2227,6 +2410,15 @@ export default function Home() {
       }
 
       const data = await response.json() as { summary?: Summary };
+      const analysis = data.summary?.analysis;
+      const box = analysis?.bbox;
+      if (Array.isArray(box) && box.length === 4 && analysis?.bbox_area_km2 != null) {
+        setDrawnInfo({
+          areaKm2: analysis.bbox_area_km2,
+          lon: (Number(box[0]) + Number(box[2])) / 2,
+          lat: (Number(box[1]) + Number(box[3])) / 2,
+        });
+      }
       const summary = data.summary || {};
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
@@ -2376,6 +2568,59 @@ export default function Home() {
                 </p>
               </div>
 
+              {/* Name your area */}
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="admin-area" className="label mb-2 block">Name your area</Label>
+                <div className="flex gap-2">
+                  <Input id="admin-area" type="text" placeholder="Narok, Isiolo, Meru…" value={adminQuery} onChange={(e) => setAdminQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') void resolveAdminArea(); }} />
+                  <Button size="sm" variant="outline" disabled={adminBusy || adminQuery.trim().length === 0} onClick={() => void resolveAdminArea()}>Find</Button>
+                </div>
+                {adminArea && (
+                  <p className="fig mt-2 text-xs text-ink-2">
+                    Using {adminArea.name}, administrative level {adminArea.level}. Its outline is the whole unit, not something you drew.
+                  </p>
+                )}
+              </div>
+
+              {/* Find a place */}
+              <div className="rule-t px-5 py-4">
+                <Label htmlFor="place-search" className="label mb-2 block">Or find a place</Label>
+                <div className="relative">
+                  <Input id="place-search" type="text" placeholder="Nairobi, Kajiado, Mara North…" value={searchQuery} onChange={(e) => handleSearchChange(e.target.value)} />
+                </div>
+                {showResults && searchResults.length > 0 && (
+                  <div className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
+                    {searchResults.map((result) => (
+                      <button key={result.place_id} type="button" onClick={() => handleLocationSelect(result)} className="hoverline flex w-full items-start gap-2.5 border-b border-rule/60 px-3.5 py-2.5 text-left last:border-b-0">
+                        <MapPin className="mt-0.5 h-3.5 w-3.5 shrink-0 text-signal-dim" />
+                        <span className="text-[0.8125rem] leading-snug text-ink-2">{result.display_name}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Containing unit */}
+              <div className="rule-t px-5 py-4">
+                {drawnInfo && !adminArea && (
+                  <div>
+                    <Button size="sm" variant="outline" disabled={containingBusy} onClick={() => void findContainingArea()}>
+                      {containingBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : 'Which unit is this in?'}
+                    </Button>
+                    {containingArea && (
+                      <div className="mt-2">
+                        <p className="fig text-xs text-ink-2">
+                          Your {drawnInfo.areaKm2} km² outline sits inside {containingArea.name}, which covers {containingArea.area_km2} km².
+                        </p>
+                        <Button size="sm" variant="ghost" className="mt-1.5" disabled={containingBusy} onClick={() => void adoptContainingArea()}>
+                          Use the whole {containingArea.name} instead
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
               {/* Upload */}
               <div className="rule-t px-5 py-4">
                 <Label htmlFor="geojson-upload" className="label mb-2 block">
@@ -2470,6 +2715,10 @@ export default function Home() {
                     )}
                   </div>
 
+                  <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                    This window selects the vegetation period, and sets how finely precipitation is sampled. The rainfall record behind it is always the full monthly series — the charts below simply show the part of it you asked to see. Elevation and land cover have no time dimension, so no window changes them.
+                  </p>
+
                   <div className="border-t border-rule pt-4">
                     {/* Which precipitation product. Not a preference: they differ
                         in resolution, freshness and evidence class, and the reader
@@ -2491,8 +2740,8 @@ export default function Home() {
                     </div>
                     <p className="text-[0.75rem] leading-relaxed text-ink-3">
                       {rainProduct === 'chirps'
-                        ? 'CHIRPS uses satellite and gauge data at about 5.6 km resolution.'
-                        : 'ERA5 is modelled rainfall at about 28 km resolution. Choose CHIRPS for more detail on smaller areas.'}
+                        ? 'CHIRPS is a satellite-and-gauge blend at 0.05°, so a small area is described by one 5.6 km cell rather than by a cell covering about 780 km². It is about five months fresher than ERA5. Measured against ERA5 here it reads 0–24% higher, the difference growing as the land gets drier.'
+                        : 'ERA5 is a reanalysis at 0.25°. It is modelled output, not a gauge reading, and below about 780 km² the figure is one grid cell rather than this outline. CHIRPS is finer, fresher and classified observed — switch above if your area is small.'}
                     </p>
                   </div>
 
