@@ -51,9 +51,9 @@ function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, n
   };
   const collect = (g: unknown): void => {
     if (!g || typeof g !== "object") return;
-    const geo = g as { type?: string; coordinates?: unknown; geometries?: unknown[] };
-    if (geo.type === "FeatureCollection" && Array.isArray(geo.geometries)) {
-      geo.geometries.forEach(collect);
+    const geo = g as { type?: string; coordinates?: unknown; geometries?: unknown[]; features?: unknown[] };
+    if (geo.type === "FeatureCollection" && Array.isArray(geo.features)) {
+      geo.features.forEach(collect);
       return;
     }
     const geometry = (g as { geometry?: unknown }).geometry;

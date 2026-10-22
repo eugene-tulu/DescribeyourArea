@@ -1721,6 +1721,7 @@ export default function Home() {
 
   // Handle file upload
   const handleGeojsonUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -1735,23 +1736,33 @@ export default function Home() {
     }
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (!parsed || typeof parsed !== 'object' || !('type' in parsed)) {
           throw new Error('The file is not a GeoJSON object.');
         }
-        setUploadedGeojson(parsed as GeoJsonObject);
+        const response = await fetch(`${backendUrl}/areas/canonicalize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ geojson: parsed }),
+        });
+        if (!response.ok) {
+          const failure = await response.json().catch(() => null);
+          throw new Error(failure?.detail || 'The file could not be read as WGS84.');
+        }
+        const canonical = await response.json();
+        setUploadedGeojson((canonical?.geometry ?? canonical) as GeoJsonObject);
         trackEvent('area_selected', { source: 'geojson_upload' });
         toast({
           title: "Success",
-          description: "GeoJSON file uploaded successfully.",
+          description: "GeoJSON file uploaded and reprojected to WGS84 where needed.",
         });
       } catch (err) {
         console.error("Invalid GeoJSON file", err);
         toast({
           title: "Error",
-          description: "Invalid GeoJSON file. Please check the file format.",
+          description: err instanceof Error ? err.message : 'Invalid GeoJSON file. Please check the file format and CRS.',
           variant: "destructive",
         });
       }
