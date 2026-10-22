@@ -87,7 +87,6 @@ function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Create
 
 function MapController({
   uploadedGeoJSON,
-  secondaryGeoJSON,
   viewBounds,
   onBoundingBoxCreated,
   onSaveFeatures,
@@ -303,7 +302,6 @@ export default function MapComponent({
 
         <MapController
           uploadedGeoJSON={uploadedGeoJSON}
-          secondaryGeoJSON={secondaryGeoJSON}
           viewBounds={viewBounds}
           onBoundingBoxCreated={onBoundingBoxCreated}
           onSaveFeatures={onSaveFeatures}

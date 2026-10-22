@@ -1204,14 +1204,12 @@ function DatasetResultCard({
             without opening anything. */}
         <p className="fig mt-2 text-xs text-ink-2">
           {(() => {
-            const isChirps = rain.product === 'chirps'
-              || (rain.source || '').toLowerCase().includes('chirps')
-              || rain.resolution_km === 5.6;
+            const isChirps = rain.product === 'chirps' || (rain.source || '').toLowerCase().includes('chirps');
             const name = isChirps ? 'CHIRPS' : 'ERA5';
             const res = rain.resolution_km ?? (isChirps ? 5.6 : 27.8);
             return rain.grid_cells != null
-              ? `${rain.grid_cells} ${name} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${res} km`
-              : `${name} grid of ${res} km`;
+              ? `${rain.grid_cells} ${name} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? res} km`
+              : `${name} grid of ${rain.resolution_km ?? res} km`;
           })()}
           {(() => {
             // The month the data actually stops, not the end of the window that
@@ -2506,8 +2504,14 @@ export default function Home() {
   useEffect(() => {
     if (prevRainProduct.current !== rainProduct && (uploadedGeojson || drawnFeatures || boundingBox)) {
       prevRainProduct.current = rainProduct;
+      // A product change is a new reading: drop the previous rainfall result so
+      // its series, source and copy cannot leak into the new one.
+      setAnalysisSummary(null);
+      setActiveCacheKey(null);
+      setOffline(null);
       void handleAnalyze();
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rainProduct]);
 
   // Keep the poller's view of the analysis current.
@@ -3252,10 +3256,7 @@ export default function Home() {
                                 windowStart={startDate}
                                 windowEnd={endDate}
                                 vegetationSource={vegetationSeries?.source}
-                                rainfallProduct={analysisSummary?.rainfall?.product
-                                  || ((analysisSummary?.rainfall?.source || '').toLowerCase().includes('chirps')
-                                      || analysisSummary?.rainfall?.resolution_km === 5.6
-                                    ? 'chirps' : 'rainfall')}
+                                rainfallProduct={rainProduct}
                                 thinMonths={vegetationSeries?.thin_months}
                                 onBuildVegetation={
                                   activeCacheKey
