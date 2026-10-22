@@ -848,6 +848,7 @@ def compute_series(
     end: Optional[str] = None,
     source=None,
     label: Optional[str] = None,
+    product: Optional[str] = None,
 ) -> dict:
     """Compute the monthly series, climatology and anomaly for a study area.
 
@@ -948,17 +949,28 @@ def compute_series(
     annual_normal = sum(climatology.values()) if climatology else None
     _assert_plausible(annual_normal, cells)
 
+    if product is None:
+        if source is None or isinstance(source, UnionReader):
+            product = "rainfall"
+        elif getattr(source, "__name__", "") == "chirps_cell_monthly":
+            product = "chirps"
+        elif "chirps" in str(source).lower():
+            product = "chirps"
+        else:
+            product = "rainfall"
+    product = (product or "rainfall").strip().lower()
+
     # The product's own grid. Hard-coding ERA5's had a CHIRPS series reporting
     # 27.8 km and 0.25 degrees -- a grid it was never read at, printed beside a
     # value that came from somewhere else.
-    source_degrees = (CHIRPS_NATIVE_GRID_DEGREES if source is not None
-                      else ERA5_GRID_DEGREES)
+    is_chirps = product == "chirps"
+    source_degrees = (CHIRPS_NATIVE_GRID_DEGREES if is_chirps else ERA5_GRID_DEGREES)
 
     # The product's own provenance, chosen the same way as the grid above
     # (``source is not None`` means a CHIRPS reader was resolved from the name).
     # Stamping ERA5's source/DOI/citation on a CHIRPS payload is a correct number
     # wearing the wrong provenance, which is the failure this project avoids.
-    if source is not None:
+    if is_chirps:
         product_source, product_doi = CHIRPS_SOURCE, CHIRPS_DOI
         product_citation, product_license = CHIRPS_CITATION, "CC-BY 4.0"
     else:
@@ -979,7 +991,7 @@ def compute_series(
         "bbox": bbox,
         "resolution_degrees": source_degrees,
         "resolution_km": round(source_degrees * 111.32, 1),
-        "product": "chirps" if source is not None else "rainfall",
+        "product": product,
         "grid_cells": cells,
         # Months the archive does not have, excluded rather than filled. A series
         # shorter than the window asked for is otherwise indistinguishable from a
@@ -1033,7 +1045,7 @@ def build_and_cache(
         # stored it under a CHIRPS key: right product name, wrong raster, and a
         # reader shown a 0.25 degree value described as 0.05.
         source = reader_for(product)
-    payload = compute_series(geojson_geom, start=start, source=source, label=label, **kwargs)
+    payload = compute_series(geojson_geom, start=start, source=source, label=label, product=product, **kwargs)
     payload["product"] = product
     write_cache(key, payload, product)
     if upload:
