@@ -2787,7 +2787,10 @@ export default function Home() {
                       <select
                         id="rain-product"
                         value={rainProduct}
-                        onChange={(e) => setRainProduct(e.target.value as 'rainfall' | 'chirps')}
+                        onChange={(e) => {
+                          setRainProduct(e.target.value as 'rainfall' | 'chirps');
+                          window.setTimeout(() => { void handleAnalyze(); }, 0);
+                        }}
                         className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
                       >
                         <option value="rainfall">ERA5 · 28 km · modelled</option>
