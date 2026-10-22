@@ -2770,7 +2770,8 @@ async def resolve_study_area(
 @app.get("/context")
 async def context_for_key(cache_key: str, indicators: Optional[str] = None,
                           window_start: Optional[str] = None,
-                          window_end: Optional[str] = None):
+                          window_end: Optional[str] = None,
+                          product: Optional[str] = None):
     """A completed area's reading, assembled from the artefacts the worker wrote.
 
     `/generate-context` computes, and refuses anything past the synchronous cap --
@@ -2805,7 +2806,7 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             # or nothing at all: a completed CHIRPS read came back "nothing has
             # been computed yet". Read the product the job recorded; a later
             # product submission is the one honoured (see jobs._job_product).
-            product = jobs._job_product(key) or "rainfall"
+            product = (product or jobs._job_product(key) or "rainfall").strip().lower()
             context = _rainfall_by_key(key, product,
                                        window_start=window_start,
                                        window_end=window_end)

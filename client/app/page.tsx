@@ -2009,7 +2009,7 @@ export default function Home() {
       for (let attempt = 0; attempt < 3; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
-          `&window_start=${startDate}&window_end=${endDate}`);
+          `&window_start=${startDate}&window_end=${endDate}&product=${rainProduct}`);
         if (response.ok || !retryable(response.status)) break;
         if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
       }
