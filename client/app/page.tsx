@@ -1203,9 +1203,16 @@ function DatasetResultCard({
             one row and can be six months apart; a reader deserves to see that
             without opening anything. */}
         <p className="fig mt-2 text-xs text-ink-2">
-          {rain.grid_cells != null
-            ? `${rain.grid_cells} ${(rain.product === 'chirps' ? 'CHIRPS' : 'ERA5')} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`
-            : `${rain.product === 'chirps' ? 'CHIRPS' : 'ERA5'} grid of ${rain.resolution_km ?? (rain.product === 'chirps' ? 5.6 : 27.8)} km`}
+          {(() => {
+            const isChirps = rain.product === 'chirps'
+              || (rain.source || '').toLowerCase().includes('chirps')
+              || rain.resolution_km === 5.6;
+            const name = isChirps ? 'CHIRPS' : 'ERA5';
+            const res = rain.resolution_km ?? (isChirps ? 5.6 : 27.8);
+            return rain.grid_cells != null
+              ? `${rain.grid_cells} ${name} grid cell${rain.grid_cells === 1 ? '' : 's'} of ${res} km`
+              : `${name} grid of ${res} km`;
+          })()}
           {(() => {
             // The month the data actually stops, not the end of the window that
             // was asked for. Reading window.end claimed a series ran to today
@@ -1490,6 +1497,7 @@ export default function Home() {
   // real value, so prefer that and fall back to the documented default.
    const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
+   const [secondaryGeojson, setSecondaryGeojson] = useState<GeoJsonObject | null>(null);
   // An administrative boundary, named rather than drawn.
   const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
   const [adminQuery, setAdminQuery] = useState('');
@@ -1639,6 +1647,7 @@ export default function Home() {
         throw new Error(failure?.detail || `No administrative area found for ${query}`);
       }
       const area = await response.json();
+      setSecondaryGeojson(uploadedGeojson);
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
       setAdminQuery('');
@@ -1725,6 +1734,7 @@ export default function Home() {
 
   // Handle file upload
   const handleGeojsonUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -1739,23 +1749,34 @@ export default function Home() {
     }
 
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = async (event) => {
       try {
         const parsed = JSON.parse(event.target?.result as string);
         if (!parsed || typeof parsed !== 'object' || !('type' in parsed)) {
           throw new Error('The file is not a GeoJSON object.');
         }
-        setUploadedGeojson(parsed as GeoJsonObject);
+        const response = await fetch(`${backendUrl}/areas/canonicalize`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ geojson: parsed }),
+        });
+        if (!response.ok) {
+          const failure = await response.json().catch(() => null);
+          throw new Error(failure?.detail || 'The file could not be read as WGS84.');
+        }
+        const canonical = await response.json();
+        setSecondaryGeojson(uploadedGeojson);
+        setUploadedGeojson((canonical?.geometry ?? canonical) as GeoJsonObject);
         trackEvent('area_selected', { source: 'geojson_upload' });
         toast({
           title: "Success",
-          description: "GeoJSON file uploaded successfully.",
+          description: "GeoJSON file uploaded and reprojected to WGS84 where needed.",
         });
       } catch (err) {
         console.error("Invalid GeoJSON file", err);
         toast({
           title: "Error",
-          description: "Invalid GeoJSON file. Please check the file format.",
+          description: err instanceof Error ? err.message : 'Invalid GeoJSON file. Please check the file format and CRS.',
           variant: "destructive",
         });
       }
@@ -1998,12 +2019,17 @@ export default function Home() {
       // read as terminal sent a reader an error over a finished reading.
       const retryable = (status: number) => status >= 500 || status === 429;
       let response: Response | null = null;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
-          `&window_start=${startDate}&window_end=${endDate}`);
+          `&window_start=${startDate}&window_end=${endDate}&product=${rainProduct}`);
         if (response.ok || !retryable(response.status)) break;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+        if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+      if (response?.status === 404) {
+        // The artefacts are not all written yet. This is expected while a queued
+        // run is still in progress, so keep the current reading and try again later.
+        return;
       }
       if (!response || !response.ok) {
         const failure = await response?.json().catch(() => null);
@@ -2044,9 +2070,19 @@ export default function Home() {
         };
         const measures = new Map<string, MeasureSummary>();
         for (const measure of previous.measures ?? []) {
+          // A new rainfall reading replaces the old one, even when the product
+          // changes (ERA5 vs CHIRPS). Otherwise both stay on screen and the
+          // overview keeps showing the previous product's headline number.
+          if (measure.product === 'rainfall' || measure.product === 'chirps') continue;
           measures.set(measure.product, measure);
         }
         for (const measure of summary.measures ?? []) {
+          if (measure.product === 'rainfall' || measure.product === 'chirps') {
+            // drop any previous rainfall measure before adding the new one
+            for (const key of [...measures.keys()]) {
+              if (key === 'rainfall' || key === 'chirps') measures.delete(key);
+            }
+          }
           measures.set(measure.product, measure);
         }
         merged.measures = [...measures.values()];
@@ -2464,6 +2500,13 @@ export default function Home() {
       setIsLoading(false);
     }
   };
+  const prevRainProduct = useRef(rainProduct);
+  useEffect(() => {
+    if (prevRainProduct.current !== rainProduct && (uploadedGeojson || drawnFeatures || boundingBox)) {
+      prevRainProduct.current = rainProduct;
+      void handleAnalyze();
+    }
+  }, [rainProduct]);
 
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
@@ -2932,6 +2975,7 @@ export default function Home() {
                   <MapComponent
                     onBoundingBoxCreated={handleBoundingBoxCreated}
                     uploadedGeoJSON={uploadedGeojson}
+                    secondaryGeoJSON={secondaryGeojson}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
                   />
@@ -3206,7 +3250,10 @@ export default function Home() {
                                 windowStart={startDate}
                                 windowEnd={endDate}
                                 vegetationSource={vegetationSeries?.source}
-                                rainfallProduct={analysisSummary?.rainfall?.product}
+                                rainfallProduct={analysisSummary?.rainfall?.product
+                                  || ((analysisSummary?.rainfall?.source || '').toLowerCase().includes('chirps')
+                                      || analysisSummary?.rainfall?.resolution_km === 5.6
+                                    ? 'chirps' : 'rainfall')}
                                 thinMonths={vegetationSeries?.thin_months}
                                 onBuildVegetation={
                                   activeCacheKey

@@ -157,6 +157,8 @@ class RainfallResult(BaseModel):
     series: List[RainfallMonth] = Field(default_factory=list)
     summary: Optional[Dict[str, Any]] = None
     suspect_months: List[str] = Field(default_factory=list)
+    product: Optional[str] = None
+    source: Optional[str] = None
     evidence: ModuleEvidence
 
 

@@ -30,6 +30,7 @@ interface BoundingBox {
 interface MapComponentProps {
   onBoundingBoxCreated: (bbox: BoundingBox | null) => void;
   uploadedGeoJSON?: GeoJSON.GeoJsonObject | null;
+  secondaryGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
   viewBounds?: [[number, number], [number, number]] | null;
 }
@@ -51,9 +52,9 @@ function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, n
   };
   const collect = (g: unknown): void => {
     if (!g || typeof g !== "object") return;
-    const geo = g as { type?: string; coordinates?: unknown; geometries?: unknown[] };
-    if (geo.type === "FeatureCollection" && Array.isArray(geo.geometries)) {
-      geo.geometries.forEach(collect);
+    const geo = g as { type?: string; coordinates?: unknown; geometries?: unknown[]; features?: unknown[] };
+    if (geo.type === "FeatureCollection" && Array.isArray(geo.features)) {
+      geo.features.forEach(collect);
       return;
     }
     const geometry = (g as { geometry?: unknown }).geometry;
@@ -86,6 +87,7 @@ function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Create
 
 function MapController({
   uploadedGeoJSON,
+  secondaryGeoJSON,
   viewBounds,
   onBoundingBoxCreated,
   onSaveFeatures,
@@ -272,6 +274,7 @@ function MapController({
 export default function MapComponent({
   onBoundingBoxCreated,
   uploadedGeoJSON,
+  secondaryGeoJSON,
   onSaveFeatures,
   viewBounds,
 }: MapComponentProps) {
@@ -300,6 +303,7 @@ export default function MapComponent({
 
         <MapController
           uploadedGeoJSON={uploadedGeoJSON}
+          secondaryGeoJSON={secondaryGeoJSON}
           viewBounds={viewBounds}
           onBoundingBoxCreated={onBoundingBoxCreated}
           onSaveFeatures={onSaveFeatures}
@@ -308,8 +312,17 @@ export default function MapComponent({
         {/* Uploaded GeoJSON */}
         {uploadedGeoJSON && (
           <GeoJSON
+            key={JSON.stringify(uploadedGeoJSON)}
             data={uploadedGeoJSON}
             style={{ color: "#b9e84b", weight: 2, fillOpacity: 0.14 }}
+          />
+        )}
+        {/* Secondary outline, kept visible when a second boundary is added */}
+        {secondaryGeoJSON && (
+          <GeoJSON
+            key={JSON.stringify(secondaryGeoJSON)}
+            data={secondaryGeoJSON}
+            style={{ color: "#f59e0b", weight: 2, fillOpacity: 0.08, dashArray: "6 4" }}
           />
         )}
       </MapContainer>

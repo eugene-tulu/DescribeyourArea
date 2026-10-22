@@ -1419,7 +1419,7 @@ def _build_measures(dem, landcover, rainfall_context, requested_area_km2) -> lis
         window = rainfall_context.get("window", {})
         observed_through = window.get("end")
         if series:
-            total = round(sum(m.get("value", 0) for m in series), 1)
+            total = round(sum(m.get("precip_mm", m.get("value", 0)) for m in series), 1)
             measures.append(measure.Measure(
                 product_key=rainfall_context.get("product", "rainfall"),
                 value=total,
@@ -2256,10 +2256,9 @@ async def plan_rainfall(
             # and the preview is what they decide on.
             product=(payload.product or "rainfall").strip().lower(),
         )
-        plan["already_computed"] = (
-            jobs.status_for(
-                rainfall_hash(area["feature"]["geometry"]), indicator
-            )["state"] == "ready"
+        plan["already_computed"] = jobs._product_ready(
+            rainfall_hash(area["feature"]["geometry"]),
+            (payload.product or "rainfall").strip().lower(),
         )
         plans.append(plan)
     return {
@@ -2645,6 +2644,64 @@ async def plan_a_question(
     return plan.describe()
 
 
+def _geojson_crs_name(geojson: dict) -> Optional[str]:
+    crs = geojson.get("crs") if isinstance(geojson, dict) else None
+    if not isinstance(crs, dict):
+        return "EPSG:4326"
+    props = crs.get("properties") if isinstance(crs.get("properties"), dict) else {}
+    name = props.get("name") or crs.get("name")
+    if name:
+        return str(name)
+    code = props.get("code") or props.get("codeSpace")
+    if code is not None:
+        return f"EPSG:{code}"
+    return "EPSG:4326"
+
+
+def _reproject_coords(node, transformer):
+    if isinstance(node, (list, tuple)):
+        if len(node) >= 2 and all(isinstance(x, (int, float)) for x in node[:2]):
+            x, y = transformer.transform(node[0], node[1])
+            return [x, y] + list(node[2:])
+        return [_reproject_coords(item, transformer) for item in node]
+    return node
+
+
+def _reproject_geojson_to_wgs84(geojson: dict) -> dict:
+    """Reproject a GeoJSON object to EPSG:4326 when a CRS is declared."""
+    if not isinstance(geojson, dict):
+        return geojson
+    src_crs = _geojson_crs_name(geojson)
+    if src_crs.upper() in {"EPSG:4326", "OGC:CRS84", "URN:OGC:DEF:CRS:OGC:1.3:CRS84"}:
+        # Drop the CRS member so downstream code treats it as WGS84.
+        out = dict(geojson)
+        out.pop("crs", None)
+        return out
+    try:
+        from pyproj import Transformer
+        transformer = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unsupported CRS {src_crs!r}: {exc}")
+    out = dict(geojson)
+    if "coordinates" in out:
+        out["coordinates"] = _reproject_coords(out["coordinates"], transformer)
+    if "geometry" in out and isinstance(out["geometry"], dict):
+        out["geometry"] = _reproject_geojson_to_wgs84(out["geometry"])
+    if "features" in out and isinstance(out["features"], list):
+        out["features"] = [_reproject_geojson_to_wgs84(f) for f in out["features"]]
+    if "geometries" in out and isinstance(out["geometries"], list):
+        out["geometries"] = [_reproject_geojson_to_wgs84(g) for g in out["geometries"]]
+    out.pop("crs", None)
+    return out
+
+
+@app.post("/areas/canonicalize")
+async def canonicalize_uploaded_area(request: GeoJSONRequest):
+    """Canonicalize an uploaded GeoJSON into a WGS84 Feature."""
+    reprojected = _reproject_geojson_to_wgs84(request.geojson)
+    return canonicalize_geojson(reprojected, max_bytes=MAX_GEOJSON_BYTES, max_vertices=None)
+
+
 @app.get("/areas/resolve")
 async def resolve_study_area(
     http_request: Request,
@@ -2715,7 +2772,8 @@ async def resolve_study_area(
 @app.get("/context")
 async def context_for_key(cache_key: str, indicators: Optional[str] = None,
                           window_start: Optional[str] = None,
-                          window_end: Optional[str] = None):
+                          window_end: Optional[str] = None,
+                          product: Optional[str] = None):
     """A completed area's reading, assembled from the artefacts the worker wrote.
 
     `/generate-context` computes, and refuses anything past the synchronous cap --
@@ -2750,7 +2808,7 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             # or nothing at all: a completed CHIRPS read came back "nothing has
             # been computed yet". Read the product the job recorded; a later
             # product submission is the one honoured (see jobs._job_product).
-            product = jobs._job_product(key) or "rainfall"
+            product = (product or jobs._job_product(key) or "rainfall").strip().lower()
             context = _rainfall_by_key(key, product,
                                        window_start=window_start,
                                        window_end=window_end)
