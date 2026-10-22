@@ -2471,6 +2471,13 @@ export default function Home() {
       setIsLoading(false);
     }
   };
+  const prevRainProduct = useRef(rainProduct);
+  useEffect(() => {
+    if (prevRainProduct.current !== rainProduct && (uploadedGeojson || drawnFeatures || boundingBox)) {
+      prevRainProduct.current = rainProduct;
+      void handleAnalyze();
+    }
+  }, [rainProduct]);
 
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
@@ -2787,10 +2794,7 @@ export default function Home() {
                       <select
                         id="rain-product"
                         value={rainProduct}
-                        onChange={(e) => {
-                          setRainProduct(e.target.value as 'rainfall' | 'chirps');
-                          window.setTimeout(() => { void handleAnalyze(); }, 0);
-                        }}
+                        onChange={(e) => setRainProduct(e.target.value as 'rainfall' | 'chirps')}
                         className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
                       >
                         <option value="rainfall">ERA5 · 28 km · modelled</option>
