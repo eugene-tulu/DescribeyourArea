@@ -1413,6 +1413,8 @@ export default function Home() {
   // resolution, freshness and evidence class -- so it is a choice with a reason,
   // not a preference, and the reader is told what the choice costs.
   const [rainProduct, setRainProduct] = useState<'rainfall' | 'chirps'>('rainfall');
+  const rainProductRef = useRef(rainProduct);
+  useEffect(() => { rainProductRef.current = rainProduct; }, [rainProduct]);
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
@@ -2022,7 +2024,7 @@ export default function Home() {
       for (let attempt = 0; attempt < 6; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
-          `&window_start=${startDate}&window_end=${endDate}&product=${rainProduct}`);
+          `&window_start=${startDate}&window_end=${endDate}&product=${rainProductRef.current}`);
         if (response.ok || !retryable(response.status)) break;
         if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       }
@@ -2055,7 +2057,7 @@ export default function Home() {
         if (summary.dem) merged.dem = summary.dem;
         if (summary.landcover) merged.landcover = summary.landcover;
         if (summary.ndvi) merged.ndvi = summary.ndvi;
-        if (summary.rainfall) merged.rainfall = summary.rainfall;
+        if ('rainfall' in summary) merged.rainfall = summary.rainfall ?? null;
         merged.analysis = {
           ...previous.analysis,
           ...summary.analysis,
@@ -2147,7 +2149,7 @@ export default function Home() {
       let data: { submission?: Record<string, unknown> } = {};
       try {
         const response = await fetch(
-          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}&product=${rainProduct}`,
+          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}&product=${rainProductRef.current}`,
         );
         if (response.ok) data = await response.json();
       } catch {
