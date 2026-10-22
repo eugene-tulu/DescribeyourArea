@@ -2057,9 +2057,19 @@ export default function Home() {
         };
         const measures = new Map<string, MeasureSummary>();
         for (const measure of previous.measures ?? []) {
+          // A new rainfall reading replaces the old one, even when the product
+          // changes (ERA5 vs CHIRPS). Otherwise both stay on screen and the
+          // overview keeps showing the previous product's headline number.
+          if (measure.product === 'rainfall' || measure.product === 'chirps') continue;
           measures.set(measure.product, measure);
         }
         for (const measure of summary.measures ?? []) {
+          if (measure.product === 'rainfall' || measure.product === 'chirps') {
+            // drop any previous rainfall measure before adding the new one
+            for (const key of [...measures.keys()]) {
+              if (key === 'rainfall' || key === 'chirps') measures.delete(key);
+            }
+          }
           measures.set(measure.product, measure);
         }
         merged.measures = [...measures.values()];
