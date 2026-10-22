@@ -804,7 +804,20 @@ details.working > *:not(summary) { padding-top: 0.5rem; }
 
   /* Keep a long evidence table from splitting a row across pages. */
   tr,
-  .fig {
+  .fig,
+  #rainfall-results figure {
     break-inside: avoid;
+  }
+
+  /* Charts are inline SVG, so they remain sharp in the PDF. Remove the screen
+     minimum width and horizontal scroller that otherwise clip the plots. */
+  #rainfall-results .overflow-x-auto {
+    overflow: visible !important;
+  }
+  #rainfall-results svg {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    height: auto !important;
   }
 }

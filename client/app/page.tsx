@@ -567,7 +567,7 @@ function ReadingActions({
   onRemove,
   linkCopied,
 }: {
-  shareLink: string;
+  shareLink?: string;
   onCopyLink: () => void;
   onCsv: () => void;
   onJson: () => void;
@@ -617,10 +617,12 @@ function ReadingActions({
           className="fig absolute left-0 z-30 mt-2 w-64 overflow-hidden rounded-xl border border-rule bg-raised p-1.5 shadow-[0_18px_50px_-12px_rgba(0,0,0,0.65)]"
         >
           <p className="label px-2.5 pb-1.5 pt-1 text-ink-3">Share this reading</p>
-          <button type="button" role="menuitem" className={item} onClick={onCopyLink}>
-            {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
-            {linkCopied ? 'Link copied' : 'Copy the link'}
-          </button>
+          {shareLink && (
+            <button type="button" role="menuitem" className={item} onClick={onCopyLink}>
+              {linkCopied ? <Check className="h-3.5 w-3.5" /> : <Link2 className="h-3.5 w-3.5" />}
+              {linkCopied ? 'Link copied' : 'Copy the link'}
+            </button>
+          )}
           <button type="button" role="menuitem" className={item} onClick={onCsv}>
             <Download className="h-3.5 w-3.5" />
             Download the series (CSV)
@@ -633,9 +635,11 @@ function ReadingActions({
             <Printer className="h-3.5 w-3.5" />
             Print, or save as PDF
           </button>
-          <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
-            {shareLink}
-          </code>
+          {shareLink && (
+            <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
+              {shareLink}
+            </code>
+          )}
           {onRemove && (
             <>
               <div className="mx-1 my-1 border-t border-rule" />
@@ -770,6 +774,7 @@ const WORKING_WORDS: Record<string, string[]> = {
 /** One module's row while it is being read in the reading room. */
 function WorkRow({
   indicator,
+  product,
   label,
   state,
   reads,
@@ -777,6 +782,7 @@ function WorkRow({
   submittedAt,
 }: {
   indicator: string;
+  product?: 'rainfall' | 'chirps';
   label: string;
   state: 'waiting' | 'active' | 'refused' | 'already';
   reads?: number;
@@ -785,7 +791,13 @@ function WorkRow({
 }) {
   // A slow cycle on purpose: fast enough to feel alive, slow enough to be read.
   const [tick, setTick] = useState(0);
-  const words = WORKING_WORDS[indicator] ?? ['reading'];
+  const words = indicator === 'rainfall'
+    ? product === 'chirps'
+      ? ['reading one CHIRPS month at a time', 'each month is one 5.6 km grid cell',
+        'averaging the satellite band and the gauges', 'forming the 1991–2020 normal beside it']
+      : ['reading one ERA5 month at a time', 'each month is one 27.8 km grid cell',
+        'reading the reanalysis record', 'forming the 1991–2020 normal beside it']
+    : WORKING_WORDS[indicator] ?? ['reading'];
   const live = state === 'active';
   const elapsed = useElapsedSince(startedAt ?? submittedAt, live);
 
@@ -1124,14 +1136,15 @@ function DatasetResultCard({
       const state = submission?.state;
       const pending = state === 'pending' || state === 'running';
       const rejected = state === 'rejected';
+      const productLabel = rain?.product === 'chirps' ? 'CHIRPS' : 'ERA5';
       return (
-        <ModuleBlock title={option.label} description={option.description}>
+        <ModuleBlock title={`${option.label} · ${productLabel}`} description={option.description}>
           <p className="fig text-sm text-ink-2">
             {pending
-              ? 'Queued. Rainfall is read at its full 5.6 km resolution rather than estimated, so it is prepared after you ask instead of in the moment you ask.'
+              ? `Queued. ${productLabel} rainfall is being prepared at its native resolution; the results will appear here when the reading is complete.`
               : rejected
                 ? submission?.reason || 'The queue is full at the moment. Try again shortly.'
-                : 'This exact outline has not been read yet.'}
+                : `${productLabel} for this exact outline has not been computed yet. The reading is underway or waiting its turn.`}
           </p>
           <EvidenceLine evidence={rain?.evidence} status={rain?.status || 'not_computed'} />
         </ModuleBlock>
@@ -1435,6 +1448,8 @@ export default function Home() {
     if (datasets.length) setSelectedDatasets(datasets);
     const sensor = params.get('sensor');
     if (sensor) setSelectedSensor(sensor);
+    const rain = params.get('rain');
+    if (rain === 'rainfall' || rain === 'chirps') setRainProduct(rain);
     // Prefer the dates/period a link was built with. The new model is end +
     // period; a custom start, if present, overrides the derived start. Legacy
     // links wrote absolute start/end, so both still round-trip.
@@ -1787,8 +1802,9 @@ export default function Home() {
   const rain = summary.rainfall;
   if (rain?.status === 'ok' && rain.summary?.trailing_12m) {
     const t = rain.summary.trailing_12m;
+    const productLabel = rain.product === 'chirps' ? 'CHIRPS' : 'ERA5';
     lines.push(
-      `Rainfall: ${formatNumber(t.precip_mm, 0)} mm over the last 12 months, ` +
+      `Rainfall (${productLabel}): ${formatNumber(t.precip_mm, 0)} mm over the last 12 months, ` +
       `${t.anomaly_pct != null ? `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}% ` : ''}` +
       `against the 1991-2020 normal of ${formatNumber(t.normal_mm, 0)} mm.`,
     );
@@ -1829,7 +1845,7 @@ export default function Home() {
   async function submitIndicator(
     indicator: string,
     options?: { reveal?: boolean },
-  ): Promise<string | null> {
+  ): Promise<{ key: string; state: string } | null> {
     const geojson = currentGeojson();
     if (!geojson) return null;
     // A caller submitting a batch of modules reveals once at the end. Revealing
@@ -1875,7 +1891,7 @@ export default function Home() {
       } else if (key) {
         void pollSubmission(key, indicator);
       }
-      return key;
+      return key ? { key, state: data.submission?.state || 'pending' } : null;
     } catch (error) {
       reportError(error instanceof Error ? error.message : 'Submission failed');
       return null;
@@ -1931,23 +1947,24 @@ export default function Home() {
     const submitted: string[] = [];
     const refused: string[] = [];
     let key: string | null = null;
+    let allReady = true;
     for (const plan of offline.plans) {
       const indicator = plan.indicator;
       if (!indicator) continue;
       const accepted = await submitIndicator(indicator, { reveal: false });
       if (accepted) {
         submitted.push(indicator);
-        key = accepted;
+        key = accepted.key;
+        if (accepted.state !== 'ready') allReady = false;
       } else {
         refused.push(indicator);
       }
     }
     setOffline({ ...offline, queued: submitted, refused });
-    // One reading, read once. Every module of one boundary shares a key, so the
-    // reading is revealed after the batch rather than once per module -- four
-    // identical reads of the same thing was both wasteful and enough of a storm
-    // for the proxy in front of the API to refuse the last one.
-    if (key) {
+    // A ready result can be shown once after the batch. Pending jobs will reveal
+    // their result when polling confirms completion; fetching here used to race
+    // the worker and turn "not computed yet" into a misleading retry error.
+    if (key && allReady && submitted.length) {
       setActiveCacheKey(key);
       void showComputedResult(key);
       void loadVegetationSeries(key);
@@ -2239,6 +2256,7 @@ export default function Home() {
         // resolves rather than carrying a megabyte of coordinates.
         datasets: selectedDatasets.join(','),
         sensor: selectedSensor,
+        rain: rainProduct,
         // An administrative id is stable, short, and is what another system
         // already holds -- so a link from globe or a colleague's bookmark
         // resolves rather than carrying a megabyte of coordinates.
@@ -2518,7 +2536,7 @@ export default function Home() {
 
       <main className="relative z-10">
         {/* -------------------------------------------------------------- hero */}
-        <section id="top" className="mx-auto max-w-[1440px] px-5 pt-16 sm:px-8 sm:pt-24">
+        <section id="top" data-print-hide className="mx-auto max-w-[1440px] px-5 pt-16 sm:px-8 sm:pt-24">
           <p className="fig flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.6875rem] tracking-[0.14em] text-ink-3 uppercase">
             {SOURCES.map((source) => (
               <span key={source.id} className="inline-flex items-center gap-2">
@@ -2574,7 +2592,7 @@ export default function Home() {
           {/* The cap used to be an amber alarm across the top of the page, read
               on arrival and never again. It is a fact about the service, so it
               now sits with the controls it constrains, as a quiet note. */}
-          <div className="mb-6 flex items-start gap-2.5 rounded-xl border border-rule bg-surface/60 px-4 py-3">
+          <div data-print-hide className="mb-6 flex items-start gap-2.5 rounded-xl border border-rule bg-surface/60 px-4 py-3">
             <Info className="mt-0.5 h-4 w-4 shrink-0 text-ink-3" />
             <p className="text-[0.8125rem] leading-relaxed text-ink-3">
               A study area is read live up to{' '}
@@ -2762,7 +2780,27 @@ export default function Home() {
                       <select
                         id="rain-product"
                         value={rainProduct}
-                        onChange={(e) => setRainProduct(e.target.value as 'rainfall' | 'chirps')}
+                        onChange={(e) => {
+                          const next = e.target.value as 'rainfall' | 'chirps';
+                          setRainProduct(next);
+                          setProgress(null);
+                          setSubmission({});
+                          setAnalysisSummary((previous) => {
+                            if (!previous?.rainfall || previous.rainfall.product === next) return previous;
+                            return {
+                              ...previous,
+                              rainfall: {
+                                status: 'not_computed', product: next,
+                                reason: 'product_changed',
+                                message: `${next === 'chirps' ? 'CHIRPS' : 'ERA5'} has not been computed for this area yet.`,
+                              },
+                              measures: previous.measures?.filter(
+                                (measure) => measure.product !== 'rainfall' && measure.product !== 'chirps',
+                              ),
+                              caveats: previous.caveats?.filter((note) => !note.startsWith('Rainfall:')),
+                            };
+                          });
+                        }}
                         className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
                       >
                         <option value="rainfall">ERA5 · 28 km · modelled</option>
@@ -2877,7 +2915,7 @@ export default function Home() {
             {/* ---------------------------------------------------- the stage */}
             <div className="space-y-6">
               {/* Map */}
-              <div className="panel overflow-hidden p-0">
+              <div data-print-hide className="panel overflow-hidden p-0">
                 <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b border-rule px-5 py-3.5">
                   <div className="flex items-center gap-2.5">
                     <Globe className="h-4 w-4 text-signal" />
@@ -2924,7 +2962,7 @@ export default function Home() {
                     <MapPin className="h-4 w-4 text-signal" />
                     <span className="text-[0.9375rem] font-medium">The reading</span>
                   </div>
-                   {prose && <CopySummary summaryText={prose} />}
+                  {prose && <span data-print-hide><CopySummary summaryText={prose} /></span>}
                 </div>
 
                 <div className="px-5 py-5">
@@ -2933,12 +2971,13 @@ export default function Home() {
                       {shareLinkUnavailable}
                     </div>
                   )}
-                  {shareLink && (
+                   {analysisSummary && resultPhase === 'success' && (
                     <div data-print-hide className="mb-6 flex items-center gap-2">
                       <ReadingActions
                         shareLink={shareLink}
                         linkCopied={linkCopied}
                         onCopyLink={() => {
+                          if (!shareLink) return;
                           navigator.clipboard?.writeText(shareLink);
                           trackEvent('share_link_copied');
                           setLinkCopied(true);
@@ -2952,7 +2991,7 @@ export default function Home() {
                     </div>
                   )}
                   {offline && (
-                    <div className="mb-6 rule-t pt-5">
+                    <div data-print-hide className="mb-6 rule-t pt-5">
                     <p className="headline">
                       This area is <span className="fig text-signal">{formatNumber(offline.areaKm2, 0)} km²</span> — large enough for a curated reading.
                     </p>
@@ -2983,6 +3022,9 @@ export default function Home() {
                     </dl>
                       {offline.queued.length ? (
                         <div className="mt-3" data-print-hide>
+                          <p className="mb-3 fig text-sm text-ink-2">
+                            Nothing has been computed yet. The selected modules are being read; results will appear here when they are ready.
+                          </p>
                           <div className="mb-2 flex items-baseline justify-between gap-3">
                             <p className="fig text-sm text-ink">
                               Queued in the reading room
@@ -3006,6 +3048,7 @@ export default function Home() {
                                 <WorkRow
                                   key={name}
                                   indicator={name}
+                                  product={name === 'rainfall' ? rainProduct : undefined}
                                   label={WORK_LABELS[name] ?? name}
                                   state={
                                     active ? 'active'
@@ -3022,6 +3065,7 @@ export default function Home() {
                               <WorkRow
                                 key={`refused-${name}`}
                                 indicator={name}
+                                product={name === 'rainfall' ? rainProduct : undefined}
                                 label={WORK_LABELS[name] ?? name}
                                 state="refused"
                               />
@@ -3116,7 +3160,7 @@ export default function Home() {
                             </div>
                           )}
                           {progress && (
-                            <div>
+                            <div data-print-hide>
                               <JobProgressLine
                                 progress={progress}
                                 planned={plan}
@@ -3131,7 +3175,7 @@ export default function Home() {
                             submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                             vegetationSeries={vegetationSeries}
                           />
-                          <section className="mt-6 rounded-xl border border-rule bg-raised/55 p-4 sm:p-5">
+                          <section data-print-hide className="mt-6 rounded-xl border border-rule bg-raised/55 p-4 sm:p-5">
                             <h4 className="text-base font-semibold text-ink">Rainfall reading</h4>
                             <p className="mt-1 max-w-[60ch] text-sm leading-relaxed text-ink-2">
                               {analysisSummary.rainfall?.status === 'ok'
@@ -3166,7 +3210,7 @@ export default function Home() {
                                 thinMonths={vegetationSeries?.thin_months}
                                 onBuildVegetation={
                                   activeCacheKey
-                                    ? () => submitIndicator('vegetation_series')
+                                    ? () => submitIndicator('vegetation_series').then((result) => result?.key ?? null)
                                     : undefined
                                 }
                                 buildingVegetation={pendingIndicator === 'vegetation_series'}

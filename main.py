@@ -1961,6 +1961,8 @@ def _with_rainfall_evidence(result, product: str = "rainfall"):
     """
     if result is None:
         return None
+    result = dict(result)
+    result["product"] = product
     return with_evidence(
         product, result, source=result.get("source"),
         method="monthly totals against the 1991-2020 normal")

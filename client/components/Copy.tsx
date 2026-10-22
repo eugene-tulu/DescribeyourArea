@@ -20,7 +20,7 @@ export default function CopySummary({ summaryText }: { summaryText: string }) {
   };
 
   return (
-    <Button onClick={copyToClipboard} variant="outline" size="sm">
+    <Button onClick={() => void copyToClipboard()} variant="outline" size="sm" disabled={!summaryText}>
       <Copy className="h-3.5 w-3.5" />
       {copied ? "Copied" : "Copy as text"}
     </Button>

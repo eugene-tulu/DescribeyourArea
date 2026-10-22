@@ -1091,14 +1091,15 @@ def cached_context_by_key(key: str, product: str = "rainfall", *,
     """
     payload = read_cache(key, product) or (fetch(key) if product == "rainfall" else None)
     if payload is None:
+        source_name = "CHIRPS" if product == "chirps" else "ERA5"
         return {
             "status": "not_computed",
+            "product": product,
             "indicator": "monthly_precipitation",
             "reason": "no_precomputed_series",
             "message": (
-                "No precomputed precipitation series for that study area. Submit the "
-                "polygon to have one processed; it is computed offline because a "
-                "single ERA5 grid cell takes about 20 seconds to read."
+                f"No {source_name} precipitation series has been computed for this "
+                "study area yet. It will appear here when the requested reading is complete."
             ),
             "cache_key": key,
         }
@@ -1124,14 +1125,15 @@ def cached_context(geojson_geom: dict, product: str = "rainfall", *,
     # area's other one.
     payload = read_cache(key, product) or (fetch(key) if product == "rainfall" else None)
     if payload is None:
+        source_name = "CHIRPS" if product == "chirps" else "ERA5"
         return {
             "status": "not_computed",
+            "product": product,
             "indicator": "monthly_precipitation",
             "reason": "no_precomputed_series",
             "message": (
-                "Precipitation for this exact study area has not been processed yet. "
-                "It is computed offline because a single ERA5 grid cell takes about "
-                "20 seconds to read, which is longer than a whole request."
+                f"{source_name} precipitation for this exact study area has not been "
+                "computed yet. It will appear here when the requested reading is complete."
             ),
             "cache_key": key,
         }
