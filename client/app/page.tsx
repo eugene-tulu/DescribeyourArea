@@ -2006,12 +2006,12 @@ export default function Home() {
       // read as terminal sent a reader an error over a finished reading.
       const retryable = (status: number) => status >= 500 || status === 429;
       let response: Response | null = null;
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      for (let attempt = 0; attempt < 6; attempt += 1) {
         response = await fetch(
           `${(process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '')}/context?cache_key=${cacheKey}` +
           `&window_start=${startDate}&window_end=${endDate}&product=${rainProduct}`);
         if (response.ok || !retryable(response.status)) break;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
+        if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
       }
       if (response?.status === 404) {
         // The artefacts are not all written yet. This is expected while a queued
