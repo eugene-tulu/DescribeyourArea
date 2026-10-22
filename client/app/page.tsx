@@ -2013,6 +2013,11 @@ export default function Home() {
         if (response.ok || !retryable(response.status)) break;
         if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 400 * (attempt + 1)));
       }
+      if (response?.status === 404) {
+        // The artefacts are not all written yet. This is expected while a queued
+        // run is still in progress, so keep the current reading and try again later.
+        return;
+      }
       if (!response || !response.ok) {
         const failure = await response?.json().catch(() => null);
         throw new Error(
