@@ -312,6 +312,7 @@ export default function MapComponent({
         {/* Uploaded GeoJSON */}
         {uploadedGeoJSON && (
           <GeoJSON
+            key={JSON.stringify(uploadedGeoJSON)}
             data={uploadedGeoJSON}
             style={{ color: "#b9e84b", weight: 2, fillOpacity: 0.14 }}
           />
@@ -319,6 +320,7 @@ export default function MapComponent({
         {/* Secondary outline, kept visible when a second boundary is added */}
         {secondaryGeoJSON && (
           <GeoJSON
+            key={JSON.stringify(secondaryGeoJSON)}
             data={secondaryGeoJSON}
             style={{ color: "#f59e0b", weight: 2, fillOpacity: 0.08, dashArray: "6 4" }}
           />
