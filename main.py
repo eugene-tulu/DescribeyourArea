@@ -2254,10 +2254,9 @@ async def plan_rainfall(
             # and the preview is what they decide on.
             product=(payload.product or "rainfall").strip().lower(),
         )
-        plan["already_computed"] = (
-            jobs.status_for(
-                rainfall_hash(area["feature"]["geometry"]), indicator
-            )["state"] == "ready"
+        plan["already_computed"] = jobs._product_ready(
+            rainfall_hash(area["feature"]["geometry"]),
+            (payload.product or "rainfall").strip().lower(),
         )
         plans.append(plan)
     return {

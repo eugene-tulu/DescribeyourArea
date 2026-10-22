@@ -377,7 +377,7 @@ async def _compute_job(
         counts.update(processed=1, failed=1)
         return counts
     if indicator == "rainfall" and _product_ready(key, _job_product(key)):
-        complete(key, rainfall.read_cache(key), indicator)
+        complete(key, rainfall.read_cache(key, _job_product(key) or 'rainfall'), indicator)
         counts.update(processed=1, skipped=1)
         return counts
     # A non-rainfall indicator is already done when its own artefact exists.
