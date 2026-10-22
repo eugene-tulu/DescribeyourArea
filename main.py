@@ -2643,7 +2643,6 @@ async def plan_a_question(
     return plan.describe()
 
 
-@app.get("/areas/resolve")
 def _geojson_crs_name(geojson: dict) -> Optional[str]:
     crs = geojson.get("crs") if isinstance(geojson, dict) else None
     if not isinstance(crs, dict):
@@ -2702,6 +2701,7 @@ async def canonicalize_uploaded_area(request: GeoJSONRequest):
     return canonicalize_geojson(reprojected, max_bytes=MAX_GEOJSON_BYTES, max_vertices=None)
 
 
+@app.get("/areas/resolve")
 async def resolve_study_area(
     http_request: Request,
     id: Optional[str] = None,
