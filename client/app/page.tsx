@@ -1486,6 +1486,7 @@ export default function Home() {
   // real value, so prefer that and fall back to the documented default.
    const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
+   const [secondaryGeojson, setSecondaryGeojson] = useState<GeoJsonObject | null>(null);
   // An administrative boundary, named rather than drawn.
   const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
   const [adminQuery, setAdminQuery] = useState('');
@@ -1635,6 +1636,7 @@ export default function Home() {
         throw new Error(failure?.detail || `No administrative area found for ${query}`);
       }
       const area = await response.json();
+      setSecondaryGeojson(uploadedGeojson);
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
       setAdminQuery('');
@@ -1752,6 +1754,7 @@ export default function Home() {
           throw new Error(failure?.detail || 'The file could not be read as WGS84.');
         }
         const canonical = await response.json();
+        setSecondaryGeojson(uploadedGeojson);
         setUploadedGeojson((canonical?.geometry ?? canonical) as GeoJsonObject);
         trackEvent('area_selected', { source: 'geojson_upload' });
         toast({
@@ -2916,6 +2919,7 @@ export default function Home() {
                   <MapComponent
                     onBoundingBoxCreated={handleBoundingBoxCreated}
                     uploadedGeoJSON={uploadedGeojson}
+                    secondaryGeoJSON={secondaryGeojson}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
                   />
