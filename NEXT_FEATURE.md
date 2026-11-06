@@ -12,8 +12,7 @@
 > several things were deliberately left unbuilt, so they are kept. The current
 > forward plan lives in [CHANGELOG.md](CHANGELOG.md#next).
 
-Tracked in GitHub as [DescribeyourArea #3](https://github.com/eugene-tulu/DescribeyourArea/issues/3)
-and [geocontextualize #1](https://github.com/kiprutoYG/geocontextualize/issues/1).
+Tracked in GitHub as [DescribeyourArea #3](https://github.com/eugene-tulu/DescribeyourArea/issues/3).
 
 ## Why
 
