@@ -354,7 +354,7 @@ class UserFacingSurfaceTests(unittest.TestCase):
         # The capability, not the button wording. A re-skin shortened
         # "Download CSV" to "CSV" and this failed on the word.
         for needle, why in (
-            ("rainfall-series.csv", "a table of the monthly figures is the likely real need"),
+            ("monthly-series.csv", "a table of the monthly figures is the likely real need"),
             ("analysis.json", "so a result can be re-read without this server"),
             ("window.print()", "printing a result should produce the result"),
         ):

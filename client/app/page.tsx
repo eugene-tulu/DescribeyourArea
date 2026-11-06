@@ -20,6 +20,7 @@ import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
 import { trackEvent } from '@/lib/analytics';
 
 
+import { buildSeriesCsv, type RainRow, type VegRow } from '@/lib/exportCsv';
 // Dynamic imports to avoid SSR issues with Leaflet
 const MapComponent = dynamic(() => import('@/components/MapComponent'), {
   ssr: false,
@@ -273,7 +274,7 @@ interface RainfallResult {
   window?: { start?: string; end?: string } | null;
   climatology?: RainfallClimatology | null;
   suspect_months?: string[];
-  series?: Array<{ month: string; precip_mm: number; normal_mm: number; anomaly_pct: number | null }>;
+  series?: Array<{ month: string; precip_mm: number; normal_mm: number; anomaly_mm?: number | null; anomaly_pct: number | null }>;
   summary?: RainfallSummary;
   message?: string;
   reason?: string;
@@ -566,6 +567,7 @@ function ReadingActions({
   onPrint,
   onRemove,
   linkCopied,
+  vegetationPending,
 }: {
   shareLink?: string;
   onCopyLink: () => void;
@@ -574,6 +576,7 @@ function ReadingActions({
   onPrint: () => void;
   onRemove?: () => void;
   linkCopied?: boolean;
+  vegetationPending?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement | null>(null);
@@ -625,8 +628,13 @@ function ReadingActions({
           )}
           <button type="button" role="menuitem" className={item} onClick={onCsv}>
             <Download className="h-3.5 w-3.5" />
-            Download the series (CSV)
+            Download the monthly series (CSV)
           </button>
+          {vegetationPending && (
+            <p className="px-2.5 py-1 text-[0.6875rem] text-ink-3">
+              Vegetation is still loading — the CSV will be rainfall only until it finishes.
+            </p>
+          )}
           <button type="button" role="menuitem" className={item} onClick={onJson}>
             <Download className="h-3.5 w-3.5" />
             Download the reading (JSON)
@@ -2234,14 +2242,21 @@ export default function Home() {
    * the cards show, so a result can be re-read later without the server.
    */
   function exportCsv(): string {
-    const rows = (analysisSummary?.rainfall as { series?: Array<Record<string, number | string | null>> } | undefined)?.series
-      ?? [];
-    const header = 'month,precip_mm,normal_mm,anomaly_mm,anomaly_pct';
-    const body = rows
-      .map((r) => [r.month, r.precip_mm, r.normal_mm, r.anomaly_mm, r.anomaly_pct]
-        .map((v) => (v == null ? '' : String(v))).join(','))
-      .join('\n');
-    return [header, body].join('\n');
+    const rain = analysisSummary?.rainfall as
+      | { product?: string | null; source?: string | null; resolution_km?: number | null;
+          series?: RainRow[] | null }
+      | undefined;
+    return buildSeriesCsv({
+      areaId: activeCacheKey,
+      rainfall: rain ?? null,
+      vegetation: vegetationSeries?.status === 'ok'
+        ? {
+            source: vegetationSeries.source,
+            resolution_km: vegetationSeries.resolution_km,
+            series: (vegetationSeries.series ?? []) as VegRow[],
+          }
+        : null,
+    });
   }
 
   function exportJson(): string {
@@ -3033,10 +3048,11 @@ export default function Home() {
                           setLinkCopied(true);
                           window.setTimeout(() => setLinkCopied(false), 2000);
                         }}
-                        onCsv={() => download('rainfall-series.csv', exportCsv(), 'text/csv')}
+                        onCsv={() => download('monthly-series.csv', exportCsv(), 'text/csv')}
                         onJson={() => download('analysis.json', exportJson(), 'application/json')}
                         onPrint={() => { trackEvent('result_printed'); window.print(); }}
                         onRemove={activeCacheKey ? () => void forgetThisArea() : undefined}
+                        vegetationPending={!!vegetationSeries && vegetationSeries.status !== 'ok'}
                       />
                     </div>
                   )}
