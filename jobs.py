@@ -155,16 +155,18 @@ def pending_count() -> int:
     return len(list_jobs(PENDING))
 
 
-def status_for(key: str, indicator: str = "rainfall") -> dict:
+def status_for(key: str, indicator: str = "rainfall",
+               start: Optional[str] = None, end: Optional[str] = None) -> dict:
     """What a caller should be told about one study area.
 
     The cache is authoritative: if a series exists, the area is ready whatever the
     job record says, because a runner may have completed without updating the
-    record.
+    record. But "exists" is not "covers the requested window": a 1-year series
+    must not answer for a 5-year caller, so the window is part of the check.
     """
-    if indicator == "rainfall" and _product_ready(key, _job_product(key)):
+    if indicator == "rainfall" and _product_ready(key, _job_product(key), start, end):
         return {"state": READY, "cache_key": key, "source": "cache"}
-    if indicator != "rainfall" and read_artefact(key, indicator) is not None:
+    if indicator != "rainfall" and _artefact_ready(key, indicator, start, end):
         return {"state": READY, "cache_key": key, "indicator": indicator,
                 "source": "artefact"}
     job = read_job(key, indicator)
@@ -174,6 +176,16 @@ def status_for(key: str, indicator: str = "rainfall") -> dict:
         # The record says ready but the series is gone, for instance after a
         # deletion. Report what is true rather than what was recorded.
         return {"state": "not_submitted", "cache_key": key}
+    # A ready record whose coverage does not span this caller's window must
+    # not be reported ready for them -- it is the old window's answer, not
+    # this one's. Report not_submitted so a wider read is queued.
+    if job.get("state") == READY:
+        if indicator == "rainfall" and not _product_ready(key, _job_product(key), start, end):
+            return {"state": "not_submitted", "cache_key": key,
+                    "reason": "stored window does not cover the requested window"}
+        if indicator != "rainfall" and not _artefact_ready(key, indicator, start, end):
+            return {"state": "not_submitted", "cache_key": key, "indicator": indicator,
+                    "reason": "stored window does not cover the requested window"}
     return {
         "state": job.get("state", PENDING),
         "cache_key": key,
@@ -186,8 +198,51 @@ def status_for(key: str, indicator: str = "rainfall") -> dict:
     }
 
 
-def _product_ready(key: str, product: Optional[str]) -> bool:
-    """Whether a series for this area *and product* exists.
+def _window_covers_payload(payload: dict, start: Optional[str],
+                            end: Optional[str]) -> bool:
+    """Whether a stored payload's window covers the requested start/end.
+
+    Rainfall and the monthly vegetation series are window-valued: a series
+    computed for one window does not answer for another. ``dem`` and
+    ``landcover`` have no time dimension and always cover.
+
+    A payload with no recorded window (pre-portfolio payloads, or a window-len
+    stub) is treated as covering: the records predate the window field and
+    must not start recomputing on every request. Only an explicit, narrower
+    stored window blocks a wider request.
+    """
+    if not start and not end:
+        return True
+    win = payload.get("window") or {}
+    have_start = (win.get("start") or payload.get("read_from") or "")[:7]
+    have_end = (win.get("end") or payload.get("read_to") or "")[:7]
+    want_start = (start or "")[:7]
+    want_end = (end or "")[:7]
+    if not want_start and not want_end:
+        return True
+    if not have_start or not have_end:
+        # No recorded window: cannot prove it does not cover, so do not
+        # block ready on it. Window-valued payloads always record one;
+        # this branch is the dem/landcover and legacy-payload path.
+        months = [r.get("month", "")[:7] for r in (payload.get("series") or [])
+                  if isinstance(r, dict) and r.get("month")]
+        if not months:
+            return True  # window-less payloads (dem/landcover) always cover
+        # A series with months but no recorded window is ambiguous. A wider
+        # request that merely contains its months must not block, but neither
+        # may a stub with a single 2020 row answer for a 2010 request: the
+        # requested months outside the series are unknown, so treat the stub
+        # as covering only if the request is within its months. This keeps
+        # legacy stubs from answering for windows they do not span.
+        return (not want_start or min(months) <= want_start) \
+            and (not want_end or max(months) >= want_end)
+    return (not want_start or have_start <= want_start) \
+        and (not want_end or have_end >= want_end)
+
+
+def _product_ready(key: str, product: Optional[str],
+                   start: Optional[str] = None, end: Optional[str] = None) -> bool:
+    """Whether a series for this area *and product* exists for this window.
 
     Reading the ERA5 cache for a CHIRPS job reports ready off the wrong series,
     and the reader is then handed a reanalysis while its evidence label claims a
@@ -199,7 +254,23 @@ def _product_ready(key: str, product: Optional[str]) -> bool:
     stored = payload.get("product")
     if stored is not None and (product or "rainfall") != stored:
         return False
-    return True
+    # A stored series that does not span the requested window must not answer
+    # for it: a 1-year series served for a 5-year window silently returns the
+    # 1-year one under the 5-year label. Report not ready so a wider read is
+    # queued. Window-less checks keep the old call shape (no window = any
+    # stored series answers).
+    return _window_covers_payload(payload, start, end)
+
+
+def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
+                    end: Optional[str] = None) -> bool:
+    """Whether an artefact for this area covers the requested window."""
+    payload = read_artefact(key, indicator)
+    if payload is None:
+        return False
+    if indicator in ("dem", "landcover"):
+        return True  # no time dimension
+    return _window_covers_payload(payload, start, end)
 
 
 def _job_product(key: str) -> Optional[str]:
@@ -228,13 +299,20 @@ def submit(
         raise ValueError(f"unknown indicator {indicator!r}; choose from {INDICATORS}")
     key = rainfall.geometry_hash(geojson_geom)
     product = (product or "rainfall").strip().lower()
-    current = status_for(key, indicator=indicator)
-    if current["state"] in {READY, RUNNING, PENDING}:
-        # Two products now provide precipitation_total, so "already done" is a
-        # question about this product and not about the area. Without this, asking
-        # for CHIRPS on an area with an ERA5 series reported ready and queued
-        # nothing, and the reader was silently given ERA5.
+    # Window-aware readiness: a stored series that does not span this caller's
+    # window is not "already done" for them -- it is the 1-year answer to a
+    # 5-year question. Treat it as not ready so the current window is queued
+    # and computed over the union with the stored one in the worker.
+    current = status_for(key, indicator=indicator, start=start, end=end)
+    # A pending/running record must be returned so we do not queue a second
+    # window. But a *ready* record whose coverage does not span this window
+    # must fall through and queue the wider read.
+    if current["state"] in {RUNNING, PENDING}:
         if indicator != "rainfall" or _job_product(key) in (None, product):
+            return current
+    elif current["state"] == READY:
+        if indicator != "rainfall" or _job_product(key) in (None, product):
+            # ready for this window already -- coalesce onto it
             return current
 
     outstanding = pending_count()
@@ -273,7 +351,7 @@ def submit(
     # nothing had been submitted. Every non-rainfall indicator was affected, which
     # is the whole multi-module reading room, and it also stopped the backend's
     # autorun from firing for them because it gates on state == pending.
-    return status_for(key, indicator)
+    return status_for(key, indicator, start=start, end=end)
 
 
 def claim_next(*, retry_failed: bool = False) -> Optional[dict]:
@@ -376,19 +454,24 @@ async def _compute_job(
         fail(key, "job record has no geometry; resubmit the area", indicator)
         counts.update(processed=1, failed=1)
         return counts
-    if indicator == "rainfall" and _product_ready(key, _job_product(key)):
+    # Window-aware skip: a stored series that does not span this job's window
+    # must be recomputed over the union -- skipping it would serve the old,
+    # narrower window for the new, wider one.
+    if indicator == "rainfall" and _product_ready(
+        key, _job_product(key), job.get("start"), job.get("end")
+    ):
         complete(key, rainfall.read_cache(key, _job_product(key) or 'rainfall'), indicator)
         counts.update(processed=1, skipped=1)
         return counts
-    # A non-rainfall indicator is already done when its own artefact exists.
-    # It used to test the rainfall cache instead and, for any area that had a
+    # A non-rainfall indicator is already done when its own artefact covers
+    # this job's window. It used to test the rainfall cache instead and, for any area that had a
     # rainfall series, mark the job complete using the rainfall payload —
     # through complete()'s default indicator, so the rainfall record was
     # rewritten and this one was left marked running forever, with no
     # artefact ever written. A vegetation series could therefore never be
     # produced for any area that also had rainfall, which is every area
     # anyone would ask for it on.
-    if indicator != "rainfall" and read_artefact(key, indicator) is not None:
+    if indicator != "rainfall" and _artefact_ready(key, indicator, job.get("start"), job.get("end")):
         complete(key, read_artefact(key, indicator), indicator)
         counts.update(processed=1, skipped=1)
         return counts

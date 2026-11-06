@@ -998,3 +998,41 @@ class CacheKeyAlwaysPresentTests(unittest.TestCase):
         })
         result = rainfall.cached_context_by_key(key)
         self.assertEqual(result.get("cache_key"), key)
+
+    def test_a_narrower_stored_series_is_not_served_for_a_wider_window(self):
+        # The 1-year-then-5-year bug: slicing a 12-month series with a
+        # 60-month window silently returns the 12-month one under the
+        # 60-month label. The cached context must report not_computed so
+        # the caller queues the wider read.
+        import rainfall
+
+        key = rainfall.geometry_hash(self.GEOM)
+        rows = [{"month": f"2025-{m:02d}-01", "precip_mm": 10.0,
+                 "normal_mm": 20.0, "anomaly_mm": -10.0, "anomaly_pct": -50.0}
+                for m in range(1, 13)]
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "product": "rainfall",
+            "series": rows,
+            "window": {"start": "2025-01-01", "end": "2025-12-31"},
+            "summary": {"driest_month": {}},
+            "coverage": {"window": {"months": 12}, "climatology": {"months": 360}},
+            "unreadable_months": [],
+            "climatology": {"start": "1991-01-01", "end": "2020-12-31"},
+        })
+        # same window serves
+        same = rainfall.cached_context(self.GEOM,
+                                       window_start="2025-01-01",
+                                       window_end="2025-12-31")
+        self.assertEqual(same["status"], "ok")
+        self.assertEqual(len(same["series"]), 12)
+        # wider window does not serve the narrower one
+        wider = rainfall.cached_context(self.GEOM,
+                                        window_start="2021-01-01",
+                                        window_end="2025-12-31")
+        self.assertEqual(wider["status"], "not_computed",
+                         "a 1-year series must not answer for a 5-year window")
+        # by-key path obeys the same rule
+        wider_key = rainfall.cached_context_by_key(
+            key, window_start="2021-01-01", window_end="2025-12-31")
+        self.assertEqual(wider_key["status"], "not_computed")

@@ -1053,6 +1053,41 @@ def build_and_cache(
     return payload
 
 
+def _window_covers(payload: dict, window_start: Optional[str],
+                   window_end: Optional[str]) -> bool:
+    """Whether a stored payload already spans the requested window.
+
+    The stored payload records the window it was computed for in
+    ``payload["window"]``. Without this check, a narrower first window is
+    served for any later, wider window: slicing a 12-month series with a
+    60-month window still returns 12 rows, and ``describe`` then summarises
+    only them. The fix must not let the stored series answer for a window it
+    does not cover.
+    """
+    if not window_start and not window_end:
+        return True
+    stored = payload.get("window") or {}
+    have_start = (stored.get("start") or "")[:10]
+    have_end = (stored.get("end") or "")[:10]
+    # Compare on YYYY-MM months; the series is monthly, so a request is covered
+    # if its months are inside the stored months.
+    want_start = (window_start or have_start or "")[:7]
+    want_end = (window_end or have_end or "")[:7]
+    if not want_start and not want_end:
+        return True
+    if not have_start or not have_end:
+        # No recorded window (precomputed portfolio payloads predate this
+        # field): fall back to the months actually present in the series.
+        months = [r.get("month", "")[:7] for r in (payload.get("series") or [])
+                  if r.get("month")]
+        if not months:
+            return False
+        return (not want_start or min(months) <= want_start) \
+            and (not want_end or max(months) >= want_end)
+    return (not want_start or have_start[:7] <= want_start) \
+        and (not want_end or have_end[:7] >= want_end)
+
+
 def _window_precomputed_payload(payload: dict, window_start: Optional[str],
                                 window_end: Optional[str]) -> dict:
     """Narrow a stored payload to the window the caller actually asked for.
@@ -1102,6 +1137,12 @@ def cached_context_by_key(key: str, product: str = "rainfall", *,
     polygon that can be a megabyte of coordinates.
     """
     payload = read_cache(key, product) or (fetch(key) if product == "rainfall" else None)
+    # A stored payload that does not span the requested window must not answer
+    # for it: slicing a narrower series with a wider window silently returns
+    # the narrower one. Report it as not computed so the caller queues a wider
+    # read instead of showing the old window under the new label.
+    if payload is not None and not _window_covers(payload, window_start, window_end):
+        payload = None
     if payload is None:
         source_name = "CHIRPS" if product == "chirps" else "ERA5"
         return {
@@ -1136,6 +1177,12 @@ def cached_context(geojson_geom: dict, product: str = "rainfall", *,
     # A reader asking for a product must be served that product's cache, not the
     # area's other one.
     payload = read_cache(key, product) or (fetch(key) if product == "rainfall" else None)
+    # A stored payload that does not span the requested window must not answer
+    # for it: slicing a narrower series with a wider window silently returns
+    # the narrower one. Report it as not computed so the caller queues a wider
+    # read instead of showing the old window under the new label.
+    if payload is not None and not _window_covers(payload, window_start, window_end):
+        payload = None
     if payload is None:
         source_name = "CHIRPS" if product == "chirps" else "ERA5"
         return {

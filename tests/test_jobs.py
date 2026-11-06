@@ -124,13 +124,73 @@ class JobQueueTests(unittest.TestCase):
 
     def test_an_area_that_already_has_a_series_is_never_queued(self):
         key = rainfall.geometry_hash(GEOM)
+        # A windowed payload that covers the default submit window
+        # (2010-01-01 onwards) must be reported ready without queueing.
+        rows = [{"month": f"{y:04d}-{m:02d}-01", "precip_mm": 2.0}
+                for y in range(2010, 2027) for m in range(1, 13)]
         rainfall.write_cache(key, {
             "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
-            "series": [{"month": "2020-01", "precip_mm": 2.0}],
+            "product": "rainfall",
+            "series": rows,
+            "window": {"start": "2010-01-01", "end": "2026-12-31"},
         })
         state = jobs.submit(GEOM)
         self.assertEqual(state["state"], jobs.READY)
         self.assertEqual(jobs.pending_count(), 0)
+
+    def test_a_narrower_stored_window_is_not_ready_for_a_wider_request(self):
+        # The 1-year-then-5-year bug: a series computed for one window must
+        # not answer for a wider one. Resubmitting with a wider window must
+        # queue a recompute, not report ready.
+        key = rainfall.geometry_hash(GEOM)
+        rows = [{"month": f"2025-{m:02d}-01", "precip_mm": 10.0} for m in range(1, 13)]
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "product": "rainfall",
+            "series": rows,
+            "window": {"start": "2025-01-01", "end": "2025-12-31"},
+        })
+        # same window is ready (purpose: guard the no-recompute path)
+        same = jobs.submit(GEOM, start="2025-01-01", end="2025-12-31")
+        self.assertEqual(same["state"], jobs.READY)
+        # Status before any new submit must not report ready for the wider window
+        stale = jobs.status_for(key, start="2021-01-01", end="2025-12-31")
+        self.assertEqual(stale["state"], "not_submitted")
+        # wider window queues
+        wider = jobs.submit(GEOM, start="2021-01-01", end="2025-12-31")
+        self.assertEqual(wider["state"], jobs.PENDING,
+                         "a 1-year series must not answer for a 5-year window")
+        self.assertEqual(jobs.pending_count(), 1)
+
+    def test_a_stale_ready_record_does_not_report_ready_for_an_uncovered_window(self):
+        key = rainfall.geometry_hash(GEOM)
+        rows = [{"month": f"2025-{m:02d}-01", "precip_mm": 10.0} for m in range(1, 13)]
+        rainfall.write_cache(key, {
+            "processing_version": rainfall.RAINFALL_PROCESSING_VERSION,
+            "product": "rainfall",
+            "series": rows,
+            "window": {"start": "2025-01-01", "end": "2025-12-31"},
+        })
+        # status_for must not report ready for the wider window even though
+        # the job record says ready
+        status = jobs.status_for(key, start="2021-01-01", end="2025-12-31")
+        self.assertEqual(status["state"], "not_submitted")
+
+    def test_a_narrower_vegetation_artefact_is_not_ready_for_a_wider_request(self):
+        # The artefact twin of the rainfall bug: a 1-year vegetation series
+        # must not answer for a 5-year window.
+        key = rainfall.geometry_hash(GEOM)
+        jobs.write_artefact(key, "vegetation_series", {
+            "status": "ok",
+            "window": {"start": "2025-01-01", "end": "2025-12-31"},
+            "series": [{"month": "2025-01", "value": 0.3}],
+        })
+        jobs.write_job({"cache_key": key, "indicator": "vegetation_series",
+                        "state": jobs.READY,
+                        "start": "2025-01-01", "end": "2025-12-31"})
+        wider = jobs.submit(GEOM, indicator="vegetation_series",
+                            start="2021-01-01", end="2025-12-31")
+        self.assertEqual(wider["state"], jobs.PENDING)
 
     def test_the_cache_is_authoritative_over_a_stale_ready_record(self):
         key = rainfall.geometry_hash(GEOM)

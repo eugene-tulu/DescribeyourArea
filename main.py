@@ -2145,7 +2145,20 @@ def _rainfall_by_key(key: str, indicator: str, *,
                                             window_end=window_end), name)
 
     if name in jobs.RUNTIME_INDICATORS:
-        return jobs.read_artefact(key, name) or {
+        artefact = jobs.read_artefact(key, name)
+        # An artefact that does not span the requested window must not answer
+        # for it: a 1-year vegetation series served for a 5-year window shows
+        # the old window under the new label. Report it as not computed so
+        # the caller queues the wider read.
+        if artefact is not None and indicator not in ("dem", "landcover") \
+                and not jobs._window_covers_payload(artefact, window_start, window_end):
+            return {
+                "status": "not_computed",
+                "reason": "stored window does not cover the requested window",
+                "message": f"No {name} has been computed for this area and window yet.",
+                "cache_key": key,
+            }
+        return artefact or {
             "status": "not_computed",
             "reason": "no_computed_artefact",
             "message": f"No {name} has been computed for this area yet.",
@@ -2260,6 +2273,7 @@ async def plan_rainfall(
         plan["already_computed"] = jobs._product_ready(
             rainfall_hash(area["feature"]["geometry"]),
             (payload.product or "rainfall").strip().lower(),
+            start=window_start or None, end=window_end or None,
         )
         plans.append(plan)
     return {
@@ -2388,8 +2402,15 @@ def _autorun_jobs() -> None:
 
 @app.get("/rainfall/status")
 async def rainfall_status(cache_key: str, indicator: str = "rainfall",
-                       product: str = "rainfall"):
-    """State of one area's submission, without resending its polygon."""
+                       product: str = "rainfall",
+                       window_start: Optional[str] = None,
+                       window_end: Optional[str] = None):
+    """State of one area's submission, without resending its polygon.
+
+    The window is part of "ready": a series computed for a narrower window must
+    not report ready for the wider one. Without it the poller saw ready and the
+    reader was shown the old window under the new window's label.
+    """
     if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
         raise HTTPException(status_code=422, detail="cache_key must be 32 lowercase hex characters")
     import jobs
@@ -2399,11 +2420,13 @@ async def rainfall_status(cache_key: str, indicator: str = "rainfall",
         # asking for the rainfall job's state while a vegetation job is running
         # reported the wrong module -- "not_submitted" when no rainfall series
         # existed, and a false "ready" when one did.
-        "submission": jobs.status_for(cache_key, indicator.strip().lower() or "rainfall"),
+        "submission": jobs.status_for(cache_key, indicator.strip().lower() or "rainfall",
+                                     start=window_start, end=window_end),
         "product": product.strip().lower() or "rainfall",
         # Present for the product actually asked about. Asking about ERA5 while a
         # CHIRPS job runs reports "computed" off the wrong series.
-        "computed": jobs._product_ready(cache_key, product.strip().lower() or "rainfall"),
+        "computed": jobs._product_ready(cache_key, product.strip().lower() or "rainfall",
+                                       start=window_start, end=window_end),
     }
 
 
@@ -2819,6 +2842,14 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             modules[name] = context
             continue
         artefact = jobs.read_artefact(key, name)
+        # An artefact that does not span the requested window must not answer
+        # for it: the same rule as rainfall, because a narrower series served
+        # via /context is the old window under the new window's label.
+        if artefact is not None and name not in ("dem", "landcover") \
+                and not jobs._window_covers_payload(
+                    artefact, window_start, window_end):
+            missing.append(name)
+            continue
         if not artefact or artefact.get("status") not in ("ok", "ready"):
             missing.append(name)
             continue
