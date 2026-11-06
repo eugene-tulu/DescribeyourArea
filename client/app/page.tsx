@@ -2114,9 +2114,15 @@ export default function Home() {
 
   async function loadVegetationSeries(cacheKey: string) {
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    const params = new URLSearchParams({
+      cache_key: cacheKey,
+      indicator: 'vegetation_series',
+      window_start: startDate,
+      window_end: endDate,
+    });
     try {
       const response = await fetch(
-        `${backendUrl}/rainfall?cache_key=${cacheKey}&indicator=vegetation_series`,
+        `${backendUrl}/rainfall?${params.toString()}`,
       );
       if (!response.ok) return;
       const body = await response.json();
@@ -2154,8 +2160,15 @@ export default function Home() {
     for (let attempt = 0; attempt < 600; attempt += 1) {
       let data: { submission?: Record<string, unknown> } = {};
       try {
+        const statusParams = new URLSearchParams({
+          cache_key: cacheKey,
+          indicator,
+          product: rainProductRef.current,
+          window_start: startDate,
+          window_end: endDate,
+        });
         const response = await fetch(
-          `${backendUrl}/rainfall/status?cache_key=${cacheKey}&indicator=${indicator}&product=${rainProductRef.current}`,
+          `${backendUrl}/rainfall/status?${statusParams.toString()}`,
         );
         if (response.ok) data = await response.json();
       } catch {
@@ -2528,6 +2541,28 @@ export default function Home() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rainProduct]);
+
+  // A window change is a new reading: the displayed summary was computed
+  // against the old window, and showing it under the new window's label is
+  // the 1-year results for a 5-year question. Clear the previous reading and
+  // re-run so the charts, measures and CSV all match the window selected.
+  const prevWindowKey = useRef<string | null>(null);
+  const hasResult = useRef(false);
+  useEffect(() => {
+    if (analysisSummary) hasResult.current = true;
+    const key = `${startDate}→${endDate}`;
+    if (prevWindowKey.current === null) {
+      prevWindowKey.current = key;
+      return;
+    }
+    if (prevWindowKey.current === key) return;
+    prevWindowKey.current = key;
+    const hasArea = !!(uploadedGeojson || drawnFeatures || boundingBox);
+    if (!hasResult.current || !hasArea) return;
+    clearAnalysis();
+    void handleAnalyze();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [startDate, endDate]);
 
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
