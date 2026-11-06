@@ -2843,7 +2843,7 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
         "analysis": {"mode": "from computed artefacts", "datasets": sorted(modules)},
         "caveats": _caveats({"feature": {}}, modules.get("dem"),
                             modules.get("landcover"), modules.get("ndvi"),
-                            modules.get("railfall")),
+                            modules.get("rainfall")),
         "measures": measures or None,
     }
     if missing:

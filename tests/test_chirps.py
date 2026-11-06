@@ -502,7 +502,7 @@ class CacheSlotTests(unittest.TestCase):
 
         import jobs
 
-        source = inspect.getsource(jobs.run_pending)
+        source = inspect.getsource(jobs._compute_job)
         self.assertIn("product=product,", source,
                       "the worker must pass the name through; resolving it to a "
                       "callable loses the identity the cache slot is chosen by")
@@ -666,7 +666,7 @@ class ReaderResolutionTests(unittest.TestCase):
 
         import jobs
 
-        source = inspect.getsource(jobs.run_pending)
+        source = inspect.getsource(jobs._compute_job)
         self.assertIn("product=product,", source)
         self.assertNotIn("union_source = rainfall.reader_for(product)", source,
                          "resolving in the worker loses the name the cache slot "

@@ -318,7 +318,7 @@ class EvidenceEverywhereTests(unittest.TestCase):
 
         import jobs
 
-        source = inspect.getsource(jobs.run_pending)
+        source = inspect.getsource(jobs._compute_job)
         self.assertIn("with_evidence", source,
                       "a queued series is read back through /rainfall, so an "
                       "artefact without evidence returns without evidence")
