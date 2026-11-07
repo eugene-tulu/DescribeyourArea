@@ -158,14 +158,17 @@ ELEVATION = Product(
     latency_days=None,
     evidence=OBSERVED,
     cost=(LIVE, COMPUTED),
-    source="NASADEM (30 m, void-filled SRTM/3DEP)",
-    doi="10.5066/F7PV9PCP",
+    source="Copernicus DEM GLO-30 (30 m, TanDEM-X)",
+    doi="10.5270/ESA-copdem-glo",
     caveats=(
         "An observed product, not a field measurement of this polygon.",
         "A continuous elevation range is reported as three words -- flat, "
         "moderately undulating, or highly variable. The underlying range is "
         "reported to a tenth of a metre, which is a tenth of a pixel, so the "
         "banding is the honest summary and the number beneath it is not.",
+        "Produced using Copernicus WorldDEM-30 \u00a9 DLR e.V. 2010-2014 and "
+        "\u00a9 Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS "
+        "by the European Union and ESA; all rights reserved.",
     ),
     fails_with=(
         ("elevation_unavailable", "No elevation data covers this area."),
@@ -185,10 +188,10 @@ LANDCOVER = Product(
     latency_days=None,
     evidence=OBSERVED,
     cost=(LIVE, COMPUTED),
-    source="ESA WorldCover 10 m v200",
+    source="Esri 10 m Land Cover (Impact Observatory, Sentinel-2)",
     doi="10.5061/DZYR-JMP",
     caveats=(
-        "A single-date classification, so it reflects the scene, not a year.",
+        "An annual classification, so it reflects the year, not a scene.",
         "At 10 m this is the only module whose memory genuinely grows with area, "
         "so it has the largest budget of the four.",
         "Known gap: this reader takes its tiles at native resolution and does not "

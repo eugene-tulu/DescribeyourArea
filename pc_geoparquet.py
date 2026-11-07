@@ -340,6 +340,126 @@ def month_assets(collection: str, bbox: list[float], start: str, end: str,
     return found
 
 
+def tile_assets(collection: str, bbox: list[float], asset: str,
+                limit: int = 64) -> list[str]:
+    """Signed asset hrefs for every item intersecting `bbox`, from the index.
+
+    The tile counterpart of :func:`month_assets`. Static collections (DEM,
+    land cover) publish per-tile items, not per-month parts: there is no
+    datetime to bucket by, so ``ensure_index``'s date-partition logic is
+    bypassed and the entire collection part is read. Column projection keeps
+    the read to ``bbox`` + the one href column.
+
+    Returns [] when the index cannot serve (no parts, missing asset, download
+    failure) -- the caller falls back to a STAC search, never to nothing.
+    """
+    import datetime as _dt
+
+    from fastparquet import ParquetFile
+
+    # A tile collection has no date window; read whatever parts exist. The
+    # full range is a superset that matches every tile the STAC search would.
+    paths = ensure_index(collection, "1970-01-01", "2100-12-31")
+    if not paths:
+        return []
+
+    minx, miny, maxx, maxy = bbox
+    href_column = f"assets.{asset}.href"
+    found: list[str] = []
+    for path in paths:
+        handle = ParquetFile(str(path))
+        available = set(handle.columns)
+        columns = [c for c in ("bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax",
+                               href_column) if c in available]
+        if href_column not in columns:
+            # A snapshot without this asset cannot answer.
+            continue
+        frame = handle.to_pandas(columns=columns)
+        for x0, y0, x1, y1, href in zip(
+                frame["bbox.xmin"], frame["bbox.ymin"],
+                frame["bbox.xmax"], frame["bbox.ymax"], frame[href_column]):
+            if x1 < minx or x0 > maxx or y1 < miny or y0 > maxy:
+                continue
+            if href and href not in found:
+                found.append(href)
+            if len(found) >= limit:
+                break
+        if len(found) >= limit:
+            break
+    return found[:limit]
+
+
+def scene_assets(collection: str, bbox: list[float], start: str, end: str,
+                 assets: list[str], cloud_cover_max: Optional[float] = None,
+                 limit: int = 50) -> list[dict[str, Any]]:
+    """Scene items intersecting `bbox` in `start..end`, from the cached index.
+
+    The scene counterpart of :func:`month_assets`: NDVI scene collections
+    (Sentinel-2, Landsat) publish items per acquisition, not per month. Each
+    returned item carries the columns the STAC path would surface --
+    ``id``, ``datetime``, ``assets`` (a dict of requested asset -> signed
+    href) and (when present) ``cloud_cover`` -- so callers can sort and cap
+    locally exactly as they did on the live search.
+
+    `cloud_cover_max` applies the same `eo:cloud_cover < max` filter the STAC
+    query carries. Returns [] when the index cannot serve; the caller falls
+    back to a live STAC search.
+    """
+    import datetime as _dt
+
+    from fastparquet import ParquetFile
+
+    paths = ensure_index(collection, start, end)
+    if not paths:
+        return []
+
+    minx, miny, maxx, maxy = bbox
+    href_columns = {a: f"assets.{a}.href" for a in assets}
+    lo = _dt.datetime.fromisoformat(f"{start[:7]}-01T00:00:00+00:00")
+    hi = _dt.datetime.fromisoformat(f"{end[:7]}-28T23:59:59+00:00")
+
+    items: list[dict[str, Any]] = []
+    for path in paths:
+        handle = ParquetFile(str(path))
+        available = set(handle.columns)
+        columns = [c for c in ("id", "start_datetime", "datetime",
+                               "bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax",
+                               *href_columns.values(),
+                               "properties.eo:cloud_cover") if c in available]
+        if not any(c in available for c in href_columns.values()):
+            continue
+        frame = handle.to_pandas(columns=columns)
+        for row in frame.to_dict(orient="records"):
+            if row["bbox.xmax"] < minx or row["bbox.xmin"] > maxx \
+                    or row["bbox.ymax"] < miny or row["bbox.ymin"] > maxy:
+                continue
+            stamp = row.get("start_datetime") or row.get("datetime")
+            if isinstance(stamp, _dt.datetime) and stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=_dt.timezone.utc)
+            if not isinstance(stamp, _dt.datetime):
+                continue
+            if stamp < lo or stamp > hi:
+                continue
+            cover = row.get("properties.eo:cloud_cover")
+            if cloud_cover_max is not None and cover is not None \
+                    and isinstance(cover, (int, float)) and cover >= cloud_cover_max:
+                continue
+            item_assets = {a: row.get(c) for a, c in href_columns.items() if row.get(c)}
+            if not item_assets:
+                continue
+            items.append({
+                "id": str(row.get("id") or ""),
+                "datetime": stamp,
+                "assets": item_assets,
+                "cloud_cover": cover if isinstance(cover, (int, float)) else None,
+            })
+            if len(items) >= limit:
+                break
+        if len(items) >= limit:
+            break
+    return items[:limit]
+
+
 def sign_blob(href: str) -> str:
     """Sign one asset href, deriving its account and container from the URL.
 

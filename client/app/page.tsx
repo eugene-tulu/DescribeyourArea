@@ -42,8 +42,8 @@ const MapComponent = dynamic(() => import('@/components/MapComponent'), {
    the same argument, and putting the evidence before the claim is also the more
    confident order — it says the product does not need the claim to be believed. */
 const SOURCES = [
-  { id: 'nasadem', label: 'NASADEM', role: 'Elevation · 30 m' },
-  { id: 'worldcover', label: 'ESA WorldCover', role: 'Land cover · 10 m' },
+  { id: 'cop-dem', label: 'Copernicus DEM', role: 'Elevation · 30 m' },
+  { id: 'esri-lulc', label: 'Esri 10 m Land Cover', role: 'Land cover · 10 m' },
   { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
   { id: 'era5', label: 'ERA5 / CHIRPS', role: 'Precipitation · monthly' },
 ] as const;
@@ -135,7 +135,7 @@ const DATASET_OPTIONS: Array<{
   description: string;
 }> = [
   { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain type' },
-  { id: 'landcover', label: 'Land cover', description: 'Land-cover classes from ESA WorldCover' },
+  { id: 'landcover', label: 'Land cover', description: 'Land-cover classes from Esri 10 m Land Cover' },
   { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Vegetation greenness from satellite imagery' },
   { id: 'rainfall', label: 'Rainfall & drought', description: 'Rainfall totals and comparison with the long-term average' },
 ];
@@ -768,13 +768,13 @@ const WORKING_WORDS: Record<string, string[]> = {
     'building the normal the anomaly is measured against',
   ],
   dem: [
-    'reading NASADEM at 30 m',
-    'void-filled SRTM and 3DEP, so no holes',
+    'reading Copernicus DEM at 30 m',
+    'TanDEM-X radar, so no cloud gaps',
     'taking the range across the outline',
   ],
   landcover: [
-    'reading ESA WorldCover at 10 m',
-    'one classified date, so it reflects the scene',
+    'reading Esri 10 m Land Cover',
+    'one annual classification, so it reflects the year',
     'sorting every pixel into its class',
   ],
 };
@@ -1093,7 +1093,7 @@ function DatasetResultCard({
           rows={[
             ['valid pixels', dem.valid_pixel_count?.toLocaleString()],
             ['coverage', demCoverage == null ? null : `${formatNumber(demCoverage * 100, 1)}%`],
-            ['source product', 'NASADEM 30 m'],
+            ['source product', 'Copernicus DEM GLO-30 30 m'],
           ]}
         />
       </ModuleBlock>
@@ -1131,7 +1131,7 @@ function DatasetResultCard({
             ['classes', entries.length],
             ['valid pixels', landcover.valid_pixel_count?.toLocaleString()],
             ['coverage', coverage == null ? null : `${formatNumber(coverage * 100, 1)}%`],
-            ['source product', 'ESA WorldCover 10 m'],
+            ['source product', 'Esri 10 m Land Cover'],
           ]}
         />
       </ModuleBlock>
@@ -3343,10 +3343,10 @@ export default function Home() {
       <footer className="relative z-10 mt-24 border-t border-rule">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4 px-5 py-8 sm:px-8">
           <p className="fig text-[0.75rem] text-ink-3">
-            NASADEM · ESA WorldCover · Sentinel-2 · ERA5 / CHIRPS
+            Copernicus DEM · Esri 10 m Land Cover · Sentinel-2 · ERA5 / CHIRPS
           </p>
           <p className="text-[0.75rem] text-ink-3">
-            Data from NASADEM, ESA WorldCover, Sentinel-2 and ERA5 or CHIRPS.
+            Data from Copernicus DEM, Esri 10 m Land Cover, Sentinel-2 and ERA5 or CHIRPS.
           </p>
         </div>
       </footer>

@@ -244,9 +244,9 @@ def plausible(values: np.ndarray) -> np.ndarray:
 # what the data can do. What actually costs is pixels, and pixels are set by
 # resolution. Measured on 2026-09-26:
 #
-#   worldcover 10 m, 5,500 km2   216M px  176 s   1,205 MB
-#   worldcover 60 m, 5,500 km2   6.0M px  6.0 s
-#   worldcover 100 m, 5,500 km2  2.2M px  1.3 s
+#   io-lulc-annual-v02 10 m, 5,500 km2   216M px  176 s   1,205 MB
+#   io-lulc-annual-v02 60 m, 5,500 km2   6.0M px  6.0 s
+#   io-lulc-annual-v02 100 m, 5,500 km2  2.2M px  1.3 s
 #
 # and a 2,462 km2 landscape already returns a vegetation index in 10.7 s from
 # MODIS and 56.9 s from Landsat, both of which work today behind the cap.

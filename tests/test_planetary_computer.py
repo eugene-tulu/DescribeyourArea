@@ -2,7 +2,7 @@
 
 These use the real Northern Rangelands Trust conservancy polygons because the
 defect under test is specifically about real source-tile boundaries: Melako spans
-four NASADEM tiles, and a single-tile read silently analysed 3% of its area.
+multiple Copernicus DEM tiles, and a single-tile read silently analysed 3% of its area.
 No mock can reproduce that.
 
 Run explicitly, since it needs network access:
@@ -44,8 +44,8 @@ def _bypass_sync_cap(feature: dict) -> dict:
     return {"feature": canonical, "bbox": bbox, "bbox_area_km2": main._bbox_area_km2(bbox)}
 
 # Simplified (~1 km) outlines from the published NRT conservancies GeoJSON.
-# II Ngwesi is 89 km2 and sits inside one NASADEM tile; Melako is 5,505 km2 and
-# straddles four, which is the case that used to break.
+# II Ngwesi is 89 km2 and sits inside one Copernicus DEM tile; Melako is
+# 5,505 km2 and straddles several, which is the case that used to break.
 II_NGWESI = {
     "type": "Feature",
     "properties": {"NAME": "II Ngwesi"},
@@ -83,7 +83,7 @@ def _network_available() -> bool:
         import pystac_client
 
         client = pystac_client.Client.open(main.STAC_URL)
-        client.get_collection("nasadem")
+        client.get_collection("cop-dem-glo-30")
         return True
     except Exception:
         return False
@@ -113,7 +113,7 @@ class RealElevationTests(unittest.TestCase):
         self.assertGreater(
             len(assets["dem"]),
             1,
-            "Melako straddles multiple NASADEM tiles; the search must return them all",
+            "Melako straddles multiple Copernicus DEM tiles; the search must return them all",
         )
         self.assertLessEqual(len(assets["dem"]), MAX_SOURCE_TILES)
 

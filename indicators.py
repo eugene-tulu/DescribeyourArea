@@ -35,7 +35,7 @@ def _synchronous_budget_km2(indicator: str) -> float:
 
     Land cover is the only module whose memory genuinely grows with area, so it
     gets a larger budget than the rest. The figures come from measurement, not
-    preference: WorldCover is 235 MB at 1,000 km2 and 1,205 MB at 5,500 km2.
+    preference: io-lulc-annual-v02 is 235 MB at 1,000 km2 and 1,205 MB at 5,500 km2.
     """
     # Read the definitions rather than re-deriving them from the environment.
     # Both were read here independently, which meant the defaults lived in two

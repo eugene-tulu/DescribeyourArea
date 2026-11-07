@@ -122,11 +122,11 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
 # Derivation (measured against Planetary Computer, 2026-09-26, one vCPU box, peak
 # RSS delta per request for a fresh process at the stated bounding-box area):
 #
-#   nasadem 30 m        10 km2 17 MB   100 km2 18 MB   1,000 km2 31 MB   5,500 km2 69 MB
-#   worldcover 10 m     10 km2 21 MB   100 km2 42 MB   1,000 km2 235 MB  5,500 km2 1,205 MB
+#   cop-dem-glo-30 30m  10 km2 17 MB   100 km2 18 MB   1,000 km2 31 MB   5,500 km2 69 MB
+#   io-lulc-annual-v02 10 m     10 km2 21 MB   100 km2 42 MB   1,000 km2 235 MB  5,500 km2 1,205 MB
 #   sentinel-2 20 m     2 km2 402 MB   100 km2 453 MB  (400 km2 exceeds the 75 s budget)
 #
-# Only worldcover has a genuinely area-driven memory curve, and NDVI is bounded by
+# Only io-lulc-annual-v02 has a genuinely area-driven memory curve, and NDVI is bounded by
 # time rather than area: its 372 MB floor is dask/odc-stac framework overhead, not
 # pixels, so 100 km2 costs 16% more than 2 km2. The single synchronous cap is
 # therefore set at the largest area where all three modules finish comfortably
@@ -155,7 +155,7 @@ MAX_AOI_VERTICES = _env_int("MAX_AOI_VERTICES", 10_000)
 # so an irregular outline is penalised by its own rectangle. Derived from
 # measurement; see README "Measured limits" and the reasoning above each value.
 #
-# One synchronous cap covers DEM and vegetation, and WorldCover gets a larger one
+# One synchronous cap covers DEM and vegetation, and io-lulc-annual-v02 gets a larger one
 # because it is the only product whose memory genuinely grows with area.
 #
 # This used to read "DEM is flat to 5,500 km2 (69 MB) ... so one synchronous cap
@@ -619,7 +619,7 @@ def _window_for_bbox(src, bbox_4326: list[float]):
     """Return the read window of ``src`` covering a WGS84 bounding box.
 
     ``from_bounds`` interprets its arguments in the raster's own CRS, so a
-    geographic bbox has to be reprojected first. NASADEM and WorldCover are
+    geographic bbox has to be reprojected first. cop-dem-glo-30 and io-lulc-annual-v02 are
     published in EPSG:4326, which hid this; Sentinel-2 tiles are UTM.
     """
     from rasterio.windows import from_bounds
@@ -979,12 +979,55 @@ async def _search_items(
     window_start: str = "",
     window_end: str = "",
 ) -> list:
-    """Fetch scenes for a sensor, retrying only transient failures."""
+    """Fetch scenes for a sensor, retrying only transient failures.
+
+    The index first, the STAC API second. A local GeoParquet index makes the
+    second read of any scene window a local column filter rather than a
+    paged API walk; a collection without a `geoparquet-items` snapshot, or a
+    download failure, degrades to searching exactly as before.
+    """
     if not window_start or not window_end:
         window_start, window_end = _resolve_window(None, None, 90)
     time_window = f"{window_start}/{window_end}"
 
+    # Geoparquet-index path. scene_assets returns the same columns the STAC
+    # item carries (id, datetime, cloud_cover, assets), so the sorting and
+    # capping below is identical from either source. This is a local filter,
+    # so it runs in a thread rather than in the event loop.
+    def from_index() -> list:
+        import pc_geoparquet
+
+        wanted = [a for a in (sensor.ndvi_asset, sensor.red, sensor.nir, sensor.cloud) if a]
+        pool = max(4 * max_scenes, 50)
+        cloud_max = None if sensor.cloud_mask == "product" else 30.0
+        rows = pc_geoparquet.scene_assets(
+            sensor.collection, bbox, window_start, window_end,
+            assets=wanted,
+            cloud_cover_max=cloud_max, limit=pool * 4,
+        )
+        if not rows:
+            return []
+        # Return STAC-item-shaped objects so the read path below is shared.
+        class _Item:
+            pass
+        items = []
+        for row in rows:
+            item = _Item()
+            item.id = row["id"]
+            item.datetime = row["datetime"]
+            item.properties = {"eo:cloud_cover": row["cloud_cover"]} if row["cloud_cover"] is not None else {}
+            item.assets = {
+                name: type("A", (), {"href": pc_geoparquet.sign_blob(href)})()
+                for name, href in row["assets"].items()
+            }
+            items.append(item)
+        return items
+
     def search_once() -> list:
+        # Index first; STAC only when the index has nothing.
+        indexed = from_index()
+        if indexed:
+            return indexed
         catalog = pystac_client.Client.open(STAC_URL)
         # Candidates must exceed the number of scenes actually used, or the
         # cloud-cover sort below has nothing to choose from. Capping the pool at
@@ -1632,8 +1675,8 @@ async def _find_core_assets(
         catalog = pystac_client.Client.open(STAC_URL)
         assets: dict[str, list[str]] = {}
         for name, collection, asset, needed, label in (
-            ("dem", "nasadem", "elevation", need_dem, "elevation"),
-            ("landcover", "esa-worldcover", "map", need_landcover, "land-cover"),
+            ("dem", "cop-dem-glo-30", "elevation", need_dem, "elevation"),
+            ("landcover", "io-lulc-annual-v02", "map", need_landcover, "land-cover"),
         ):
             if not needed:
                 continue
