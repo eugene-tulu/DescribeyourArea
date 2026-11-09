@@ -266,10 +266,10 @@ class _InFlightWork:
 INFLIGHT = _InFlightWork()
 
 
-async def run_blocking(func, *args):
+async def run_blocking(func, *args, **kwargs):
     """Run ``func`` in a thread while keeping it counted past a cancelled await."""
     task = asyncio.ensure_future(
-        asyncio.get_running_loop().run_in_executor(None, functools.partial(func, *args))
+        asyncio.get_running_loop().run_in_executor(None, functools.partial(func, *args, **kwargs))
     )
     INFLIGHT.enter()
     task.add_done_callback(lambda _: INFLIGHT.exit())
