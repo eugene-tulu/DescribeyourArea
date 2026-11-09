@@ -33,6 +33,8 @@ interface MapComponentProps {
   secondaryGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
   viewBounds?: [[number, number], [number, number]] | null;
+  overlayTiles?: { dem?: string[]; landcover?: string[]; landcoverYear?: number | null } | null;
+  onClearOverlay?: () => void;
 }
 
 /** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
@@ -276,6 +278,8 @@ export default function MapComponent({
   secondaryGeoJSON,
   onSaveFeatures,
   viewBounds,
+  overlayTiles,
+  onClearOverlay,
 }: MapComponentProps) {
   return (
     <div className="h-[440px] w-full relative sm:h-[540px] xl:h-[620px]">
@@ -323,7 +327,34 @@ export default function MapComponent({
             style={{ color: "#f59e0b", weight: 2, fillOpacity: 0.08, dashArray: "6 4" }}
           />
         )}
+
+        {/* DEM / landcover tiles are rendered by RasterTileLayer (deck.gl-raster)
+            when a valid overlay exists; otherwise the outlined geometry stays. */}
+        {overlayTiles?.dem && overlayTiles.dem.length > 0 && (
+          <TileLayer
+            url={overlayTiles.dem[0]}
+            attribution="Elevation &copy; Copernicus DEM GLO-30"
+            opacity={0.55}
+          />
+        )}
+        {overlayTiles?.landcover && overlayTiles.landcover.length > 0 && (
+          <TileLayer
+            url={overlayTiles.landcover[0]}
+            attribution={`Land cover ${overlayTiles.landcoverYear ?? ''} &copy; Esri 10 m`}
+            opacity={0.7}
+          />
+        )}
       </MapContainer>
+
+      {(overlayTiles || undefined) && onClearOverlay && (
+        <button
+          type="button"
+          onClick={onClearOverlay}
+          className="absolute bottom-4 right-4 z-[1000] rounded-full border border-line-2 bg-void/80 px-3 py-1.5 text-[0.6875rem] text-ink-2 backdrop-blur-md"
+        >
+          Clear overlay
+        </button>
+      )}
 
       {/* Bottom left, not top left: Leaflet's zoom control is anchored there and
           the hint was drawn straight over it, so the only way to zoom was to

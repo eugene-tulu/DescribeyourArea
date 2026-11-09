@@ -197,6 +197,19 @@ interface SensorProvenance {
   mask_authoritative?: boolean;
 }
 
+interface DemStats {
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
+  mean?: number;
+  min?: number;
+  max?: number;
+  std?: number;
+  terrain_type?: string;
+  valid_pixel_fraction?: number;
+  tiles?: string[];
+  [key: string]: unknown;
+}
+
 interface NdviStats {
   status: ModuleStatus;
   evidence?: ModuleEvidence;
@@ -229,6 +242,7 @@ interface LandcoverStats {
   dominant_percentage?: number;
   valid_pixel_count?: number;
   year?: number;
+  tiles?: string[];
   // Declared explicitly: the index signature below would otherwise make this
   // `unknown`, and the arithmetic in the working panel would not type-check.
   valid_pixel_fraction?: number;
@@ -3066,6 +3080,12 @@ export default function Home() {
                     secondaryGeoJSON={secondaryGeojson}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
+                    overlayTiles={analysisSummary ? {
+                      dem: (analysisSummary.dem as DemStats | null | undefined)?.tiles ?? undefined,
+                      landcover: (analysisSummary.landcover as LandcoverStats | null | undefined)?.tiles ?? undefined,
+                      landcoverYear: (analysisSummary.landcover as LandcoverStats | null | undefined)?.year ?? null,
+                    } : null}
+                    onClearOverlay={analysisSummary ? () => setAnalysisSummary(null) : undefined}
                   />
                   {drawnFeatures && drawnFeatures.features.length > 0 && (
                     <button
