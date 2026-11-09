@@ -1816,24 +1816,39 @@ def _resolve_landcover_year(start: Optional[str] = None,
     year the window covers*, so a 2017-2020 history does not resolve to 2023
     tiles. `start` bounds the window from below but never pushes it newer.
     """
+def _resolve_landcover_year(start: Optional[str] = None,
+                            end: Optional[str] = None) -> int:
+    """The landcover year for a request, honoring a window end date.
+
+    The latest published `io-lulc-annual-v02` year is `extent.upper-1` (2023)
+    and a year can only be read if it falls inside the extent. A window end
+    that goes past the extent resolves to the extent max (2023), not to the
+    window end (which may be 2025 or 2026 — there is no map for yet). `start`
+    never pushes the result newer than the latest published year.
+    """
     try:
         catalog = pystac_client.Client.open(STAC_URL)
         coll = catalog.get_collection("io-lulc-annual-v02")
         upper = (coll.extent.temporal.intervals[0][1] or "")[:4]
+        lower = (coll.extent.temporal.intervals[0][0] or "")[:4]
         latest = int(upper) - 1 if upper.isdigit() else 2023
+        earliest = int(lower) if lower.isdigit() else 2017
     except Exception:
-        latest = 2023
+        latest, earliest = 2023, 2017
     if end:
         try:
             latest = min(latest, int(end[:4]))
         except ValueError:
             pass
+    # Earliest-year floor: a window that starts before the collection exists
+    # must not surface a year with no tiles. Only raise to the earliest year,
+    # never to a start year newer than the latest published year.
     if start:
         try:
-            latest = max(latest, int(start[:4]))
+            latest = max(latest, min(int(start[:4]), latest))
         except ValueError:
             pass
-    return latest
+    return min(earliest, max(earliest, latest)) if latest < earliest else latest
 
 
 async def _find_core_assets(
