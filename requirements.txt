@@ -10,7 +10,7 @@ fastparquet==2026.9.0
 planetary-computer==1.0.0
 rasterio==1.5.2
 affine==2.4.0
-shapely==2.0.2
+shapely==2.1.2
 pyproj==3.7.2
 
 # Scientific Computing
