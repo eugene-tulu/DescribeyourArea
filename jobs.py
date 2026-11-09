@@ -45,13 +45,13 @@ MAX_PENDING_JOBS = int(os.getenv("RAINFALL_MAX_PENDING_JOBS", "25"))
 # slow one.
 JOB_LEASE_SECONDS = float(os.getenv("RAINFALL_JOB_LEASE_SECONDS", "1800"))
 
-JOB_VERSION = 2
+JOB_VERSION = 3
 
 # What a job computes. Rainfall is a cheap cache read; the others read rasters,
 # which is why they need a resolution and why they are the reason a large area is
 # queued rather than refused.
-INDICATORS = ("rainfall", "dem", "landcover", "ndvi", "vegetation_series")
-RUNTIME_INDICATORS = ("dem", "landcover", "ndvi", "vegetation_series")
+INDICATORS = ("rainfall", "dem", "landcover", "landcover_history", "ndvi", "vegetation_series")
+RUNTIME_INDICATORS = ("dem", "landcover", "landcover_history", "ndvi", "vegetation_series")
 
 
 def artefact_path(key: str, indicator: str) -> Path:
@@ -156,7 +156,8 @@ def pending_count() -> int:
 
 
 def status_for(key: str, indicator: str = "rainfall",
-               start: Optional[str] = None, end: Optional[str] = None) -> dict:
+               start: Optional[str] = None, end: Optional[str] = None,
+               year: Optional[int] = None) -> dict:
     """What a caller should be told about one study area.
 
     The cache is authoritative: if a series exists, the area is ready whatever the
@@ -166,7 +167,7 @@ def status_for(key: str, indicator: str = "rainfall",
     """
     if indicator == "rainfall" and _product_ready(key, _job_product(key), start, end):
         return {"state": READY, "cache_key": key, "source": "cache"}
-    if indicator != "rainfall" and _artefact_ready(key, indicator, start, end):
+    if indicator != "rainfall" and _artefact_ready(key, indicator, start, end, year):
         return {"state": READY, "cache_key": key, "indicator": indicator,
                 "source": "artefact"}
     job = read_job(key, indicator)
@@ -183,7 +184,7 @@ def status_for(key: str, indicator: str = "rainfall",
         if indicator == "rainfall" and not _product_ready(key, _job_product(key), start, end):
             return {"state": "not_submitted", "cache_key": key,
                     "reason": "stored window does not cover the requested window"}
-        if indicator != "rainfall" and not _artefact_ready(key, indicator, start, end):
+        if indicator != "rainfall" and not _artefact_ready(key, indicator, start, end, year):
             return {"state": "not_submitted", "cache_key": key, "indicator": indicator,
                     "reason": "stored window does not cover the requested window"}
     return {
@@ -263,13 +264,33 @@ def _product_ready(key: str, product: Optional[str],
 
 
 def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
-                    end: Optional[str] = None) -> bool:
-    """Whether an artefact for this area covers the requested window."""
+                    end: Optional[str] = None, year: Optional[int] = None) -> bool:
+    """Whether an artefact for this area covers the requested window/year."""
     payload = read_artefact(key, indicator)
     if payload is None:
         return False
-    if indicator in ("dem", "landcover"):
+    if indicator == "dem":
         return True  # no time dimension
+    if indicator in ("landcover", "landcover_history"):
+        # Year-valued: a stored artefact for a different year must not answer.
+        if year is None and start:
+            # start looks like a date; take its year as the landcover year.
+            try:
+                year = int(start[:4])
+            except ValueError:
+                year = None
+        if year is None:
+            return True  # caller did not name a year; any artefact answers
+        have = payload.get("year")
+        if have is None:
+            win = payload.get("window") or {}
+            try:
+                have = int((win.get("start") or "")[:4])
+            except ValueError:
+                have = None
+        if have is None:
+            return False
+        return have == year
     return _window_covers_payload(payload, start, end)
 
 
@@ -288,6 +309,7 @@ def submit(
     label: Optional[str] = None,
     submitted_by: Optional[str] = None,
     product: Optional[str] = None,
+    year: Optional[int] = None,
 ) -> dict:
     """Record a request to compute one area. Idempotent, and never blocks.
 
@@ -303,7 +325,7 @@ def submit(
     # window is not "already done" for them -- it is the 1-year answer to a
     # 5-year question. Treat it as not ready so the current window is queued
     # and computed over the union with the stored one in the worker.
-    current = status_for(key, indicator=indicator, start=start, end=end)
+    current = status_for(key, indicator=indicator, start=start, end=end, year=year)
     # A pending/running record must be returned so we do not queue a second
     # window. But a *ready* record whose coverage does not span this window
     # must fall through and queue the wider read.
@@ -334,6 +356,7 @@ def submit(
         "submitted_at": _now(),
         "start": start,
         "end": (end or None),
+        "year": year,
         "label": label,
         "submitted_by_prefix": submitted_by,
         "product": product,
@@ -351,7 +374,7 @@ def submit(
     # nothing had been submitted. Every non-rainfall indicator was affected, which
     # is the whole multi-module reading room, and it also stopped the backend's
     # autorun from firing for them because it gates on state == pending.
-    return status_for(key, indicator, start=start, end=end)
+    return status_for(key, indicator, start=start, end=end, year=year)
 
 
 def claim_next(*, retry_failed: bool = False) -> Optional[dict]:
@@ -471,7 +494,7 @@ async def _compute_job(
     # artefact ever written. A vegetation series could therefore never be
     # produced for any area that also had rainfall, which is every area
     # anyone would ask for it on.
-    if indicator != "rainfall" and _artefact_ready(key, indicator, job.get("start"), job.get("end")):
+    if indicator != "rainfall" and _artefact_ready(key, indicator, job.get("start"), job.get("end"), job.get("year")):
         complete(key, read_artefact(key, indicator), indicator)
         counts.update(processed=1, skipped=1)
         return counts
@@ -519,6 +542,7 @@ async def _compute_job(
                 area_km2=area, resolution_m=resolution,
                 window_start=job.get("start"),
                 window_end=job.get("end"), enforce_budget=False,
+                year=job.get("year"),
             )
             # The resolution to report is the one actually read, not the policy
             # target. A MODIS 250 m composite computed because the policy asked

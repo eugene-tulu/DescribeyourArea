@@ -38,6 +38,7 @@ from shapely.geometry import box, mapping, shape
 from shapely.ops import unary_union
 from affine import Affine
 from pyproj import CRS, Geod, Transformer
+import logging
 
 from contract import ContextResponse  # noqa: F401
 from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
@@ -279,6 +280,12 @@ async def run_blocking(func, *args):
 # --------------------------------------------------
 app = FastAPI(title="GeoContext Generator API")
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
+logger = logging.getLogger("geocontextualize")
+
 # Explicit origins are required because the API permits credentialed requests.
 # Production uses same-origin /api behind Nginx, but this also supports local dev.
 origins = [
@@ -334,6 +341,9 @@ class GeoJSONRequest(BaseModel):
     # the request so the live preview serves the product the reader chose rather
     # than silently answering with ERA5. Matches SubmitRequest.product.
     product: str = "rainfall"
+    # The land-cover year to read. `None` resolves to the latest published year
+    # and the year is echoed in the result, so the reader knows which one.
+    landcover_year: Optional[int] = None
 
 class RainfallLookupRequest(BaseModel):
     """Identify a study area, by geometry or by the key it hashes to."""
@@ -350,6 +360,9 @@ class SubmitRequest(RainfallLookupRequest):
     # worker that computes ERA5 would answer a different question from the one
     # queued, and the reader would have no way to tell.
     product: str = "rainfall"
+    # Land-cover year for landcover submissions. `None` resolves to the latest
+    # published year at compute time and is stamped on the artefact.
+    landcover_year: Optional[int] = None
 
 
 # The published response contract lives in contract.py. It used to be
@@ -357,8 +370,10 @@ class SubmitRequest(RainfallLookupRequest):
 # frontend's hand-written interfaces with nothing keeping them in step.
 
 # --------------------------------------------------
-# LANDCOVER LOOKUP
-# --------------------------------------------------
+# LEGIC: PC LANDCOVER -- keep the old dict as a disappearing alias for tests
+# LEGIC: The Esri/Impact Observatory 9-class vocabulary lives in registry.py:
+# `LULC_CLASS_LABELS`. The old ESA-WorldCover table is kept here for any
+# pending test imports; it must not label io-lulc-annual-v02.
 ESA_WORLDCOVER_CLASSES = {
     10: "Tree cover",
     20: "Shrubland",
@@ -373,9 +388,21 @@ ESA_WORLDCOVER_CLASSES = {
     100: "Moss and lichen",
 }
 
+IO_LULC_9_CLASSES: Dict[int, str] = {
+    1: "Water",
+    2: "Trees",
+    4: "Flooded Vegetation",
+    5: "Crops",
+    7: "Built Area",
+    8: "Bare Ground",
+    9: "Snow/Ice",
+    10: "Clouds",
+    11: "Rangeland",
+}
+
 def label_landcover(percentages: Dict[str, float]) -> Dict[str, float]:
     return {
-        ESA_WORLDCOVER_CLASSES.get(int(code), f"Unknown ({code})"): pct
+        IO_LULC_9_CLASSES.get(int(code), f"Unknown ({code})"): pct
         for code, pct in percentages.items()
     }
 
@@ -660,6 +687,104 @@ def _iter_tile_windows(src, bbox: list[float]):
     return window
 
 
+# ---------------------------------------------------------------------------
+# Equal-area statistics (EPSG:6933)
+# ---------------------------------------------------------------------------
+# Zonal fractions are pixel counts divided by pixels, but a degree-grid pixel's
+# ground area shrinks with latitude (`cos(lat)`), so a zonal mean on a geographic
+# grid weights one latitude's pixels more than another. Statistics on an
+# equal-area grid give every pixel the same ground area, so a fraction means the
+# same thing at any latitude. Valid to about 85 deg; polar areas fall back to
+# a local UTM zone (see _stats_crs).
+STATS_EPSG = _env_int("STATS_EPSG", 6933)
+_STATS_EPSG_MAX_LAT = 85.0
+
+
+def _stats_crs(bbox: list[float]):
+    """Equal-area analysis CRS: EPSG:6933 globally, UTM near the poles."""
+    if abs(bbox[1]) <= _STATS_EPSG_MAX_LAT and abs(bbox[3]) <= _STATS_EPSG_MAX_LAT:
+        return CRS.from_epsg(STATS_EPSG)
+    centre_lon = (bbox[0] + bbox[2]) / 2.0
+    centre_lat = (bbox[1] + bbox[3]) / 2.0
+    zone = min(60, max(1, int((centre_lon + 180.0) / 6.0) + 1))
+    return CRS.from_epsg((32700 if centre_lat < 0 else 32600) + zone)
+
+
+def _equal_area_target(bbox: list[float], native_res_m: float):
+    """Output grid in the equal-area CRS at the source's native effective res."""
+    from rasterio.transform import from_bounds as transform_from_bounds
+
+    crs = _stats_crs(bbox)
+    transformer = Transformer.from_crs(CRS.from_epsg(4326), crs, always_xy=True)
+    minx, miny = transformer.transform(bbox[0], bbox[1])
+    maxx, maxy = transformer.transform(bbox[2], bbox[3])
+    minx, maxx = min(minx, maxx), max(minx, maxx)
+    miny, maxy = min(miny, maxy), max(miny, maxy)
+    res = max(1.0, float(native_res_m))
+    width = max(1, int(math.ceil((maxx - minx) / res)))
+    height = max(1, int(math.ceil((maxy - miny) / res)))
+    transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
+    return crs, transform, width, height
+
+
+def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
+    """Yield masked arrays accumulated on the equal-area grid, not the native grid.
+
+    Each source tile is read once and warped onto the shared target grid; the
+    accumulation stays per-tile so peak memory is one warped window, not a
+    mosaic.
+    """
+    from rasterio.features import geometry_mask
+    from rasterio.warp import transform_geom
+
+    geometry = geojson["geometry"]
+    bbox = _feature_bbox(geojson)
+    target_crs = _stats_crs(bbox)
+    for href in asset_hrefs:
+        with rio.open(planetary_computer.sign(href)) as src:
+            win = _window_for_bbox(src, bbox)
+            if win is None:
+                continue
+            clipped, _ = mask(src, [geometry], crop=True, nodata=src.nodata)
+            if clipped.size == 0:
+                continue
+            native_res_m = abs(src.transform.a) or 30.0
+            target = _equal_area_target(bbox, native_res_m)
+            warped = _reproject_to_grid_values(
+                clipped[0].astype("float32"), src.transform, src.crs, target,
+                Resampling.nearest, np.nan,
+            )
+            # Rasterise the AOI onto the equal-area grid to know which cells
+            # belong to the study area.
+            from shapely.geometry import shape
+
+            projected = transform_geom(CRS.from_epsg(4326), target_crs, mapping(shape(geometry)))
+            in_aoi = ~geometry_mask(
+                [projected],
+                out_shape=(target[3], target[2]),
+                transform=target[1],
+                all_touched=True,
+            )
+            yield src, warped, in_aoi
+
+
+def _reproject_to_grid_values(values, src_transform, src_crs, target, resampling, nodata):
+    """Warp one masked block onto the shared equal-area grid."""
+    out = np.full((target[3], target[2]), nodata, dtype="float32")
+    reproject(
+        source=values,
+        destination=out,
+        src_transform=src_transform,
+        src_crs=src_crs,
+        dst_transform=target[1],
+        dst_crs=target[0],
+        resampling=resampling,
+        src_nodata=None,
+        dst_nodata=None,
+    )
+    return out
+
+
 def _iter_masked_tiles(asset_hrefs: list[str], geojson: dict):
     """Yield masked, in-AOI arrays for every source tile, skipping empty overlaps.
 
@@ -687,7 +812,7 @@ def _feature_bbox(geojson: dict) -> list[float]:
 
 
 def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, float]:
-    """Accumulate DEM statistics across every source tile covering the AOI."""
+    """Accumulate DEM statistics on the equal-area grid across every tile."""
     total = 0.0
     total_sq = 0.0
     count = 0
@@ -695,11 +820,10 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
     vmax: Optional[float] = None
     sampled = 0
     try:
-        for src, clipped in _iter_masked_tiles(asset_hrefs, geojson):
-            sampled += int(clipped[0].size)
-            arr = clipped[0].astype("float64")
-            valid = arr[arr != src.nodata] if src.nodata is not None else arr
-            valid = valid[np.isfinite(valid)]
+        for src, warped, in_aoi in _equal_area_masked_tiles(asset_hrefs, geojson):
+            sampled += int(in_aoi.sum())
+            arr = np.where(in_aoi, warped, np.nan).astype("float64")
+            valid = arr[np.isfinite(arr)]
             if valid.size == 0:
                 continue
             total += float(valid.sum())
@@ -727,6 +851,8 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
         "std": math.sqrt(variance),
         "valid_pixel_count": count,
         "valid_pixel_fraction": round(count / sampled, 4) if sampled else 0.0,
+        "stats_are_equal_area": True,
+        "crs": "EPSG:6933",
     }
 
 
@@ -756,19 +882,19 @@ def interpret_terrain(dem: Dict[str, float]) -> Dict[str, Any]:
     }
 
 
-def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict) -> Dict[str, Any]:
-    """Accumulate land-cover class counts across every source tile."""
+def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
+                                 year: Optional[int] = None) -> Dict[str, Any]:
+    """Accumulate land-cover class counts on the equal-area grid for one year."""
     counts: Counter = Counter()
     sampled = 0
     try:
-        for src, clipped in _iter_masked_tiles(asset_hrefs, geojson):
-            sampled += int(clipped[0].size)
-            arr = clipped[0].astype(int)
-            if src.nodata is not None:
-                arr = arr[arr != src.nodata]
-            if arr.size == 0:
+        for src, warped, in_aoi in _equal_area_masked_tiles(asset_hrefs, geojson):
+            sampled += int(in_aoi.sum())
+            arr = np.where(in_aoi, warped, np.nan)
+            valid = arr[np.isfinite(arr)]
+            if valid.size == 0:
                 continue
-            counts.update(arr.flatten().tolist())
+            counts.update(valid.astype(int).flatten().tolist())
     except Exception as exc:  # noqa: BLE001 - detail stays in the server log
         print(f"Landcover computation error: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
         return {"error": "landcover_unavailable"}
@@ -781,13 +907,20 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict) -> Dict
     labeled = label_landcover(percentages)
     dominant_class = max(labeled, key=labeled.get)
 
-    return {
+    result: Dict[str, Any] = {
         "classes": labeled,
         "dominant_class": dominant_class,
         "dominant_percentage": labeled[dominant_class],
         "valid_pixel_count": total,
         "valid_pixel_fraction": round(total / sampled, 4) if sampled else 0.0,
+        "stats_are_equal_area": True,
+        "crs": "EPSG:6933",
     }
+    if year is not None:
+        result["year"] = year
+        result["window"] = {"start": f"{year:04d}-01-01", "end": f"{year:04d}-12-31"}
+        result["source_collection"] = "io-lulc-annual-v02"
+    return result
 
 # --------------------------------------------------
 # NDVI COMPUTATION: BOUNDED PLANETARY COMPUTER WORKFLOW
@@ -1660,23 +1793,64 @@ def _requested_datasets(value: Optional[str]) -> set[str]:
     return requested
 
 
+def _resolve_landcover_year(start: Optional[str] = None,
+                            end: Optional[str] = None) -> int:
+    """The latest published IO LULC year for this request, from the year field.
+
+    `io-lulc-annual-v02` extent is 2017-01-01 -> 2024-01-01 (exclusive), so
+    the last year with data is 2023. A newer release extends this automatically
+    in the collection document; asking the server for the extent is the only
+    honest way to know.
+    """
+    try:
+        catalog = pystac_client.Client.open(STAC_URL)
+        coll = catalog.get_collection("io-lulc-annual-v02")
+        upper = (coll.extent.temporal.intervals[0][1] or "")[:4]
+        return int(upper) - 1 if upper.isdigit() else 2023
+    except Exception:
+        return 2023
+
+
 async def _find_core_assets(
     bbox: list[float],
     *,
     need_dem: bool,
     need_landcover: bool,
+    landcover_year: Optional[int] = None,
 ) -> dict[str, list[str]]:
     """Collect every source tile that intersects the AOI; signing happens on read.
 
     Returning a single tile (limit=1) silently analysed 3% of a multi-tile
     bounding box. Zonal statistics are accumulated per tile instead.
     """
+    def _landcover_for_year(catalog, year: int) -> list[str]:
+        """Hrefs for exactly one LULC year, dropping the overlapping prior-year item.
+
+        The collection publishes `datetime: null` with `end_datetime=<next>-01-01`,
+        so a STAC date filter `datetime=<N>-01-01/<N>-12-31` returns *both*
+        `tile-N` and `tile-(N-1)`. We keep only the item whose id ends `-{year}`.
+        """
+        suffix = f"-{year}"
+        search = catalog.search(
+            collections=["io-lulc-annual-v02"],
+            bbox=bbox,
+            datetime=f"{year}-01-01T00:00:00Z/{year}-12-31T23:59:59Z",
+            limit=MAX_SOURCE_TILES,
+            max_items=MAX_SOURCE_TILES,
+        )
+        hrefs = []
+        for item in search.items():
+            if not item.id.endswith(suffix):
+                continue
+            asset = item.assets["data"]
+            hrefs.append(asset.href)
+        return hrefs
+
     def search() -> dict[str, list[str]]:
         catalog = pystac_client.Client.open(STAC_URL)
         assets: dict[str, list[str]] = {}
         for name, collection, asset, needed, label in (
             ("dem", "cop-dem-glo-30", "elevation", need_dem, "elevation"),
-            ("landcover", "io-lulc-annual-v02", "map", need_landcover, "land-cover"),
         ):
             if not needed:
                 continue
@@ -1695,6 +1869,16 @@ async def _find_core_assets(
                     detail=f"No {label} data available for this area",
                 )
             assets[name] = hrefs
+        if need_landcover:
+            year = landcover_year or _resolve_landcover_year()
+            hrefs = _landcover_for_year(catalog, year)
+            if not hrefs:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No land-cover data available for this area in {year}",
+                )
+            assets["landcover"] = hrefs
+            assets["_landcover_year"] = year
         return assets
 
     try:
@@ -1741,6 +1925,7 @@ async def generate_context(
                 bbox,
                 need_dem="dem" in requested,
                 need_landcover="landcover" in requested,
+                landcover_year=request.landcover_year,
             ),
             timeout=ASSET_SEARCH_SECONDS,
         )
@@ -1763,10 +1948,12 @@ async def generate_context(
                     "limit_km2": MAX_LANDCOVER_BBOX_KM2,
                 }
             else:
+                landcover_year = core_assets.get("_landcover_year") if isinstance(core_assets.get("_landcover_year"), int) else request.landcover_year
                 raster_tasks["landcover"] = run_blocking(
                     compute_landcover_percentages,
                     core_assets["landcover"],
                     geojson,
+                    year=landcover_year,
                 )
         raster_timer = usage.Timer()
         raster_timer.__enter__()
@@ -1786,6 +1973,21 @@ async def generate_context(
             for name in raster_tasks:
                 module_ms[name] = raster_timer.elapsed_ms
         raster_results = dict(zip(raster_tasks.keys(), raster_values))
+        # Both DEM tiles are unsigned hrefs at rest; signing happens on read.
+        # Include them so the client can draw overlays (IDs of the tiles covering
+        # the AOI). Signed URLs are safe to ship: they are what the backend reads,
+        # and the SAS signature lives in the URL.
+        tiles_dem = list(core_assets.get("dem") or [])
+        tiles_landcover = list(core_assets.get("landcover") or [])
+        try:
+            dem["tiles"] = tiles_dem
+        except TypeError:
+            pass
+        try:
+            landcover["tiles"] = tiles_landcover
+        except TypeError:
+            pass
+
         dem = interpret_terrain(raster_results["dem"]) if "dem" in raster_results else None
         landcover = raster_results.get("landcover", landcover_over_limit)
 
@@ -1905,7 +2107,7 @@ async def generate_context(
         raise
     except Exception as e:
         # Never echo the raw exception: it routinely carries signed asset URLs.
-        print(f"CRITICAL ERROR in /generate-context: {type(e).__name__} - {str(e)[:200]}", file=sys.stderr)
+        logger.error("CRITICAL ERROR in /generate-context: %s - %s", type(e).__name__, str(e)[:200])
         raise HTTPException(status_code=500, detail="Processing failed; please retry shortly")
 
 # --------------------------------------------------
@@ -2814,12 +3016,18 @@ async def resolve_study_area(
                 try:
                     fallback = areas.GeoBoundariesResolver()
                     if len(parts) > 1:
-                        feature = fallback.by_name(parts[0], 1, admin1=parts[1])
+                        try:
+                            feature = fallback.by_name(parts[0], 2, admin2=parts[1])
+                            level_note = "district (level 2)"
+                        except areas.ResolverError:
+                            feature = fallback.by_name(parts[0], 1, admin1=parts[1])
+                            level_note = "region/county (level 1)"
                     else:
                         feature = fallback.by_name(parts[0], 0)
+                        level_note = "country (level 0)"
                     area = areas._area_from_feature(
                         feature, source="name", resolver=fallback.name,
-                        notes=("Resolved from the live geoBoundaries open dataset; "
+                        notes=(f"Resolved from the live geoBoundaries open dataset as {level_note}; "
                                "boundary currency and source vary by country.",))
                 except areas.ResolverUnavailable:
                     raise gaul_error
@@ -2929,13 +3137,18 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
 
 
 @app.get("/analytics/summary")
-async def analytics_summary(limit: int = 2000):
+async def analytics_summary(limit: int = 2000,
+                            x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key")):
     """Aggregate view of recent usage, for whoever is looking after the service.
 
     Aggregates only. The per-event rows are deliberately not returned: a row
     carries a timestamp, a duration and an area band, and a long enough tail of
     them starts to describe a specific person even without any field that does.
+
+    Requires X-Admin-Key: usage volume is business intelligence, so it is not
+    published to whoever can reach the API.
     """
+    require_admin_key(x_admin_key)
     import usage as _usage
 
     events = _usage.read_events()[-max(1, min(limit, 20000)):]

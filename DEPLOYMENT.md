@@ -113,8 +113,16 @@ aggregates a batch, which is the only shape these are meant to be read in.
 `POST /admin/rainfall/forget` deletes a cached rainfall series for one area,
 given a geometry or a 32-character cache key. The cache is keyed by a hash of the
 submitted geometry, so it is a record about a specific place; this is how a
-removal request is honoured. The endpoint is unauthenticated because it deletes
-only recomputable derived data, and the API is loopback-bound.
+removal request is honoured. The endpoint requires an `X-Admin-Key` header.
+The user-facing `POST /rainfall/forget` is keyed by the `cache_key` the
+submission returned — holding the key means you submitted that geometry — and
+is deliberately narrow: exact 32-hex keys only, artefacts for that key only,
+and the shared per-read cell cache is left alone.
+
+`GET /analytics/summary` aggregates usage events for operations. Aggregates
+only; per-event rows are never returned. Requires `X-Admin-Key`
+(usage volume is business intelligence, so it is not published to whoever
+can reach the API).
 
 ## Worker and alerts
 

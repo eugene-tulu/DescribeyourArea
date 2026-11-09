@@ -141,17 +141,15 @@ const DATASET_OPTIONS: Array<{
 ];
 
 const LANDCOVER_LABELS: Record<string, string> = {
-  "10": "Tree cover",
-  "20": "Shrubland",
-  "30": "Grassland",
-  "40": "Cropland",
-  "50": "Built-up areas",
-  "60": "Bare or sparse vegetation",
-  "70": "Snow & ice",
-  "80": "Permanent water bodies",
-  "90": "Herbaceous wetlands",
-  "95": "Mangroves",
-  "100": "Moss & lichen",
+  "1": "Water",
+  "2": "Trees",
+  "4": "Flooded Vegetation",
+  "5": "Crops",
+  "7": "Built Area",
+  "8": "Bare Ground",
+  "9": "Snow/Ice",
+  "10": "Clouds",
+  "11": "Rangeland",
 };
 
 // These mirror the declared contract in contract.py. Generate them from
@@ -230,6 +228,7 @@ interface LandcoverStats {
   dominant_class?: string;
   dominant_percentage?: number;
   valid_pixel_count?: number;
+  year?: number;
   // Declared explicitly: the index signature below would otherwise make this
   // `unknown`, and the arithmetic in the working panel would not type-check.
   valid_pixel_fraction?: number;
@@ -1114,12 +1113,18 @@ function DatasetResultCard({
     }
     const coverage: number | null = landcover.valid_pixel_fraction ?? null;
     const dominant = entries.reduce((a, b) => (a[1] >= b[1] ? a : b)) as [string, number];
+    const year = landcover.year;
     return (
       <ModuleBlock title={option.label} description={option.description}>
         <Headline
           value={`${formatNumber(dominant[1], 1)}%`}
           caption={LANDCOVER_LABELS[dominant[0]] || dominant[0]}
         />
+        {year && (
+          <p className="fig mt-1 text-[0.8125rem] text-ink-3">
+            {year} classification (Esri 10 m Land Cover)
+          </p>
+        )}
         <dl className="rows">
           {entries.map(([code, percentage]) => (
             <Figure key={code} term={LANDCOVER_LABELS[code] || code} value={`${formatNumber(percentage, 1)}%`} />
@@ -1132,6 +1137,7 @@ function DatasetResultCard({
             ['valid pixels', landcover.valid_pixel_count?.toLocaleString()],
             ['coverage', coverage == null ? null : `${formatNumber(coverage * 100, 1)}%`],
             ['source product', 'Esri 10 m Land Cover'],
+            ['year', year ?? 'latest'],
           ]}
         />
       </ModuleBlock>
@@ -1662,11 +1668,12 @@ export default function Home() {
       const km2 = Math.round(area.area_km2 ?? 0);
       const levelName = { 0: 'country', 1: 'region or county', 2: 'district' }[area.level as 0 | 1 | 2]
         ?? `level ${area.level ?? '?'}`;
+      const fallbackNote = area.level === 1 ? ' Fell back to the region/county (level 1); no district matched.' : '';
       toast({
         title: `${area.name} selected`,
-        description: km2 > (syncLimitKm2 ?? 100)
+        description: (km2 > (syncLimitKm2 ?? 100)
           ? `The full ${levelName} boundary covers ${km2.toLocaleString()} km², too large to read live, so it is read offline at a coarser resolution.`
-          : `The full ${levelName} boundary covers ${km2.toLocaleString()} km². The map has moved to it.`,
+          : `The full ${levelName} boundary covers ${km2.toLocaleString()} km². The map has moved to it.`) + fallbackNote,
         duration: 9000,
       });
     } catch (error) {
@@ -2567,6 +2574,23 @@ export default function Home() {
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
 
+  // One-tap "Describe this place": the four datasets, 5-year window,
+  // auto sensor, CHIRPS (closest to the ground). Every default is overridable.
+  const handleDescribe = () => {
+    setSelectedDatasets(['dem', 'landcover', 'ndvi', 'rainfall']);
+    setRainProduct('chirps');
+    setSelectedSensor('auto');
+    setCustomStart('');
+    setCustomEnd('');
+    setPeriodAmount(5);
+    setPeriodUnit('years');
+    trackEvent('describe_this_place');
+    // Slight delay for state to settle before analysis reads it.
+    window.setTimeout(() => void handleAnalyze(), 0);
+  };
+  const hasArea = !!(uploadedGeojson || drawnFeatures?.features.length || boundingBox);
+  const showDescribe = hasArea && !isLoading && !analysisSummary;
+
   const rainfallSubmission = activeCacheKey ? submission[activeCacheKey] : undefined;
   const rainfallPending = rainfallSubmission?.state === 'queued'
     || rainfallSubmission?.state === 'pending'
@@ -2983,6 +3007,14 @@ export default function Home() {
               </div>
 
               <div className="sticky bottom-0 z-20 border-t border-rule bg-surface/95 px-5 py-4 backdrop-blur">
+                {showDescribe && (
+                  <button
+                    onClick={handleDescribe}
+                    className="btn-primary mb-2 h-10 w-full text-[0.875rem]"
+                  >
+                    Describe this place
+                  </button>
+                )}
                 <Button
                   onClick={handleAnalyze}
                   disabled={

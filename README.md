@@ -1,7 +1,7 @@
 # GeoContextualize
 
 GeoContextualize turns a polygonal study area into a concise geospatial
-context: terrain from NASADEM, land cover from ESA WorldCover, and a bounded
+context: terrain from Copernicus DEM, land cover from Esri 10 m Land Cover, and a bounded
 Sentinel-2 NDVI composite from Microsoft Planetary Computer, plus the country
 containing the area.
 

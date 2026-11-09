@@ -169,6 +169,8 @@ ELEVATION = Product(
         "Produced using Copernicus WorldDEM-30 \u00a9 DLR e.V. 2010-2014 and "
         "\u00a9 Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS "
         "by the European Union and ESA; all rights reserved.",
+        "Zonal statistics are accumulated on an equal-area grid (EPSG:6933), so "
+        "a pixel count means a measurement normalised by area, not degrees.",
     ),
     fails_with=(
         ("elevation_unavailable", "No elevation data covers this area."),
@@ -194,12 +196,54 @@ LANDCOVER = Product(
         "An annual classification, so it reflects the year, not a scene.",
         "At 10 m this is the only module whose memory genuinely grows with area, "
         "so it has the largest budget of the four.",
+        "Zonal statistics are accumulated on an equal-area grid (EPSG:6933), so "
+        "a pixel count means a measurement normalised by area, not degrees.",
         "Known gap: this reader takes its tiles at native resolution and does not "
         "decimate, so a large area queued for land cover is still read at 10 m. "
         "The resolution ladder applies to vegetation and not to this, and the "
         "interface says so rather than offering a coarser read that does not "
         "happen. Measured: 1,205 MB at 5,500 km2, which is why it is the product "
         "that sets the request budget.",
+    ),
+    fails_with=(
+        ("landcover_unavailable", "No land-cover data covers this area."),
+        ("landcover_area_exceeded",
+         "Too large to read at 10 m on this server. Draw a smaller boundary, or "
+         "process the area offline, which reads the same product more coarsely."),
+    ),
+)
+
+# The Esri / Impact Observatory 9-class vocabulary, as published for
+# `io-lulc-annual-v02`. Values 3 and 6 are unused in the 9-class schema.
+# This table owns the class labels; a renderer must not hand-copy them.
+LULC_CLASS_LABELS: dict[int, str] = {
+    1: "Water",
+    2: "Trees",
+    4: "Flooded Vegetation",
+    5: "Crops",
+    7: "Built Area",
+    8: "Bare Ground",
+    9: "Snow/Ice",
+    10: "Clouds",
+    11: "Rangeland",
+}
+
+LANDCOVER_HISTORY = Product(
+    key="landcover_history",
+    label="Land cover history",
+    measure="land_cover_share",
+    units="%",
+    native_resolution_m=10.0,
+    meaningful_min_km2=0.01,
+    meaningful_max_km2=1000.0,
+    latency_days=None,
+    evidence=OBSERVED,
+    cost=(LIVE, COMPUTED),
+    source="Esri 10 m Land Cover (Impact Observatory, Sentinel-2)",
+    doi="10.5061/DZYR-JMP",
+    caveats=(
+        "Per-year classifications, so the timeseries is a list of annual maps.",
+        "A 10-year request reads 10 years of 10 m tiles; cost is per-year, not per-request.",
     ),
     fails_with=(
         ("landcover_unavailable", "No land-cover data covers this area."),
@@ -357,7 +401,7 @@ RAINFALL_CHIRPS = Product(
 
 PRODUCTS: dict[str, Product] = {
     p.key: p for p in (
-        ELEVATION, LANDCOVER, VEGETATION, RAINFALL, RAINFALL_CHIRPS,
+        ELEVATION, LANDCOVER, LANDCOVER_HISTORY, VEGETATION, RAINFALL, RAINFALL_CHIRPS,
         VEGETATION_SERIES,
     )
 }

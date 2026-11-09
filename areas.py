@@ -270,10 +270,18 @@ def resolve_by_name(resolver, query: str, *,
             f"'Country, Area' -- try 'Kenya, {name}'.",
             reason="needs_country")
 
-    feature = resolver.by_name(country, 1, admin1=name, simplify=simplify)
+    # L2 (district) is the default finer grain; L1 is the confirmed fallback.
+    # A wards-level planner asking for "Narok" expects a district, not a 35k km²
+    # county. by_name at level 2 finds it; if none exists, L1 answers.
+    try:
+        feature = resolver.by_name(country, 2, admin2=name, simplify=simplify)
+        level_name = "district (level 2)"
+    except ResolverError:
+        feature = resolver.by_name(country, 1, admin1=name, simplify=simplify)
+        level_name = "region/county (level 1)"
     return _area_from_feature(feature, source="name",
                               resolver=getattr(resolver, "name", "gaul"),
-                              notes=(f"Resolved as the {name} administrative area "
+                              notes=(f"Resolved as the {name} {level_name} "
                                      f"of {country}; its outline is the whole unit.",
                                      ))
 

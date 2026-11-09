@@ -46,6 +46,69 @@ def _synchronous_budget_km2(indicator: str) -> float:
             else main.MAX_SYNC_BBOX_KM2)
 
 
+async def _compute_landcover_history(
+    bbox: list[float],
+    geojson_geom: dict,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
+) -> dict:
+    """Per-year land-cover classes for a window, as a `series` of years."""
+    import datetime as dt
+
+    from main import _find_core_assets, compute_landcover_percentages
+
+    end = window_end or dt.date.today().isoformat()
+    start = window_start or f"{dt.date.fromisoformat(end[:10]).year - 6:04d}-01-01"
+    try:
+        start_year = int(start[:4])
+    except ValueError:
+        start_year = int(end[:4]) - 6
+    try:
+        end_year = int(end[:4])
+    except ValueError:
+        end_year = start_year + 6
+    if end_year < start_year:
+        end_year = start_year
+    if end_year - start_year > 10:
+        end_year = start_year + 10
+
+    series: list[dict[str, Any]] = []
+    for year in range(start_year, end_year + 1):
+        assets = await _find_core_assets(
+            bbox, need_dem=False, need_landcover=True, landcover_year=year,
+        )
+        if "_landcover_year" in assets and assets["_landcover_year"] != year:
+            continue
+        result = compute_landcover_percentages(
+            assets["landcover"],
+            {"type": "Feature", "properties": {}, "geometry": geojson_geom},
+            year=year,
+        )
+        if result.get("error"):
+            continue
+        series.append({
+            "month": f"{year:04d}-01",
+            "year": year,
+            "classes": result["classes"],
+            "dominant_class": result["dominant_class"],
+            "dominant_percentage": result["dominant_percentage"],
+        })
+    if not series:
+        return {"status": "unavailable", "reason": "no_landcover_years",
+                "message": "No Esri 10 m Land Cover maps were available for this area and period."}
+    return {
+        "status": "ok",
+        "indicator": "landcover_history",
+        "source": "Esri 10 m Land Cover (Impact Observatory, Sentinel-2)",
+        "collection": "io-lulc-annual-v02",
+        "resolution_m": 10.0,
+        "window": {"start": f"{series[0]['year']:04d}-01-01",
+                   "end": f"{series[-1]['year']:04d}-12-31"},
+        "series": series,
+        "source_collection": "io-lulc-annual-v02",
+    }
+
+
 async def compute_indicator(
     indicator: str,
     bbox: list[float],
@@ -56,6 +119,7 @@ async def compute_indicator(
     window_start: Optional[str] = None,
     window_end: Optional[str] = None,
     enforce_budget: bool = True,
+    year: Optional[int] = None,
 ) -> dict:
     """Compute one indicator and return a payload shaped like the contract's.
 
@@ -108,10 +172,19 @@ async def compute_indicator(
         return interpret_terrain(stats)
 
     if indicator == "landcover":
-        assets = await _find_core_assets(bbox, need_dem=False, need_landcover=True)
-        return compute_landcover_percentages(assets["landcover"],
-                                             {"type": "Feature", "properties": {},
-                                              "geometry": geojson_geom})
+        assets = await _find_core_assets(
+            bbox, need_dem=False, need_landcover=True,
+            landcover_year=year,
+        )
+        used_year = assets.get("_landcover_year", year)
+        return compute_landcover_percentages(
+            assets["landcover"],
+            {"type": "Feature", "properties": {}, "geometry": geojson_geom},
+            year=used_year,
+        )
+
+    if indicator == "landcover_history":
+        return await _compute_landcover_history(bbox, geojson_geom, window_start, window_end)
 
     if indicator == "ndvi":
         return await compute_vegetation_index(
@@ -125,8 +198,7 @@ async def compute_indicator(
     raise ValueError(f"unknown indicator {indicator!r}; choose from {('dem','landcover','ndvi','rainfall')}")
 
 
-def plan_indicator(
-    indicator: str,
+def plan_indicator(    indicator: str,
     bbox_area_km2: float,
     *,
     start: Optional[str] = None,

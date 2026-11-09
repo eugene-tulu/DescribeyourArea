@@ -74,6 +74,12 @@ class DemResult(BaseModel):
     terrain_type: Optional[str] = None
     valid_pixel_count: Optional[int] = None
     valid_pixel_fraction: Optional[float] = None
+    stats_are_equal_area: Optional[bool] = None
+    crs: Optional[str] = None
+    # Signed COG hrefs for spatial overlays, not data URLs.
+    tiles: Optional[List[str]] = None
+    terrain: Optional[Dict[str, Any]] = None
+    hart: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     evidence: ModuleEvidence
 
@@ -85,6 +91,13 @@ class LandcoverResult(BaseModel):
     dominant_percentage: Optional[float] = None
     valid_pixel_count: Optional[int] = None
     valid_pixel_fraction: Optional[float] = None
+    stats_are_equal_area: Optional[bool] = None
+    crs: Optional[str] = None
+    year: Optional[int] = None
+    window: Optional[Dict[str, Optional[str]]] = None
+    source_collection: Optional[str] = None
+    tiles: Optional[List[str]] = None
+    donut: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     evidence: ModuleEvidence
 

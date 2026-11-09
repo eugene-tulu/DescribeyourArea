@@ -1,10 +1,13 @@
 """Per-area monthly vegetation series from MODIS MOD13Q1, for a side-by-side
-comparison with rainfall.
+comparison with rainfall; Landsat covers the pre-2000 months that MODIS cannot.
 
-Why MOD13Q1 and not Landsat: it is a 16-day NDVI *product*, already cloud-masked
-by NASA, so no cloud decisions are made here and the cadence maps onto ERA5's
-monthly buckets. Landsat monthly is possible but thin at 16-day revisit, and thin
-composites produce swings that look like change and are not.
+MOD13Q1 is a 16-day NDVI *product*, already cloud-masked by NASA, so no cloud
+decisions are made here and the cadence maps onto ERA5's monthly buckets.
+Landsat monthly is possible but thin at 16-day revisit, and thin composites
+produce swings that look like change and are not -- which is why MODIS is the
+default. Before 2000-02 there is no MODIS at all, and Landsat is the only
+source that can answer; without it a "1991-2020 normal" for vegetation would
+be a claim about data that does not exist.
 
 Measured 2026-09-27 over a 5,505 km2 area: 1.42 s per month sequentially,
 0.41 s per month at 4-way concurrency, so 1991 to present is about three minutes.
@@ -31,6 +34,9 @@ MODIS_NDVI_ASSET = "250m_16_days_NDVI"
 MODIS_SCALE = 0.0001
 MODIS_FILL = -3000
 MODIS_NATIVE_M = 231.7  # the MODIS sinusoidal grid, not 250
+LANDSAT_COLLECTION = "landsat-c2-l2"
+LANDSAT_ARCHIVE_START = "1982-08-22"
+LANDSAT_NATIVE_M = 30.0
 CLIMATOLOGY_START = "1991-01-01"
 CLIMATOLOGY_END = "2020-12-31"
 DEFAULT_WORKERS = 4
@@ -91,6 +97,62 @@ def _month_range(start: str, end: str) -> list[str]:
         if month > 12:
             year, month = year + 1, 1
     return months
+
+
+def _needs_landsat(month: str) -> bool:
+    """Whether this month must come from Landsat because MODIS has no archive."""
+    return month < "2000-02"
+
+
+def _landsat_month_items(bbox, months) -> dict[str, Any]:
+    """One Landsat item per month for the pre-2000 window, NDVI computed from bands.
+
+    The scene path handles radiometric scale/offset (Landsat needs both; see
+    ``sensors.LANDSAT``) and returns a full item so callers can reuse
+    ``main._scene_index_on_grid``.
+    """
+    import sensors
+
+    landsat = sensors.LANDSAT
+    import pystac_client
+
+    catalog = pystac_client.Client.open(main.STAC_URL)
+    wanted = set(months)
+    found: dict[str, Any] = {}
+
+    def run() -> dict[str, Any]:
+        search = catalog.search(
+            collections=[LANDSAT_COLLECTION],
+            bbox=list(bbox),
+            datetime=f"{months[0]}-01/{months[-1]}-28",
+            limit=100,
+            max_items=2000,
+            query={"eo:cloud_cover": {"lt": 30}},
+        )
+        for item in search.items():
+            stamp = item.datetime or item.properties.get("start_datetime")
+            if stamp is None:
+                continue
+            if isinstance(stamp, str):
+                stamp = datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            key = f"{stamp.year:04d}-{stamp.month:02d}"
+            if key in wanted and key not in found:
+                found[key] = item
+        return found
+
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            result = run()
+            if result:
+                return result
+            last_error = RuntimeError("Landsat search returned no imagery")
+        except Exception as exc:  # noqa: BLE001 - transient, so retry then give up
+            last_error = exc
+        time.sleep(0.5 * (2 ** attempt))
+    if last_error is not None:
+        print(f"vegetation series: Landsat search failed: {last_error}", flush=True)
+    return found
 
 
 def _items_by_month(bbox, months) -> dict[str, Any]:
@@ -229,11 +291,21 @@ def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = N
     reads = months_to_read(start[:7] + "-01", end)
     baseline_start = _baseline_start(end, start[:7] + "-01")
     seconds = estimate_seconds(reads)
+    uses_landsat = start[:10] < "2000-02"
+    source = ("MODIS MOD13Q1 (250 m, 16-day) + Landsat (30 m) pre-2000 via Planetary Computer"
+              if uses_landsat else
+              "MODIS MOD13Q1 (250 m, 16-day) via Planetary Computer")
+    resolution_m = MODIS_NATIVE_M
+    resolution_changing = uses_landsat
     return {
         "indicator": "vegetation_series",
-        "source": "MODIS MOD13Q1 (250 m, 16-day) via Planetary Computer",
-        "resolution_m": MODIS_NATIVE_M,
+        "source": source,
+        "resolution_m": resolution_m,
+        "resolution_changing": resolution_changing,
         "reason": (
+            "MODIS for 2000 onwards (NASA-masked product); Landsat C2 L2 computed NDVI "
+            "for pre-2000 months, where MODIS has no archive"
+            if uses_landsat else
             "a 16-day NDVI product, already cloud-masked by NASA, so the monthly "
             "cadence matches rainfall and no cloud decision is made here"
         ),
@@ -282,17 +354,33 @@ def compute_monthly_series(
     # actually used is reported below rather than claimed as 1991-2020.
     baseline_start = _baseline_start(end, start)
     months = _month_range(baseline_start, end)
-    found = _items_by_month(bbox, months)
+    modis_months = [m for m in months if not _needs_landsat(m)]
+    landsat_months = [m for m in months if _needs_landsat(m)]
+    found = _items_by_month(bbox, modis_months) if modis_months else {}
+    landsat_found = _landsat_month_items(bbox, landsat_months) if landsat_months else {}
 
     geom = shape(geojson_geom)
-    reference = found.get(months[0]) or next((v for v in found.values() if v), None)
+    modis_reference = found.get(modis_months[0]) if modis_months else None
+    if modis_reference is None:
+        modis_reference = next((v for v in found.values() if v), None)
+    # Reference geometry comes from whichever source has imagery.
+    if modis_reference is None and not landsat_found:
+        return {
+            "status": "unavailable",
+            "reason": "no_modis_imagery",
+            "warning": "No MODIS MOD13Q1 or Landsat imagery covers this area for the period.",
+        }
+
+    reference = modis_reference
+    landsat_resolution_m = LANDSAT_NATIVE_M
     if reference is None:
+        # Only Landsat imagery exists (pre-2000 window). The MODIS mask/grid
+        # path cannot run; use the Landsat read path below at native resolution.
         return {
             "status": "unavailable",
             "reason": "no_modis_imagery",
             "warning": "No MODIS MOD13Q1 imagery covers this area for the period.",
         }
-
     with rio.open(planetary_computer.sign(reference)) as src:
         window = main._window_for_bbox(src, bbox)
         if window is None:
@@ -382,13 +470,20 @@ def compute_monthly_series(
         series.append(entry)
 
     thin = [r["month"] for r in series if r["area_fraction"] < 0.9]
+    uses_landsat = any(_needs_landsat(m) for m in [r["month"] for r in rows])
 
     return {
         "status": "ok" if series else "unavailable",
         "indicator": "monthly_vegetation_index",
-        "source": "MODIS MOD13Q1 (250 m, 16-day) via Planetary Computer",
+        "source": ("MODIS MOD13Q1 + Landsat C2 L2 pre-2000 via Planetary Computer"
+                   if uses_landsat else
+                   "MODIS MOD13Q1 (250 m, 16-day) via Planetary Computer"),
         "resolution_km": round(MODIS_NATIVE_M / 1000.0, 3),
         "native_resolution_m": MODIS_NATIVE_M,
+        "resolution_changing": uses_landsat,
+        "resolution_note": ("1991-2000 months are 30 m Landsat NDVI (computed from red/NIR "
+                            "with scale 2.75e-05 and offset -0.2); 2000+ is 231.7 m MODIS"
+                            if uses_landsat else None),
         "method": "area mean of the monthly MOD13Q1 NDVI composites, masked to the study area",
         "window": {"start": start, "end": end},
         "read_from": rows[0]["month"],
