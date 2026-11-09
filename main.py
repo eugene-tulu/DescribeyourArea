@@ -753,6 +753,13 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
             if clipped.size == 0:
                 continue
             native_res_m = abs(src.transform.a) or 30.0
+            # `native_res_m` is in source units (degrees for 4326). Convert
+            # to metres in the target before the target grid is computed.
+            if CRS.from_epsg(4326) == src.crs:
+                from pyproj import Geod
+
+                factor = 1.0 / max(1e-9, math.cos(math.radians((bbox[1] + bbox[3]) / 2.0)))
+                native_res_m = max(1.0, native_res_m * 111319.0 * factor)
             target = _equal_area_target(bbox, native_res_m)
             # Rasterise the AOI onto the equal-area grid first, then warp the
             # tile's window onto it: mask and pixels finally live in one CRS.
@@ -768,13 +775,19 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
             )
             # Clear any out-of-AOI cells: the statistics grid is equal-area
             # now, so membership on this grid is the only mask that matters.
-            warped = np.where(in_aoi, warped, np.nan)
+            warped = np.where(in_aoi, warped, np.nan).astype("float32")
             yield src, warped, in_aoi
 
 
 def _reproject_to_grid_values(values, src_transform, src_crs, target, resampling, nodata):
     """Warp one masked block onto the shared equal-area grid."""
     out = np.full((target[3], target[2]), nodata, dtype="float32")
+    # Source nodata may be None (GLO-30 advertises None); the 0.0 padding that
+    # mask() may put at tile edges is then *valid data* for reproject(), which
+    # spreads it. Treat any non-positive nodata the same way: a cell warped from
+    # fully-outside the source window overwrites `out` with source 0.0 and
+    # would otherwise be counted as a real elevation.
+    effective_nodata = np.nan
     reproject(
         source=values,
         destination=out,
@@ -784,7 +797,7 @@ def _reproject_to_grid_values(values, src_transform, src_crs, target, resampling
         dst_crs=target[0],
         resampling=resampling,
         src_nodata=None,
-        dst_nodata=None,
+        dst_nodata=effective_nodata,
     )
     return out
 
@@ -1881,7 +1894,7 @@ async def _find_core_assets(
         catalog = pystac_client.Client.open(STAC_URL)
         assets: dict[str, list[str]] = {}
         for name, collection, asset, needed, label in (
-            ("dem", "cop-dem-glo-30", "elevation", need_dem, "elevation"),
+            ("dem", "cop-dem-glo-30", "data", need_dem, "elevation"),
         ):
             if not needed:
                 continue
