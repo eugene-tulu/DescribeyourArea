@@ -17,7 +17,10 @@ entry point. Browser calls use the same-origin `/api` path.
 git clone --branch main https://github.com/eugene-tulu/DescribeyourArea.git /srv/geocontextualize
 cd /srv/geocontextualize
 cp .env.example .env
-# Set the explicit CORS_ORIGINS if the defaults do not match your host.
+# CORS_ORIGINS must be set (bare-IP HTTPS in production, same-origin /api in
+# front of nginx). The default `http://localhost:3000` serves no purpose in
+# production: the frontend calls /api behind nginx. Set e.g.
+# CORS_ORIGINS=https://209.38.197.161 before docker compose up.
 docker compose up -d --build
 docker compose ps
 curl --fail http://127.0.0.1:8001/health

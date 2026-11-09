@@ -37,6 +37,20 @@ interface MapComponentProps {
   onClearOverlay?: () => void;
 }
 
+function isAllowedOverlayUrl(url: string | undefined | null): boolean {
+  if (!url) return false;
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && (
+      u.hostname.endsWith("ai4edataeuwest.blob.core.windows.net") ||
+      u.hostname.endsWith("amazonaws.com") ||
+      u.hostname === "planetarycomputer.microsoft.com"
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
  *
  * Handles Polygon, MultiPolygon and FeatureCollection uploads so the map can
@@ -328,16 +342,17 @@ export default function MapComponent({
           />
         )}
 
-        {/* DEM / landcover tiles are rendered by RasterTileLayer (deck.gl-raster)
-            when a valid overlay exists; otherwise the outlined geometry stays. */}
-        {overlayTiles?.dem && overlayTiles.dem.length > 0 && (
+        {/* DEM / landcover hrefs come from the backend and carry SAS tokens.
+            Render only allowlisted hosts; TileLayer is the fallback renderer
+            for signed Planetary Computer COGs. */}
+        {overlayTiles?.dem && overlayTiles.dem.length > 0 && isAllowedOverlayUrl(overlayTiles.dem[0]) && (
           <TileLayer
             url={overlayTiles.dem[0]}
             attribution="Elevation &copy; Copernicus DEM GLO-30"
             opacity={0.55}
           />
         )}
-        {overlayTiles?.landcover && overlayTiles.landcover.length > 0 && (
+        {overlayTiles?.landcover && overlayTiles.landcover.length > 0 && isAllowedOverlayUrl(overlayTiles.landcover[0]) && (
           <TileLayer
             url={overlayTiles.landcover[0]}
             attribution={`Land cover ${overlayTiles.landcoverYear ?? ''} &copy; Esri 10 m`}

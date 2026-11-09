@@ -22,8 +22,8 @@ numpy==2.4.6
 # a cache.
 xarray==2026.4.0
 zarr==3.2.1
-icechunk>=2.0.0
-pcodec>=1.0.0
+icechunk==2.3.1
+pcodec==1.1.0
 
 # boto3 backs the rainfall series cache in Spaces (tools/sync_rainfall_cache.py).
 # icechunk talks S3 through its own Rust client, so it does not pull this in --

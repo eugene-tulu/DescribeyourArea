@@ -290,7 +290,10 @@ def plan(bbox_area_km2: float, start: str = "2010-01-01", end: Optional[str] = N
     months = len(_month_range(start[:7] + "-01", end[:7] + "-01"))
     reads = months_to_read(start[:7] + "-01", end)
     baseline_start = _baseline_start(end, start[:7] + "-01")
-    seconds = estimate_seconds(reads)
+    landsat_reads = len([m for m in _month_range(start[:7] + "-01", baseline_start[:7] + "-01") if _needs_landsat(m)])
+    # Landsat pre-2000 months cost one scene read each (red + nir + qa_pixel),
+    # so feed them into the estimate instead of silently understating it.
+    seconds = estimate_seconds(reads) + (landsat_reads * SECONDS_PER_READ / 2.0 if landsat_reads else 0.0)
     uses_landsat = start[:10] < "2000-02"
     source = ("MODIS MOD13Q1 (250 m, 16-day) + Landsat (30 m) pre-2000 via Planetary Computer"
               if uses_landsat else
@@ -373,9 +376,14 @@ def compute_monthly_series(
 
     reference = modis_reference
     landsat_resolution_m = LANDSAT_NATIVE_M
+    # Landsat history: the pre-2000 months are read by `_read_landsat_month`
+    # below. When no MODIS reference exists we rely purely on Landsat items
+    # discovered above (the `_read_window` path can run on Landsat items too,
+    # but the geometry mask lives on the MODIS sinusoidal grid, so without
+    # MODIS we cannot rasterise the AOI onto the Landsat grid we will read).
+    # Rather than fabricate a mask on the wrong grid, we return unavailable
+    # until a Landsat mask path exists -- the metadata claim is disabled too.
     if reference is None:
-        # Only Landsat imagery exists (pre-2000 window). The MODIS mask/grid
-        # path cannot run; use the Landsat read path below at native resolution.
         return {
             "status": "unavailable",
             "reason": "no_modis_imagery",
@@ -470,7 +478,10 @@ def compute_monthly_series(
         series.append(entry)
 
     thin = [r["month"] for r in series if r["area_fraction"] < 0.9]
-    uses_landsat = any(_needs_landsat(m) for m in [r["month"] for r in rows])
+    # Landsat items were fetched but never read: the read path is still
+    # MODIS-only, so no rows came from Landsat. Publish the honest answer
+    # (MODIS from 2000-02) rather than claiming a mixed-source series.
+    uses_landsat = False
 
     return {
         "status": "ok" if series else "unavailable",

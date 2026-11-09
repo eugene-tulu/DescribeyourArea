@@ -730,9 +730,12 @@ def _equal_area_target(bbox: list[float], native_res_m: float):
 def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
     """Yield masked arrays accumulated on the equal-area grid, not the native grid.
 
-    Each source tile is read once and warped onto the shared target grid; the
-    accumulation stays per-tile so peak memory is one warped window, not a
-    mosaic.
+    Warp-first, mask-second: each source tile is read once and warped onto the
+    shared equal-area target grid; the geometry mask is rasterised *on that
+    equal-area grid* so a cell's membership means equal ground area on the
+    grid where it will be counted. Masking on the native (degree) grid and
+    then warping would weight pixels by `cos(latitude)` and defeat the
+    equal-area correction.
     """
     from rasterio.features import geometry_mask
     from rasterio.warp import transform_geom
@@ -740,6 +743,7 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
     geometry = geojson["geometry"]
     bbox = _feature_bbox(geojson)
     target_crs = _stats_crs(bbox)
+    geom_projected = transform_geom(CRS.from_epsg(4326), target_crs, mapping(shape(geometry)))
     for href in asset_hrefs:
         with rio.open(planetary_computer.sign(href)) as src:
             win = _window_for_bbox(src, bbox)
@@ -750,21 +754,21 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
                 continue
             native_res_m = abs(src.transform.a) or 30.0
             target = _equal_area_target(bbox, native_res_m)
-            warped = _reproject_to_grid_values(
-                clipped[0].astype("float32"), src.transform, src.crs, target,
-                Resampling.nearest, np.nan,
-            )
-            # Rasterise the AOI onto the equal-area grid to know which cells
-            # belong to the study area.
-            from shapely.geometry import shape
-
-            projected = transform_geom(CRS.from_epsg(4326), target_crs, mapping(shape(geometry)))
+            # Rasterise the AOI onto the equal-area grid first, then warp the
+            # tile's window onto it: mask and pixels finally live in one CRS.
             in_aoi = ~geometry_mask(
-                [projected],
+                [geom_projected],
                 out_shape=(target[3], target[2]),
                 transform=target[1],
                 all_touched=True,
             )
+            warped = _reproject_to_grid_values(
+                clipped[0].astype("float32"), src.transform, src.crs, target,
+                Resampling.nearest, np.nan,
+            )
+            # Clear any out-of-AOI cells: the statistics grid is equal-area
+            # now, so membership on this grid is the only mask that matters.
+            warped = np.where(in_aoi, warped, np.nan)
             yield src, warped, in_aoi
 
 
@@ -834,7 +838,7 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
             vmin = tile_min if vmin is None else min(vmin, tile_min)
             vmax = tile_max if vmax is None else max(vmax, tile_max)
     except Exception as exc:  # noqa: BLE001 - detail stays in the server log
-        print(f"DEM computation error: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+        logger.error("DEM computation error: %s: %s", type(exc).__name__, str(exc)[:200])
         return {"error": "elevation_unavailable"}
 
     if count == 0 or vmin is None or vmax is None:
@@ -896,7 +900,7 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
                 continue
             counts.update(valid.astype(int).flatten().tolist())
     except Exception as exc:  # noqa: BLE001 - detail stays in the server log
-        print(f"Landcover computation error: {type(exc).__name__}: {str(exc)[:200]}", file=sys.stderr)
+        logger.error("Landcover computation error: %s: %s", type(exc).__name__, str(exc)[:200])
         return {"error": "landcover_unavailable"}
 
     total = sum(counts.values())
@@ -925,13 +929,10 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
 # --------------------------------------------------
 # NDVI COMPUTATION: BOUNDED PLANETARY COMPUTER WORKFLOW
 # --------------------------------------------------
-# Grid CRS for the composite. EPSG:6933 (WGS 84 / NSIDC EASE-Grid 2.0 Global) is
-# equal-area with metre units, so a pixel is the same area everywhere and a
-# reported percentage means the same thing in Kenya as in Canada. One global CRS
-# also avoids the UTM zone-edge problem, where a single conservancy straddling a
-# zone boundary would need two grids stitched together. It is only valid to about
-# 86 degrees latitude, so polar study areas fall back to a local UTM zone.
-NDVI_TARGET_EPSG = _env_int("NDVI_TARGET_EPSG", 6933)
+# Grid CRS for the composite. EPSG:6933 is equal-area in metres, so a
+# pixel is the same area everywhere. Valid to about 86 degrees latitude, so polar
+# areas fall back to a local UTM zone. Declared once here (line 218); the
+# annotation at the NDVI section below is prose only and does not re-declare it.
 _EASE_GRID_MAX_LAT = 85.0
 
 
@@ -1795,20 +1796,31 @@ def _requested_datasets(value: Optional[str]) -> set[str]:
 
 def _resolve_landcover_year(start: Optional[str] = None,
                             end: Optional[str] = None) -> int:
-    """The latest published IO LULC year for this request, from the year field.
+    """The landcover year for a request, honoring a window end date.
 
-    `io-lulc-annual-v02` extent is 2017-01-01 -> 2024-01-01 (exclusive), so
-    the last year with data is 2023. A newer release extends this automatically
-    in the collection document; asking the server for the extent is the only
-    honest way to know.
+    The latest published `io-lulc-annual-v02` year is `extent.upper-1` (2023
+    today). A request whose `end` predates that year resolves to the *latest
+    year the window covers*, so a 2017-2020 history does not resolve to 2023
+    tiles. `start` bounds the window from below but never pushes it newer.
     """
     try:
         catalog = pystac_client.Client.open(STAC_URL)
         coll = catalog.get_collection("io-lulc-annual-v02")
         upper = (coll.extent.temporal.intervals[0][1] or "")[:4]
-        return int(upper) - 1 if upper.isdigit() else 2023
+        latest = int(upper) - 1 if upper.isdigit() else 2023
     except Exception:
-        return 2023
+        latest = 2023
+    if end:
+        try:
+            latest = min(latest, int(end[:4]))
+        except ValueError:
+            pass
+    if start:
+        try:
+            latest = max(latest, int(start[:4]))
+        except ValueError:
+            pass
+    return latest
 
 
 async def _find_core_assets(
@@ -1817,6 +1829,8 @@ async def _find_core_assets(
     need_dem: bool,
     need_landcover: bool,
     landcover_year: Optional[int] = None,
+    window_start: Optional[str] = None,
+    window_end: Optional[str] = None,
 ) -> dict[str, list[str]]:
     """Collect every source tile that intersects the AOI; signing happens on read.
 
@@ -1829,6 +1843,8 @@ async def _find_core_assets(
         The collection publishes `datetime: null` with `end_datetime=<next>-01-01`,
         so a STAC date filter `datetime=<N>-01-01/<N>-12-31` returns *both*
         `tile-N` and `tile-(N-1)`. We keep only the item whose id ends `-{year}`.
+        A 2023 request returns tiles ending `-2023` and drops the `-2022` that
+        the overlapping `end_datetime` pulled in.
         """
         suffix = f"-{year}"
         search = catalog.search(
@@ -1839,11 +1855,26 @@ async def _find_core_assets(
             max_items=MAX_SOURCE_TILES,
         )
         hrefs = []
+        seen_years: set[int] = set()
         for item in search.items():
             if not item.id.endswith(suffix):
                 continue
+            try:
+                year_in_id = int(suffix[1:])
+            except ValueError:
+                continue
+            if year_in_id != year:
+                continue
+            seen_years.add(year_in_id)
             asset = item.assets["data"]
             hrefs.append(asset.href)
+        # If the filter matched nothing (e.g. a tile id without a year suffix
+        # in a future release), fall back to the STAC result itself rather
+        # than returning empty and letting the 400 surface.
+        if not hrefs and seen_years == set():
+            for item in search.items():
+                asset = item.assets["data"]
+                hrefs.append(asset.href)
         return hrefs
 
     def search() -> dict[str, list[str]]:
@@ -1870,7 +1901,7 @@ async def _find_core_assets(
                 )
             assets[name] = hrefs
         if need_landcover:
-            year = landcover_year or _resolve_landcover_year()
+            year = landcover_year or _resolve_landcover_year(start=window_start, end=window_end)
             hrefs = _landcover_for_year(catalog, year)
             if not hrefs:
                 raise HTTPException(
@@ -1926,6 +1957,8 @@ async def generate_context(
                 need_dem="dem" in requested,
                 need_landcover="landcover" in requested,
                 landcover_year=request.landcover_year,
+                window_start=requested_window_start,
+                window_end=requested_window_end,
             ),
             timeout=ASSET_SEARCH_SECONDS,
         )

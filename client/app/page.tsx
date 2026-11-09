@@ -2191,6 +2191,12 @@ export default function Home() {
         const response = await fetch(
           `${backendUrl}/rainfall/status?${statusParams.toString()}`,
         );
+        if (response.status === 429) {
+          // nginx rate-limited us: grow the pause rather than surfacing an
+          // error; the worker is still computing in the background.
+          await new Promise((resolve) => setTimeout(resolve, 1000 + attempt * 300));
+          continue;
+        }
         if (response.ok) data = await response.json();
       } catch {
         /* tolerate a transient failure rather than abandoning the job */
@@ -2590,9 +2596,13 @@ export default function Home() {
 
   // One-tap "Describe this place": the four datasets, 5-year window,
   // auto sensor, CHIRPS (closest to the ground). Every default is overridable.
+  // The setters synchronously update the refs that handleAnalyze reads, so the
+  // analysis that follows in the same tick sees the new choices rather than
+  // yesterday's state (React updates are async, so a bare setState would race).
   const handleDescribe = () => {
     setSelectedDatasets(['dem', 'landcover', 'ndvi', 'rainfall']);
     setRainProduct('chirps');
+    rainProductRef.current = 'chirps';
     setSelectedSensor('auto');
     setCustomStart('');
     setCustomEnd('');
