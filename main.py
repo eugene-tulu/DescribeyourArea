@@ -2034,23 +2034,20 @@ async def generate_context(
             for name in raster_tasks:
                 module_ms[name] = raster_timer.elapsed_ms
         raster_results = dict(zip(raster_tasks.keys(), raster_values))
+
+        dem = interpret_terrain(raster_results["dem"]) if "dem" in raster_results else None
+        landcover = raster_results.get("landcover", landcover_over_limit)
+
         # Both DEM tiles are unsigned hrefs at rest; signing happens on read.
         # Include them so the client can draw overlays (IDs of the tiles covering
         # the AOI). Signed URLs are safe to ship: they are what the backend reads,
         # and the SAS signature lives in the URL.
         tiles_dem = list(core_assets.get("dem") or [])
         tiles_landcover = list(core_assets.get("landcover") or [])
-        try:
+        if isinstance(dem, dict):
             dem["tiles"] = tiles_dem
-        except TypeError:
-            pass
-        try:
+        if isinstance(landcover, dict):
             landcover["tiles"] = tiles_landcover
-        except TypeError:
-            pass
-
-        dem = interpret_terrain(raster_results["dem"]) if "dem" in raster_results else None
-        landcover = raster_results.get("landcover", landcover_over_limit)
 
         ndvi_stats = None
         if include_ndvi and "ndvi" in requested:
