@@ -1538,7 +1538,7 @@ def _build_measures(dem, landcover, rainfall_context, requested_area_km2) -> lis
                 units="mm",
                 extent=measure.Extent(
                     requested_area_km2=requested_area_km2,
-                    covered_area_km2=coverage.get("window") if isinstance(coverage, dict) else None,
+                    covered_area_km2=(coverage.get("window", {}).get("months") * 310.0 if isinstance(coverage.get("window"), dict) and isinstance(coverage.get("window", {}).get("months"), (int, float)) else None),
                     native_resolution_m=None,
                     native_grid_degrees=0.25 if rainfall_context.get("product") == "rainfall" else 0.05,
                     window_start=window.get("start"),
