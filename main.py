@@ -721,10 +721,20 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
                 continue
             if win.width < 1 or win.height < 1:
                 continue
+            # mask() expects geometries in the raster's own CRS. The geometry
+            # is in WGS84, so on a UTM tile (IO LULC v02) reproject it first
+            # or rasterio reports "Input shapes do not overlap raster".
+            src_crs = src.crs
+            if src_crs is None or src_crs.to_epsg() == 4326:
+                geom_for_read = geometry
+            else:
+                from rasterio.warp import transform_geom as _tgeom
+                from pyproj import CRS as _C
+                geom_for_read = _tgeom(_C.from_epsg(4326), src_crs, mapping(shape(geometry)))
             try:
-                clipped, _tb = mask(src, [geometry], crop=True, nodata=src.nodata)
+                clipped, _tb = mask(src, [geom_for_read], crop=True, nodata=src.nodata)
             except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
-                if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError":
+                if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError" or "do not overlap" in str(exc):
                     continue
                 raise
             if clipped.size == 0:
