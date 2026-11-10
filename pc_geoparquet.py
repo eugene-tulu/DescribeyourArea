@@ -209,6 +209,13 @@ def _part_specs(names: list[str]) -> list[tuple[str, str, str]]:
             specs.append((name, months[0], months[1]))
         elif months:
             specs.append((name, months[0], months[0]))
+        else:
+            # A single monthly-verified file with no date in the filename
+            # (e.g. a dataset whose snapshot is one blob, not a per-month
+            # part, such as io-lulc-annual-v02). Treat it as covering all
+            # time so ensure_index can serve any window from it instead
+            # of returning [] and forcing a STAC fallback every read.
+            specs.append((name, "1970-01", "2100-12"))
     return specs
 
 
@@ -341,7 +348,7 @@ def month_assets(collection: str, bbox: list[float], start: str, end: str,
 
 
 def tile_assets(collection: str, bbox: list[float], asset: str,
-                limit: int = 64) -> list[str]:
+                limit: int = 64, year: Optional[int] = None) -> list[str]:
     """Signed asset hrefs for every item intersecting `bbox`, from the index.
 
     The tile counterpart of :func:`month_assets`. Static collections (DEM,
@@ -349,6 +356,10 @@ def tile_assets(collection: str, bbox: list[float], asset: str,
     datetime to bucket by, so ``ensure_index``'s date-partition logic is
     bypassed and the entire collection part is read. Column projection keeps
     the read to ``bbox`` + the one href column.
+
+    When `year` is given (io-lulc-annual-v02), filter to that year's tiles
+    so a single geoparquet blob containing 2017-2023 does not spill every
+    year into the caller's list.
 
     Returns [] when the index cannot serve (no parts, missing asset, download
     failure) -- the caller falls back to a STAC search, never to nothing.
@@ -366,21 +377,27 @@ def tile_assets(collection: str, bbox: list[float], asset: str,
     minx, miny, maxx, maxy = bbox
     href_column = f"assets.{asset}.href"
     found: list[str] = []
+    suffix = f"-{year}" if year else None
     for path in paths:
         handle = ParquetFile(str(path))
         available = set(handle.columns)
-        columns = [c for c in ("bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax",
+        columns = [c for c in ("id", "bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax",
                                href_column) if c in available]
         if href_column not in columns:
             # A snapshot without this asset cannot answer.
             continue
         frame = handle.to_pandas(columns=columns)
-        for x0, y0, x1, y1, href in zip(
-                frame["bbox.xmin"], frame["bbox.ymin"],
-                frame["bbox.xmax"], frame["bbox.ymax"], frame[href_column]):
-            if x1 < minx or x0 > maxx or y1 < miny or y0 > maxy:
+        has_id = "id" in frame.columns
+        for row in frame.to_dict(orient="records"):
+            if row["bbox.xmax"] < minx or row["bbox.xmin"] > maxx \
+                    or row["bbox.ymax"] < miny or row["bbox.ymin"] > maxy:
                 continue
-            if href and href not in found:
+            href = row.get(href_column)
+            if not href:
+                continue
+            if suffix and has_id and not str(row.get("id") or "").endswith(suffix):
+                continue
+            if href not in found:
                 found.append(href)
             if len(found) >= limit:
                 break

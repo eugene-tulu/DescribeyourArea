@@ -2092,6 +2092,8 @@ async def generate_context(
     except Exception as e:
         # Never echo the raw exception: it routinely carries signed asset URLs.
         logger.error("CRITICAL ERROR in /generate-context: %s - %s", type(e).__name__, str(e)[:200])
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail="Processing failed; please retry shortly")
 
 # --------------------------------------------------
