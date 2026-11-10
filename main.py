@@ -660,13 +660,26 @@ def _window_for_bbox(src, bbox_4326: list[float]):
             [bbox_4326[0], bbox_4326[0], bbox_4326[2], bbox_4326[2]],
             [bbox_4326[1], bbox_4326[3], bbox_4326[1], bbox_4326[3]],
         )
+        # The bbox must be transformed point-by-point into the target CRS
+        # before from_bounds, otherwise a hand-built [minx, miny, maxx, maxy]
+        # in UTM space is a thousands-of-metres-away window whose float
+        # overflow (col_off=-450718) intersects to nothing.
+        if not all(math.isfinite(v) for v in (min(xs), min(ys), max(xs), max(ys))):
+            return None
         target = [min(xs), min(ys), max(xs), max(ys)]
 
-    window = from_bounds(*target, transform=src.transform).intersection(
-        rio.windows.Window(0, 0, src.width, src.height)
-    )
+    window = from_bounds(*target, transform=src.transform)
+    # rasterio's intersection() raises WindowError on empty intersection;
+    # treat that as "tile does not cover this AOI" rather than a failure.
     if window.width < 1 or window.height < 1:
         return None
+    # from_bounds gives fractional offsets; round them before intersecting so
+    # a float window 0.99 px wide does not intersect to exactly nothing.
+    window = window.round_offsets()
+    inter = window.intersection(rio.windows.Window(0, 0, src.width, src.height))
+    if inter.width < 1 or inter.height < 1:
+        return None
+    window = inter
     # Whole-pixel windows are required for GDAL to serve a request from a COG
     # overview instead of the full-resolution blocks, and they are the single
     # biggest lever on read latency for remote imagery.
