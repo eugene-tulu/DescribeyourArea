@@ -1069,6 +1069,10 @@ async def _search_items(
         wanted = [a for a in (sensor.ndvi_asset, sensor.red, sensor.nir, sensor.cloud) if a]
         pool = max(4 * max_scenes, 50)
         cloud_max = None if sensor.cloud_mask == "product" else 30.0
+        # scene_assets is date-bucketed by the product, so it also spans the
+        # trailing edge. Using the requested window is fine for band sensors,
+        # whose role is the anchor below (the edge-year filter runs on the
+        # returned rows, not inside scene_assets).
         rows = pc_geoparquet.scene_assets(
             sensor.collection, bbox, window_start, window_end,
             assets=wanted,
@@ -1090,7 +1094,20 @@ async def _search_items(
                 for name, href in row["assets"].items()
             }
             items.append(item)
-        return items
+        # The index path must also pin to the edge year, or the second call
+        # with a wider window (geoparquet warm) returns trailing-edge scenes
+        # while the first (cold) returned least-cloudy-from-anywhere scenes.
+        if sensor.cloud_mask != "product":
+            try:
+                edge = datetime.date.fromisoformat(window_end[:10]) if window_end else datetime.date.today()
+            except Exception:
+                edge = datetime.date.today()
+            edge_year = f"{edge.year:04d}"
+            items.sort(key=lambda item: (
+                str(getattr(item, "datetime", None))[:4] != edge_year,
+                (item.properties or {}).get("eo:cloud_cover", 100.0),
+            ))
+        return items[:max_scenes * 2]
 
     def search_once() -> list:
         # Index first; STAC only when the index has nothing.
@@ -1121,37 +1138,33 @@ async def _search_items(
             items = search_once()
             if not items:
                 return []
-            # Composite across the *latest year* of the window so the anchor
-            # date is stable between a 1-year and a 5-year window. Sorting by
-            # cloud cover alone anchors the composite on whichever day is
-            # least cloudy in the whole span (December 2025 for the 1-year,
-            # November 2021 for the 5-year), making two runs of the same area
-            # read different seasons as if they were different places.
             if sensor.cloud_mask != "product":
-                # Latest-year edge, then least cloudy first. The edge is the
-                # latest year the window covers, so the anchor is pinned.
+                # Anchor the composite to the *latest year* of the window:
+                # least-cloudy first, but only within scenes whose datetime
+                # sits in the edge year (the year of window_end). Both a
+                # 1-year and a 5-year window ending 2026-11-10 pin to 2026
+                # scenes, so the anchor date does not move when the window
+                # widens and the same area reads the same season.
                 try:
                     edge = datetime.date.fromisoformat(window_end[:10]) if window_end else datetime.date.today()
                 except Exception:
                     edge = datetime.date.today()
                 edge_year = f"{edge.year:04d}"
-                def _in_edge_year(item) -> bool:
+                def _edge_year(item) -> int:
                     try:
                         stamp = getattr(item, "datetime", None) or getattr(item, "start_datetime", None)
-                        return f"{stamp.year:04d}" == edge_year
+                        return 0 if str(stamp)[:4] == edge_year else 1
                     except Exception:
-                        return False
-                in_edge = [i for i in items if _in_edge_year(i)]
-                candidates = in_edge[: int(max_scenes * 3)] or items[: int(max_scenes * 3)]
-                candidates.sort(key=lambda item: (item.properties or {}).get("eo:cloud_cover", 100.0))
-                items = candidates
+                        return 1
+                items.sort(key=lambda item: (
+                    _edge_year(item),
+                    (item.properties or {}).get("eo:cloud_cover", 100.0),
+                ))
             else:
                 # MODIS publishes datetime=null and only start_datetime, so the
                 # default ordering is by recency using the field that exists.
                 items.sort(key=_item_start_datetime, reverse=True)
-            # The wider pool is for *selection*. In the edge-year pin we
-            # already capped to max_scenes*3; elsewhere keep the pool.
-            return items[:max_scenes] if sensor.cloud_mask == "product" else items[:max_scenes]
+            return items[:max_scenes]
         except Exception:
             if attempt == 2:
                 print(f"STAC search failed after 3 attempts for {sensor.id}", file=sys.stderr)
