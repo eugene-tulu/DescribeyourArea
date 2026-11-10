@@ -822,8 +822,16 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
     """Accumulate land-cover class counts on the equal-area grid for one year."""
     counts: Counter = Counter()
     sampled = 0
-    try:
-        for src, clipped in _equal_area_masked_tiles(asset_hrefs, geojson):
+    for href in asset_hrefs:
+        try:
+            tiles = list(_equal_area_masked_tiles([href], geojson))
+        except Exception as exc:  # noqa: BLE001 - one bad tile must not poison the rest
+            if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError" or "do not overlap" in str(exc):
+                logger.warning("landcover tile skipped (no window intersection): %s", type(exc).__name__)
+                continue
+            logger.error("Landcover computation error: %s: %s", type(exc).__name__, str(exc)[:200])
+            return {"error": "landcover_unavailable"}
+        for src, clipped in tiles:
             sampled += int(clipped[0].size)
             arr = clipped[0].astype("float64")
             valid = arr[arr != src.nodata] if src.nodata is not None else arr
@@ -831,17 +839,6 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
             if valid.size == 0:
                 continue
             counts.update(valid.astype(int).flatten().tolist())
-    except Exception as exc:  # noqa: BLE001 - detail stays in the server log
-        # A tile whose window does not intersect the bbox (e.g. an IO mosaic
-        # row that covers the address in its bounding box but whose UTM
-        # pixels sit another thousand rows away) must not poison the whole
-        # reading. Skip it and let any other tile answer.
-        name = type(exc).__name__
-        if name in ("WindowError",) or "Intersection is empty" in str(exc):
-            logger.warning("landcover tile skipped (no window intersection): %s", type(exc).__name__)
-            return {"error": "landcover_unavailable"}
-        logger.error("Landcover computation error: %s: %s", type(exc).__name__, str(exc)[:200])
-        return {"error": "landcover_unavailable"}
 
     total = sum(counts.values())
     if total == 0:
