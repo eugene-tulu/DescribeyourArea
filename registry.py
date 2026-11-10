@@ -101,6 +101,7 @@ class Product:
     """
     source: str = ""
     doi: Optional[str] = None
+    license: str = "CC-BY-4.0"
     caveats: tuple[str, ...] = field(default_factory=tuple)
     fails_with: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     """Conditions and the reason given, so a refusal is never a bare failure."""
@@ -136,6 +137,7 @@ class Product:
             "seconds_per_month": self.seconds_per_month,
             "source": self.source,
             "doi": self.doi,
+            "license": self.license,
             "caveats": list(self.caveats),
         }
 
@@ -190,8 +192,11 @@ LANDCOVER = Product(
     cost=(LIVE, COMPUTED),
     source="Esri 10 m Land Cover (Impact Observatory, Sentinel-2)",
     doi="10.5061/DZYR-JMP",
+    license="CC-BY-4.0",
     caveats=(
         "An annual classification, so it reflects the year, not a scene.",
+        "Each map is a composite of land-cover predictions for 9 classes. "
+
         "At 10 m this is the only module whose memory genuinely grows with area, "
         "so it has the largest budget of the four.",
         "Known gap: this reader takes its tiles at native resolution and does not "
@@ -200,6 +205,7 @@ LANDCOVER = Product(
         "interface says so rather than offering a coarser read that does not "
         "happen. Measured: 1,205 MB at 5,500 km2, which is why it is the product "
         "that sets the request budget.",
+        "Accuracy is reported as an assessed average of over 75% per map.",
     ),
     fails_with=(
         ("landcover_unavailable", "No land-cover data covers this area."),
