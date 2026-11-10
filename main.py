@@ -1624,6 +1624,7 @@ async def location_context_from_centroid(geojson_geom: dict) -> dict:
 AVAILABLE_DATASETS = {
     "dem",
     "landcover",
+    "landcover_history",
     "ndvi",
     "rainfall",
 }
@@ -1937,7 +1938,7 @@ async def generate_context(
             _find_core_assets(
                 bbox,
                 need_dem="dem" in requested,
-                need_landcover="landcover" in requested,
+                need_landcover=("landcover" in requested or "landcover_history" in requested),
                 landcover_year=request.landcover_year,
                 window_start=requested_window_start,
                 window_end=requested_window_end,
@@ -1970,6 +1971,11 @@ async def generate_context(
                     geojson,
                     year=landcover_year,
                 )
+        if "landcover_history" in requested:
+            # History lives behind the worker as a per-year series; the sync
+            # path only returns the latest-year landcover above. Surface its
+            # availability so the client does not offer a button that 500s.
+            raster_results_landcover_history = None  # queued offline by design
         raster_timer = usage.Timer()
         raster_timer.__enter__()
         # ASSET_SEARCH seconds (30s) covers STAC search + token fetch; add
