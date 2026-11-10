@@ -762,7 +762,7 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
             if win.width < 1 or win.height < 1:
                 continue
             try:
-                clipped, _ = mask(src, [geometry], crop=True, nodata=src.nodata)
+                clipped, clipped_transform = mask(src, [geometry], crop=True, nodata=src.nodata)
             except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
                 if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError":
                     continue
@@ -787,7 +787,7 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
                 all_touched=True,
             )
             warped = _reproject_to_grid_values(
-                clipped[0].astype("float32"), src.transform, src.crs, target,
+                clipped[0].astype("float32"), clipped_transform, src.crs, target,
                 Resampling.nearest, np.nan,
             )
             # Clear any out-of-AOI cells: the statistics grid is equal-area
