@@ -121,21 +121,22 @@ interface JobProgress {
   months?: number | null;
 }
 
-type DatasetId = 'dem' | 'landcover' | 'ndvi' | 'rainfall';
+type DatasetId = 'dem' | 'landcover' | 'landcover_history' | 'ndvi' | 'rainfall';
 
 // Pasted above roughly this length and chat clients, email servers and proxies
 // start truncating, so the link stops being a link.
 const SHARE_URL_LIMIT = 8000;
 
-const DATASET_IDS: readonly DatasetId[] = ['dem', 'landcover', 'ndvi', 'rainfall'];
+const DATASET_IDS: readonly DatasetId[] = ['dem', 'landcover', 'landcover_history', 'ndvi', 'rainfall'];
 
 const DATASET_OPTIONS: Array<{
-  id: DatasetId;
+  id: DatasetId | 'landcover_history';
   label: string;
   description: string;
 }> = [
   { id: 'dem', label: 'Elevation & terrain', description: 'Elevation range and terrain type' },
   { id: 'landcover', label: 'Land cover', description: 'Land-cover classes from Esri 10 m Land Cover' },
+  { id: 'landcover_history', label: 'Land cover history (per year)', description: 'Annual classes 2017–2023, one percentage per class per year' },
   { id: 'ndvi', label: 'Vegetation (NDVI)', description: 'Vegetation greenness from satellite imagery' },
   { id: 'rainfall', label: 'Rainfall & drought', description: 'Rainfall totals and comparison with the long-term average' },
 ];

@@ -329,6 +329,32 @@ class ApiPlumbingTests(unittest.TestCase):
             self.client.get(f"/rainfall/status?cache_key={self.KEY}&product=chirps")
             .json()["computed"])
 
+    def test_context_caveats_use_the_rainfall_key_not_railfall(self):
+        # The regression this is pinned against: modules.get("railfall")
+        # always returned None, so _caveats was called without rainfall data
+        # for every artefact-backed reading. Pin the assembled payload.
+        import inspect
+        import main
+
+        src = inspect.getsource(main.context_for_key)
+        self.assertNotIn('modules.get("railfall")', src)
+        self.assertIn('modules.get("rainfall")', src,
+                      "context_for_key must pass the rainfall key to _caveats")
+
+    def test_the_artefact_artefact_ready_for_window(self):
+        # Landcover year dimension: cached year must not answer for a different year.
+        import jobs
+
+        key = rainfall.geometry_hash(self.AOI["geometry"])
+        jobs.write_artefact(key, "landcover", {
+            "status": "ok", "year": 2022,
+            "window": {"start": "2022-01-01", "end": "2022-12-31"},
+            "classes": {"Built Area": 10},
+        })
+        self.assertTrue(jobs._artefact_ready(key, "landcover", year=2022))
+        self.assertFalse(jobs._artefact_ready(key, "landcover", year=2023),
+                         "a 2022 artefact must not answer for a 2023 request")
+
 
 def _client():
     from fastapi.testclient import TestClient
