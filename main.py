@@ -749,7 +749,24 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
             win = _window_for_bbox(src, bbox)
             if win is None:
                 continue
-            clipped, _ = mask(src, [geometry], crop=True, nodata=src.nodata)
+            # IO LULC v02 mosaic rows advertise a bounding box that covers a
+            # much wider extent than the UTM pixels inside it (e.g. 60M-2023
+            # advertises [-180, -8, 180, 0] but its 32760 grid covers NaN
+            # land at -1.28). _window_for_bbox may return a window with a
+            # float overflow (e.g. col_off=-450718) when a float round trip
+            # explodes; skip tiles whose intersection is empty rather than
+            # letting WindowError poison the whole reading.
+            if not (0 <= win.col_off < src.width and 0 <= win.row_off < src.height):
+                logger.debug("landcover/DEM tile skipped (window out of bounds): %s", win)
+                continue
+            if win.width < 1 or win.height < 1:
+                continue
+            try:
+                clipped, _ = mask(src, [geometry], crop=True, nodata=src.nodata)
+            except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
+                if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError":
+                    continue
+                raise
             if clipped.size == 0:
                 continue
             native_res_m = abs(src.transform.a) or 30.0
@@ -913,6 +930,14 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
                 continue
             counts.update(valid.astype(int).flatten().tolist())
     except Exception as exc:  # noqa: BLE001 - detail stays in the server log
+        # A tile whose window does not intersect the bbox (e.g. an IO mosaic
+        # row that covers the address in its bounding box but whose UTM
+        # pixels sit another thousand rows away) must not poison the whole
+        # reading. Skip it and let any other tile answer.
+        name = type(exc).__name__
+        if name in ("WindowError",) or "Intersection is empty" in str(exc):
+            logger.warning("landcover tile skipped (no window intersection): %s", type(exc).__name__)
+            return {"error": "landcover_unavailable"}
         logger.error("Landcover computation error: %s: %s", type(exc).__name__, str(exc)[:200])
         return {"error": "landcover_unavailable"}
 
