@@ -210,8 +210,8 @@ MAX_PC_SCENES = _env_int("MAX_PC_SCENES", 4)
 # path uses. They were inline literals at their three call sites, which meant
 # the only way to publish them honestly was to publish nothing.
 NDVI_TIMEOUT_SECONDS = _env_float("NDVI_TIMEOUT_SECONDS", 75.0, minimum=0.0)
-RASTER_TIMEOUT_SECONDS = _env_float("RASTER_TIMEOUT_SECONDS", 30.0, minimum=0.0)
-ASSET_SEARCH_SECONDS = _env_float("ASSET_SEARCH_SECONDS", 15.0, minimum=0.0)
+RASTER_TIMEOUT_SECONDS = _env_float("RASTER_TIMEOUT_SECONDS", 90.0, minimum=0.0)
+ASSET_SEARCH_SECONDS = _env_float("ASSET_SEARCH_SECONDS", 30.0, minimum=0.0)
 # Grid CRS for the vegetation composite. EPSG:6933 is equal-area in metres, so a
 # pixel is the same area everywhere. Valid to about 86 degrees latitude, so polar
 # areas fall back to a local UTM zone.
@@ -1940,10 +1940,14 @@ async def generate_context(
                 )
         raster_timer = usage.Timer()
         raster_timer.__enter__()
+        # ASSET_SEARCH seconds (30s) covers STAC search + token fetch; add
+        # a fixed 60s for the raster read itself (3 COGs, remote SAS traffic
+        # with retries). The previous 30s budget timed out a healthy
+        # dem,landcover,ndvi,rainfall Describe even on a 0.9 km2 polygon.
         try:
             raster_values = await asyncio.wait_for(
                 asyncio.gather(*raster_tasks.values()),
-                timeout=RASTER_TIMEOUT_SECONDS,
+                timeout=ASSET_SEARCH_SECONDS,
             ) if raster_tasks else []
         except asyncio.TimeoutError:
             raster_timer.__exit__(None, None, None)
