@@ -798,7 +798,7 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
 
 def _reproject_to_grid_values(values, src_transform, src_crs, target, resampling, nodata):
     """Warp one masked block onto the shared equal-area grid."""
-    out = np.full((target[3], target[2]), nodata, dtype="float32")
+    out = np.full((target[3], target[2]), nodata, dtype="float32", order="C")
     # Source nodata may be None (GLO-30 advertises None); the 0.0 padding that
     # mask() may put at tile edges is then *valid data* for reproject(), which
     # spreads it. Treat any non-positive nodata the same way: a cell warped from
