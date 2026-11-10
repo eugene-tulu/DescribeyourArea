@@ -169,8 +169,6 @@ ELEVATION = Product(
         "Produced using Copernicus WorldDEM-30 \u00a9 DLR e.V. 2010-2014 and "
         "\u00a9 Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS "
         "by the European Union and ESA; all rights reserved.",
-        "Zonal statistics are accumulated on an equal-area grid (EPSG:6933), so "
-        "a pixel count means a measurement normalised by area, not degrees.",
     ),
     fails_with=(
         ("elevation_unavailable", "No elevation data covers this area."),
@@ -196,8 +194,6 @@ LANDCOVER = Product(
         "An annual classification, so it reflects the year, not a scene.",
         "At 10 m this is the only module whose memory genuinely grows with area, "
         "so it has the largest budget of the four.",
-        "Zonal statistics are accumulated on an equal-area grid (EPSG:6933), so "
-        "a pixel count means a measurement normalised by area, not degrees.",
         "Known gap: this reader takes its tiles at native resolution and does not "
         "decimate, so a large area queued for land cover is still read at 10 m. "
         "The resolution ladder applies to vegetation and not to this, and the "

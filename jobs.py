@@ -45,7 +45,7 @@ MAX_PENDING_JOBS = int(os.getenv("RAINFALL_MAX_PENDING_JOBS", "25"))
 # slow one.
 JOB_LEASE_SECONDS = float(os.getenv("RAINFALL_JOB_LEASE_SECONDS", "1800"))
 
-JOB_VERSION = 3
+JOB_VERSION = 4
 
 # What a job computes. Rainfall is a cheap cache read; the others read rasters,
 # which is why they need a resolution and why they are the reason a large area is

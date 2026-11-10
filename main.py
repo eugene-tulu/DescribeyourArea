@@ -687,139 +687,7 @@ def _iter_tile_windows(src, bbox: list[float]):
     return window
 
 
-# ---------------------------------------------------------------------------
-# Equal-area statistics (EPSG:6933)
-# ---------------------------------------------------------------------------
-# Zonal fractions are pixel counts divided by pixels, but a degree-grid pixel's
-# ground area shrinks with latitude (`cos(lat)`), so a zonal mean on a geographic
-# grid weights one latitude's pixels more than another. Statistics on an
-# equal-area grid give every pixel the same ground area, so a fraction means the
-# same thing at any latitude. Valid to about 85 deg; polar areas fall back to
-# a local UTM zone (see _stats_crs).
-STATS_EPSG = _env_int("STATS_EPSG", 6933)
-_STATS_EPSG_MAX_LAT = 85.0
-
-
-def _stats_crs(bbox: list[float]):
-    """Equal-area analysis CRS: EPSG:6933 globally, UTM near the poles."""
-    if abs(bbox[1]) <= _STATS_EPSG_MAX_LAT and abs(bbox[3]) <= _STATS_EPSG_MAX_LAT:
-        return CRS.from_epsg(STATS_EPSG)
-    centre_lon = (bbox[0] + bbox[2]) / 2.0
-    centre_lat = (bbox[1] + bbox[3]) / 2.0
-    zone = min(60, max(1, int((centre_lon + 180.0) / 6.0) + 1))
-    return CRS.from_epsg((32700 if centre_lat < 0 else 32600) + zone)
-
-
-def _equal_area_target(bbox: list[float], native_res_m: float):
-    """Output grid in the equal-area CRS at the source's native effective res."""
-    from rasterio.transform import from_bounds as transform_from_bounds
-
-    crs = _stats_crs(bbox)
-    transformer = Transformer.from_crs(CRS.from_epsg(4326), crs, always_xy=True)
-    minx, miny = transformer.transform(bbox[0], bbox[1])
-    maxx, maxy = transformer.transform(bbox[2], bbox[3])
-    minx, maxx = min(minx, maxx), max(minx, maxx)
-    miny, maxy = min(miny, maxy), max(miny, maxy)
-    res = max(1.0, float(native_res_m))
-    width = max(1, int(math.ceil((maxx - minx) / res)))
-    height = max(1, int(math.ceil((maxy - miny) / res)))
-    transform = transform_from_bounds(minx, miny, maxx, maxy, width, height)
-    return crs, transform, width, height
-
-
 def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
-    """Yield masked arrays accumulated on the equal-area grid, not the native grid.
-
-    Warp-first, mask-second: each source tile is read once and warped onto the
-    shared equal-area target grid; the geometry mask is rasterised *on that
-    equal-area grid* so a cell's membership means equal ground area on the
-    grid where it will be counted. Masking on the native (degree) grid and
-    then warping would weight pixels by `cos(latitude)` and defeat the
-    equal-area correction.
-    """
-    from rasterio.features import geometry_mask
-    from rasterio.warp import transform_geom
-
-    geometry = geojson["geometry"]
-    bbox = _feature_bbox(geojson)
-    target_crs = _stats_crs(bbox)
-    geom_projected = transform_geom(CRS.from_epsg(4326), target_crs, mapping(shape(geometry)))
-    for href in asset_hrefs:
-        with rio.open(planetary_computer.sign(href)) as src:
-            win = _window_for_bbox(src, bbox)
-            if win is None:
-                continue
-            # IO LULC v02 mosaic rows advertise a bounding box that covers a
-            # much wider extent than the UTM pixels inside it (e.g. 60M-2023
-            # advertises [-180, -8, 180, 0] but its 32760 grid covers NaN
-            # land at -1.28). _window_for_bbox may return a window with a
-            # float overflow (e.g. col_off=-450718) when a float round trip
-            # explodes; skip tiles whose intersection is empty rather than
-            # letting WindowError poison the whole reading.
-            if not (0 <= win.col_off < src.width and 0 <= win.row_off < src.height):
-                logger.debug("landcover/DEM tile skipped (window out of bounds): %s", win)
-                continue
-            if win.width < 1 or win.height < 1:
-                continue
-            try:
-                clipped, clipped_transform = mask(src, [geometry], crop=True, nodata=src.nodata)
-            except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
-                if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError":
-                    continue
-                raise
-            if clipped.size == 0:
-                continue
-            native_res_m = abs(src.transform.a) or 30.0
-            # `native_res_m` is in source units (degrees for 4326). Convert
-            # to metres in the target before the target grid is computed.
-            if CRS.from_epsg(4326) == src.crs:
-                from pyproj import Geod
-
-                factor = 1.0 / max(1e-9, math.cos(math.radians((bbox[1] + bbox[3]) / 2.0)))
-                native_res_m = max(1.0, native_res_m * 111319.0 * factor)
-            target = _equal_area_target(bbox, native_res_m)
-            # Rasterise the AOI onto the equal-area grid first, then warp the
-            # tile's window onto it: mask and pixels finally live in one CRS.
-            in_aoi = ~geometry_mask(
-                [geom_projected],
-                out_shape=(target[3], target[2]),
-                transform=target[1],
-                all_touched=True,
-            )
-            warped = _reproject_to_grid_values(
-                clipped[0].astype("float32"), clipped_transform, src.crs, target,
-                Resampling.nearest, np.nan,
-            )
-            # Clear any out-of-AOI cells: the statistics grid is equal-area
-            # now, so membership on this grid is the only mask that matters.
-            warped = np.where(in_aoi, warped, np.nan).astype("float32")
-            yield src, warped, in_aoi
-
-
-def _reproject_to_grid_values(values, src_transform, src_crs, target, resampling, nodata):
-    """Warp one masked block onto the shared equal-area grid."""
-    out = np.full((target[3], target[2]), nodata, dtype="float32", order="C")
-    # Source nodata may be None (GLO-30 advertises None); the 0.0 padding that
-    # mask() may put at tile edges is then *valid data* for reproject(), which
-    # spreads it. Treat any non-positive nodata the same way: a cell warped from
-    # fully-outside the source window overwrites `out` with source 0.0 and
-    # would otherwise be counted as a real elevation.
-    effective_nodata = np.nan
-    reproject(
-        source=values,
-        destination=out,
-        src_transform=src_transform,
-        src_crs=src_crs,
-        dst_transform=target[1],
-        dst_crs=target[0],
-        resampling=resampling,
-        src_nodata=None,
-        dst_nodata=effective_nodata,
-    )
-    return out
-
-
-def _iter_masked_tiles(asset_hrefs: list[str], geojson: dict):
     """Yield masked, in-AOI arrays for every source tile, skipping empty overlaps.
 
     A study area can straddle many source tiles, so the statistics are accumulated
@@ -832,9 +700,20 @@ def _iter_masked_tiles(asset_hrefs: list[str], geojson: dict):
     bbox = _feature_bbox(geojson)
     for href in asset_hrefs:
         with rio.open(planetary_computer.sign(href)) as src:
-            if _iter_tile_windows(src, bbox) is None:
+            win = _window_for_bbox(src, bbox)
+            if win is None:
                 continue
-            clipped, _ = mask(src, [geometry], crop=True, nodata=src.nodata)
+            if not (0 <= win.col_off < src.width and 0 <= win.row_off < src.height):
+                logger.debug("landcover/DEM tile skipped (window out of bounds): %s", win)
+                continue
+            if win.width < 1 or win.height < 1:
+                continue
+            try:
+                clipped, _tb = mask(src, [geometry], crop=True, nodata=src.nodata)
+            except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
+                if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError":
+                    continue
+                raise
             if clipped.size == 0:
                 continue
             yield src, clipped
@@ -854,10 +733,11 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
     vmax: Optional[float] = None
     sampled = 0
     try:
-        for src, warped, in_aoi in _equal_area_masked_tiles(asset_hrefs, geojson):
-            sampled += int(in_aoi.sum())
-            arr = np.where(in_aoi, warped, np.nan).astype("float64")
-            valid = arr[np.isfinite(arr)]
+        for src, clipped in _equal_area_masked_tiles(asset_hrefs, geojson):
+            sampled += int(clipped[0].size)
+            arr = clipped[0].astype("float64")
+            valid = arr[arr != src.nodata] if src.nodata is not None else arr
+            valid = valid[np.isfinite(valid)]
             if valid.size == 0:
                 continue
             total += float(valid.sum())
@@ -885,8 +765,6 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
         "std": math.sqrt(variance),
         "valid_pixel_count": count,
         "valid_pixel_fraction": round(count / sampled, 4) if sampled else 0.0,
-        "stats_are_equal_area": True,
-        "crs": "EPSG:6933",
     }
 
 
@@ -922,10 +800,11 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
     counts: Counter = Counter()
     sampled = 0
     try:
-        for src, warped, in_aoi in _equal_area_masked_tiles(asset_hrefs, geojson):
-            sampled += int(in_aoi.sum())
-            arr = np.where(in_aoi, warped, np.nan)
-            valid = arr[np.isfinite(arr)]
+        for src, clipped in _equal_area_masked_tiles(asset_hrefs, geojson):
+            sampled += int(clipped[0].size)
+            arr = clipped[0].astype("float64")
+            valid = arr[arr != src.nodata] if src.nodata is not None else arr
+            valid = valid[np.isfinite(valid)]
             if valid.size == 0:
                 continue
             counts.update(valid.astype(int).flatten().tolist())
@@ -955,8 +834,6 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
         "dominant_percentage": labeled[dominant_class],
         "valid_pixel_count": total,
         "valid_pixel_fraction": round(total / sampled, 4) if sampled else 0.0,
-        "stats_are_equal_area": True,
-        "crs": "EPSG:6933",
     }
     if year is not None:
         result["year"] = year
