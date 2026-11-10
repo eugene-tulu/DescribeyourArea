@@ -464,16 +464,21 @@ def scene_assets(collection: str, bbox: list[float], start: str, end: str,
             item_assets = {a: row.get(c) for a, c in href_columns.items() if row.get(c)}
             if not item_assets:
                 continue
+            # Collect every match across parts; do not truncate inside
+            # the loop. Paths are listed 2021 first, so a per-path limit
+            # fills the budget with the oldest year and the edge year
+            # (2026) never becomes visible to the caller's anchor.
             items.append({
                 "id": str(row.get("id") or ""),
                 "datetime": stamp,
                 "assets": item_assets,
                 "cloud_cover": cover if isinstance(cover, (int, float)) else None,
             })
-            if len(items) >= limit:
-                break
-        if len(items) >= limit:
-            break
+    if len(items) > limit:
+        # Interleave years so the edge year is always present even when a
+        # collection has thousands of items in the index window.
+        items.sort(key=lambda it: it["datetime"].year, reverse=True)
+        items = items[:limit]
     return items[:limit]
 
 
