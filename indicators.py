@@ -55,10 +55,15 @@ async def _compute_landcover_history(
     """Per-year land-cover classes for a window, as a `series` of years."""
     import datetime as dt
 
-    from main import _find_core_assets, compute_landcover_percentages
+    from main import _find_core_assets, _resolve_landcover_year, compute_landcover_percentages
 
     end = window_end or dt.date.today().isoformat()
     start = window_start or f"{dt.date.fromisoformat(end[:10]).year - 6:04d}-01-01"
+    # The collection publishes 2017-2023; a window outside it cannot produce
+    # per-year entries. Clamp the loop to the published extent so a 2025-2026
+    # request returns the latest published year (2023) instead of an empty
+    # series that surfaces as "No data available for 2025".
+    _extent_lo, _extent_hi = 2017, 2023
     try:
         start_year = int(start[:4])
     except ValueError:
@@ -67,16 +72,22 @@ async def _compute_landcover_history(
         end_year = int(end[:4])
     except ValueError:
         end_year = start_year + 6
+    start_year = max(start_year, _extent_lo)
+    end_year = min(end_year, _extent_hi)
     if end_year < start_year:
-        end_year = start_year
+        start_year = end_year
     if end_year - start_year > 10:
         end_year = start_year + 10
 
     series: list[dict[str, Any]] = []
     for year in range(start_year, end_year + 1):
         assets = await _find_core_assets(
-            bbox, need_dem=False, need_landcover=True, landcover_year=year,
+            bbox, need_dem=False, need_landcover=True,
+            landcover_year=_resolve_landcover_year(start=f"{year:04d}-01-01", end=f"{year:04d}-12-31"),
         )
+        used_year = assets.get("_landcover_year", year)
+        if used_year != year:
+            continue
         if "_landcover_year" in assets and assets["_landcover_year"] != year:
             continue
         result = compute_landcover_percentages(
