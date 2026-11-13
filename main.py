@@ -997,6 +997,10 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
         result["year"] = year
         result["window"] = {"start": f"{year:04d}-01-01", "end": f"{year:04d}-12-31"}
         result["source_collection"] = "io-lulc-annual-v02"
+    if resolution_m is not None:
+        # The reader may be working from a COG overview (e.g. 160 m) to answer a
+        # 250 m request. Record what was actually read, not the native 10 m.
+        result["resolution_m"] = resolution_m
     return result
 
 # --------------------------------------------------

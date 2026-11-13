@@ -129,7 +129,7 @@ async def _compute_landcover_history(
         "indicator": "landcover_history",
         "source": "Esri 10 m Land Cover (Impact Observatory, Sentinel-2)",
         "collection": "io-lulc-annual-v02",
-        "resolution_m": 10.0,
+        "resolution_m": resolution,
         "window": {"start": f"{series[0]['year']:04d}-01-01",
                    "end": f"{series[-1]['year']:04d}-12-31"},
         # What the caller asked for, so readiness can tell a series computed for
