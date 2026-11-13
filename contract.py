@@ -222,3 +222,49 @@ class ContextSummary(BaseModel):
 
 class ContextResponse(BaseModel):
     summary: ContextSummary
+
+
+class EnrichPoint(BaseModel):
+    """One field observation: a point, a time, and an optional id."""
+
+    id: Optional[str] = None
+    lon: float
+    lat: float
+    timestamp: Optional[str] = None
+
+
+class EnrichRequest(BaseModel):
+    """Observations plus the AOI evidence needed to enrich them.
+
+    The tiles are the signed COGs the analysis already produced; the NDVI mean,
+    dominant land-cover class and rainfall series are the AOI-level context.
+    """
+
+    observations: List[EnrichPoint]
+    dem_tiles: List[str] = Field(default_factory=list)
+    landcover_tiles: List[str] = Field(default_factory=list)
+    ndvi_mean: Optional[float] = None
+    landcover_dominant: Optional[str] = None
+    rainfall_series: List[Dict[str, Any]] = Field(default_factory=list)
+    bbox: Optional[List[float]] = None
+
+
+class EnrichedRecord(BaseModel):
+    """An observation joined to the evidence, with the flags that qualify it."""
+
+    id: Optional[str] = None
+    lon: float
+    lat: float
+    timestamp: Optional[str] = None
+    ndvi: Optional[float] = None
+    landcover: Optional[str] = None
+    landcover_code: Optional[int] = None
+    rainfall_mm: Optional[float] = None
+    elevation_m: Optional[float] = None
+    flags: List[str] = Field(default_factory=list)
+
+
+class EnrichResponse(BaseModel):
+    records: List[EnrichedRecord]
+    sampled: int
+    point_samples: int

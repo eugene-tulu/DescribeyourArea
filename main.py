@@ -31,6 +31,7 @@ import jobs
 import registry
 import sensors
 import measure
+import enrich
 from dotenv import load_dotenv
 import sys
 import warnings
@@ -40,7 +41,7 @@ from affine import Affine
 from pyproj import CRS, Geod, Transformer
 import logging
 
-from contract import ContextResponse  # noqa: F401
+from contract import ContextResponse, EnrichRequest, EnrichResponse  # noqa: F401
 from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
     DEFAULT_SENSOR,
     cloud_mask,
@@ -2340,6 +2341,30 @@ async def health_check():
         "timestamp": datetime.datetime.now(datetime.UTC).isoformat(),
         "version": APP_VERSION,
     }
+
+
+# --------------------------------------------------
+# ENRICHMENT PIPELINE
+# --------------------------------------------------
+@app.post("/v1/enrich", response_model=EnrichResponse)
+def enrich_observations(request: EnrichRequest) -> EnrichResponse:
+    """Join field observations to the AOI evidence.
+
+    This is the pipeline's core. A connector (CSV, GeoJSON, ArcGIS, EarthRanger,
+    COPA) produces observations; this attaches elevation, land cover, NDVI and
+    rainfall so the record can be defended. It is deliberately independent of
+    the connector and of the niche view, so every source feeds one record shape.
+    """
+    records = enrich.enrich_records(request)
+    point_samples = sum(
+        1 for record in records
+        if record.elevation_m is not None or record.landcover_code is not None
+    )
+    return EnrichResponse(
+        records=records,
+        sampled=len(records),
+        point_samples=point_samples,
+    )
 
 def require_admin_key(
     x_admin_key: Optional[str] = Header(default=None, alias="X-Admin-Key"),

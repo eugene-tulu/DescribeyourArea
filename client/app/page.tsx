@@ -19,7 +19,7 @@ import { useToast } from '@/hooks/use-toast';
 import { computeStartDate } from '@/lib/window';
 import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
 import { trackEvent } from '@/lib/analytics';
-import { enrichObservations, type Observation } from '@/lib/observations';
+import { enrichObservations, type EnrichedObservation, type Observation } from '@/lib/observations';
 
 
 import { buildSeriesCsv, type RainRow, type VegRow } from '@/lib/exportCsv';
@@ -1639,10 +1639,66 @@ export default function Home() {
   // share one source of truth.
   const [fieldObservations, setFieldObservations] = useState<Observation[]>([]);
   const [fieldFileName, setFieldFileName] = useState<string | null>(null);
-  const fieldRows = useMemo(
-    () => enrichObservations(fieldObservations, analysisSummary),
-    [fieldObservations, analysisSummary],
-  );
+  const [fieldRows, setFieldRows] = useState<EnrichedObservation[]>([]);
+  // Per-point enrichment runs on the backend so every connector (CSV, ArcGIS,
+  // EarthRanger, COPA) gets the same record. The AOI-level result is the
+  // fallback when the tiles are unavailable or the API is unreachable.
+  useEffect(() => {
+    if (fieldObservations.length === 0) {
+      setFieldRows([]);
+      return;
+    }
+    const fallback = enrichObservations(fieldObservations, analysisSummary);
+    const demTiles = (analysisSummary?.dem as { tiles?: string[] } | null | undefined)?.tiles ?? [];
+    const landcoverTiles = (analysisSummary?.landcover as { tiles?: string[] } | null | undefined)?.tiles ?? [];
+    if (!analysisSummary || (demTiles.length === 0 && landcoverTiles.length === 0)) {
+      setFieldRows(fallback);
+      return;
+    }
+    const controller = new AbortController();
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    fetch(`${backendUrl}/v1/enrich`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        observations: fieldObservations.map(({ id, lon, lat, timestamp }) => ({ id, lon, lat, timestamp })),
+        dem_tiles: demTiles,
+        landcover_tiles: landcoverTiles,
+        ndvi_mean: analysisSummary.ndvi?.mean ?? null,
+        landcover_dominant: analysisSummary.landcover?.dominant_class ?? null,
+        rainfall_series: analysisSummary.rainfall?.series ?? [],
+        bbox: analysisSummary.analysis?.bbox ?? null,
+      }),
+    })
+      .then((response) => (response.ok ? response.json() : Promise.reject(new Error('enrich failed'))))
+      .then((data: { records?: Array<{
+        id?: string | null;
+        ndvi?: number | null;
+        landcover?: string | null;
+        rainfall_mm?: number | null;
+        elevation_m?: number | null;
+        flags?: string[];
+      }> }) => {
+        const byId = new Map((data.records ?? []).map((record) => [record.id ?? '', record]));
+        setFieldRows(fieldObservations.map((observation) => {
+          const record = byId.get(observation.id);
+          const local = fallback.find((row) => row.id === observation.id);
+          return {
+            ...observation,
+            ndvi: record?.ndvi ?? local?.ndvi ?? null,
+            landcover: record?.landcover ?? local?.landcover ?? null,
+            rainfall_mm: record?.rainfall_mm ?? local?.rainfall_mm ?? null,
+            elevation_m: record?.elevation_m ?? local?.elevation_m ?? null,
+            flags: record?.flags ?? local?.flags ?? [],
+          };
+        }));
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setFieldRows(fallback);
+      });
+    return () => controller.abort();
+  }, [fieldObservations, analysisSummary]);
   // The overlay is a reading aid, not part of the result. Clearing it must not
   // clear the numbers (the old onClearOverlay reset the whole summary).
   const [overlayVisible, setOverlayVisible] = useState(true);
