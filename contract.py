@@ -74,6 +74,8 @@ class DemResult(BaseModel):
     p95: Optional[float] = None
     min_is_outlier: Optional[bool] = None
     max_is_outlier: Optional[bool] = None
+    zero_pixels_excluded: Optional[int] = None
+    zero_fraction: Optional[float] = None
     elevation_range_m: Optional[float] = None
     robust_range_m: Optional[float] = None
     terrain_range_basis: Optional[str] = None
@@ -98,6 +100,8 @@ class LandcoverResult(BaseModel):
     year: Optional[int] = None
     window: Optional[Dict[str, Optional[str]]] = None
     source_collection: Optional[str] = None
+    resolution_m: Optional[float] = None
+    applied_resolution_m: Optional[float] = None
     tiles: Optional[List[str]] = None
     donut: Optional[Dict[str, Any]] = None
     error: Optional[str] = None

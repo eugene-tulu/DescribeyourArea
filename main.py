@@ -890,9 +890,30 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict, *,
     std = math.sqrt(variance)
     p05 = _histogram_percentile(hist, 0.05)
     p95 = _histogram_percentile(hist, 0.95)
-    # A single void or water pixel can drag the minimum to 0 m in an inland
-    # highland AOI. Flag values far outside the bulk rather than presenting them
-    # as observed fact; the terrain label is classified from the robust span.
+    # A large 0 m fill (a void or water mask in an inland highland AOI) is not a
+    # real elevation. If the 0 bin holds more than 5% of the valid pixels, drop
+    # it and recompute the distribution from the land pixels. A coastal AOI with
+    # a little sea is untouched; a 16,000 km2 Mara AOI whose 5th percentile is
+    # 0.5 m is not.
+    zero_index = int(round((0.0 - _DEM_HIST_MIN_M) / _DEM_HIST_STEP_M))
+    zero_count = int(hist[zero_index]) if 0 <= zero_index < _DEM_HIST_BINS else 0
+    zero_fraction = (zero_count / count) if count else 0.0
+    zero_excluded = 0
+    if zero_count and zero_fraction > 0.05 and count - zero_count > 0:
+        zero_excluded = zero_count
+        count -= zero_count
+        mean = total / count
+        variance = max(0.0, (total_sq / count) - (mean * mean))
+        std = math.sqrt(variance)
+        reduced = hist.copy()
+        reduced[zero_index] = 0
+        p05 = _histogram_percentile(reduced, 0.05)
+        p95 = _histogram_percentile(reduced, 0.95)
+        above = np.nonzero(reduced[zero_index + 1:])[0]
+        if above.size:
+            vmin = _DEM_HIST_MIN_M + (zero_index + 1 + int(above[0]) + 0.5) * _DEM_HIST_STEP_M
+    # Flag values far outside the bulk rather than presenting them as observed
+    # fact; the terrain label is classified from the robust span.
     min_is_outlier = vmin < p05 - max(50.0, 3.0 * std)
     max_is_outlier = vmax > p95 + max(50.0, 3.0 * std)
     return {
@@ -904,6 +925,8 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict, *,
         "p95": round(p95, 1),
         "min_is_outlier": bool(min_is_outlier),
         "max_is_outlier": bool(max_is_outlier),
+        "zero_pixels_excluded": zero_excluded,
+        "zero_fraction": round(zero_fraction, 4),
         "valid_pixel_count": count,
         "valid_pixel_fraction": round(count / sampled, 4) if sampled else 0.0,
     }
