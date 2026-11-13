@@ -15,7 +15,7 @@ import unittest
 import questions
 import registry
 import sensors
-from questions import Window, parse_window, plan_comparison, plan_question
+from questions import parse_window, plan_comparison, plan_question
 
 # A fixed "today" so a test never fails because the clock moved. The windows below
 # are absolute dates precisely so they do not need one.

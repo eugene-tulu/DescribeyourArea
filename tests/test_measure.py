@@ -278,3 +278,120 @@ class ObservedThroughEnforcementTests(unittest.TestCase):
                         observed_through="2026-01-01")
         self.assertEqual(built.observed_through, "2026-01-01")
         self.assertEqual(built.describe()["observed_through"], "2026-01-01")
+
+
+class RainfallMeasurePeriodTests(unittest.TestCase):
+    """The total must name the months it actually covers.
+
+    A 1-year window whose series stopped six months early used to be labelled
+    with the requested window end, so 7 months of rain read as a 12-month total
+    and the annual normal sat beside it. The covered area was months x 310 km2,
+    which turned one ERA5 cell into thousands of square kilometres of claimed
+    ground.
+    """
+
+    def _context(self, product="rainfall", resolution_km=27.8, grid_cells=1):
+        months = ["2025-12", "2026-01", "2026-02", "2026-03",
+                  "2026-04", "2026-05", "2026-06"]
+        return {
+            "status": "ok",
+            "product": product,
+            "resolution_km": resolution_km,
+            "grid_cells": grid_cells,
+            "window": {"start": "2025-11-12", "end": "2026-11-11"},
+            "series": [{"month": m, "precip_mm": 70.0, "normal_mm": 74.0}
+                       for m in months],
+        }
+
+    def test_freshness_and_window_use_the_last_observed_month(self):
+        import main
+
+        measures = main._build_measures(None, None, self._context(), 60.29)
+        self.assertEqual(len(measures), 1)
+        built = measures[0]
+        self.assertEqual(built["observed_through"], "2026-06")
+        self.assertEqual(built["extent"]["window"]["end"], "2026-06")
+        self.assertEqual(built["detail"]["months"], 7)
+        self.assertEqual(built["detail"]["last_month"], "2026-06")
+
+    def test_the_headline_names_the_span_not_an_implied_year(self):
+        built = Measure(
+            product_key="rainfall", value=490.0, units="mm",
+            observed_through="2026-06",
+            extent=Extent(requested_area_km2=60.29, covered_area_km2=772.8,
+                          cell_count=1),
+            extra={"months": 7},
+        )
+        text = measure.headline(built)
+        self.assertIn("7 months", text)
+        self.assertIn("2026-06", text)
+        self.assertNotIn("12 months", text)
+
+    def test_covered_area_is_the_cell_footprint_not_months_times_a_constant(self):
+        import main
+
+        measures = main._build_measures(None, None, self._context(), 60.29)
+        extent = measures[0]["extent"]
+        self.assertEqual(extent["covered_area_km2"], round(27.8 ** 2, 1))
+        self.assertEqual(extent["cell_count"], 1)
+        # The old formula would have claimed 7 x 310 = 2170 km2 for one cell.
+        self.assertNotEqual(extent["covered_area_km2"], 2170.0)
+
+    def test_a_multi_cell_series_reports_the_cell_count(self):
+        import main
+
+        measures = main._build_measures(
+            None, None,
+            self._context(product="chirps", resolution_km=5.6, grid_cells=3),
+            60.29,
+        )
+        extent = measures[0]["extent"]
+        self.assertEqual(extent["cell_count"], 3)
+        self.assertEqual(extent["covered_area_km2"], round(3 * 5.6 ** 2, 1))
+
+    def test_the_caveat_names_the_last_observed_month_and_the_short_span(self):
+        import main
+
+        notes = main._caveats({"feature": {}}, None, None, None, self._context())
+        joined = " ".join(notes)
+        self.assertIn("Rainfall series ends 2026-06.", joined)
+        self.assertIn("7 month(s) to 2026-06", joined)
+
+
+class DemRobustTerrainTests(unittest.TestCase):
+    """A single void pixel must not decide the terrain label."""
+
+    def test_the_histogram_percentile_ignores_a_single_outlier(self):
+        import numpy as np
+
+        import main
+
+        values = np.full(1000, 1800.0)
+        values[0] = 0.0
+        hist = main._histogram(values)
+        self.assertEqual(main._histogram_percentile(hist, 0.05), 1800.5)
+        self.assertEqual(main._histogram_percentile(hist, 0.95), 1800.5)
+
+    def test_a_single_low_outlier_does_not_make_a_plateau_mountainous(self):
+        import main
+
+        terrain = main.interpret_terrain({
+            "mean": 1799.0, "min": 0.0, "max": 1800.0, "std": 56.0,
+            "p05": 1800.0, "p95": 1800.0,
+        })
+        self.assertEqual(terrain["terrain_type"], "relatively flat")
+        self.assertEqual(terrain["terrain_range_basis"], "p05–p95")
+        self.assertEqual(terrain["elevation_range_m"], 1800.0)
+        self.assertEqual(terrain["robust_range_m"], 0.0)
+
+    def test_the_raw_range_is_kept_beside_the_robust_one(self):
+        import main
+
+        terrain = main.interpret_terrain({
+            "mean": 1600.0, "min": 0.0, "max": 2400.0, "std": 300.0,
+            "p05": 1400.0, "p95": 1900.0,
+        })
+        self.assertEqual(terrain["elevation_range_m"], 2400.0)
+        self.assertEqual(terrain["robust_range_m"], 500.0)
+        # The robust span is 500 m, which is "highly variable", not a 2400 m cliff.
+        self.assertEqual(terrain["terrain_type"], "highly variable or mountainous")

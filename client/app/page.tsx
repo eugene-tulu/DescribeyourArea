@@ -13,11 +13,13 @@ import { Label } from '@/components/ui/label';
 import { FeatureCollection, Geometry, GeoJsonObject } from "geojson";
 import CopySummary from '@/components/Copy';
 import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
+import { FieldDataPanel } from '@/components/FieldDataPanel';
 import { Wordmark } from '@/components/Mark';
 import { useToast } from '@/hooks/use-toast';
 import { computeStartDate } from '@/lib/window';
 import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
 import { trackEvent } from '@/lib/analytics';
+import { enrichObservations, type Observation } from '@/lib/observations';
 
 
 import { buildSeriesCsv, type RainRow, type VegRow } from '@/lib/exportCsv';
@@ -41,13 +43,6 @@ const MapComponent = dynamic(() => import('@/components/MapComponent'), {
    they claim to be. No adjective a marketing department could invent would make
    the same argument, and putting the evidence before the claim is also the more
    confident order — it says the product does not need the claim to be believed. */
-const SOURCES = [
-  { id: 'cop-dem', label: 'Copernicus DEM', role: 'Elevation · 30 m' },
-  { id: 'esri-lulc', label: 'Esri 10 m Land Cover', role: 'Land cover · 10 m' },
-  { id: 'sentinel-2', label: 'Sentinel-2', role: 'Vegetation · 20 m' },
-  { id: 'era5', label: 'ERA5 / CHIRPS', role: 'Precipitation · monthly' },
-] as const;
-
 interface SearchResult {
   place_id: number;
   display_name: string;
@@ -153,6 +148,19 @@ const LANDCOVER_LABELS: Record<string, string> = {
   "11": "Rangeland",
 };
 
+// The Esri 10 m class palette, matching the raster the backend tiles.
+const LANDCOVER_COLOURS: Record<string, string> = {
+  "1": "#0000ff",
+  "2": "#005000",
+  "4": "#009696",
+  "5": "#966400",
+  "7": "#c80032",
+  "8": "#a0a0a0",
+  "9": "#ffffff",
+  "10": "#0000c8",
+  "11": "#b4dc78",
+};
+
 // These mirror the declared contract in contract.py. Generate them from
 // /openapi.json rather than keeping a hand-written copy: a duplicated literal
 // that drifted once already and shipped a stale limit to production.
@@ -180,7 +188,13 @@ interface DemStats {
   min?: number;
   max?: number;
   std?: number;
+  p05?: number;
+  p95?: number;
+  min_is_outlier?: boolean;
+  max_is_outlier?: boolean;
   elevation_range_m?: number;
+  robust_range_m?: number;
+  terrain_range_basis?: string;
   terrain_type?: string;
   error?: string;
 }
@@ -251,6 +265,30 @@ interface LandcoverStats {
   [key: string]: unknown;
 }
 
+interface LandcoverHistoryYear {
+  year: number;
+  month?: string;
+  classes?: Record<string, number>;
+  dominant_class?: string;
+  dominant_percentage?: number;
+}
+
+interface LandcoverHistoryStats {
+  status: ModuleStatus;
+  evidence?: ModuleEvidence;
+  indicator?: string;
+  source?: string;
+  collection?: string;
+  resolution_m?: number;
+  window?: { start?: string; end?: string };
+  requested_window?: { start?: string; end?: string };
+  series?: LandcoverHistoryYear[];
+  source_collection?: string;
+  reason?: string;
+  message?: string;
+  error?: string;
+}
+
 interface RainfallSummary {
   latest_month?: string;
   latest_precip_mm?: number;
@@ -303,39 +341,11 @@ interface AnalysisMetadata {
   applied_resolution_m?: Record<string, number>;
 }
 
-/** One entry from the backend's `summary.measures` list (Measure.describe).
- *  Mirrors contract.py:ContextSummary.measures / measure.py:Measure.describe. */
-interface MeasureExtent {
-  requested_area_km2?: number | null;
-  covered_area_km2?: number | null;
-  cell_count?: number | null;
-  native_resolution_m?: number | null;
-  native_grid_degrees?: number | null;
-  over_specified?: boolean;
-  window?: { start?: string | null; end?: string | null };
-}
-
-interface MeasureSummary {
-  product: string;
-  measure: string;
-  label: string;
-  value: unknown;
-  units: string;
-  evidence: string;
-  extent?: MeasureExtent;
-  observed_through?: string | null;
-  computed_at: string;
-  source?: string | null;
-  doi?: string | null;
-  caveats?: string[];
-  uncertainty?: string | null;
-  detail?: Record<string, unknown>;
-}
-
 interface Summary {
   dem?: DemStats | null;
   ndvi?: NdviStats | null;
   landcover?: LandcoverStats | null;
+  landcover_history?: LandcoverHistoryStats | null;
   rainfall?: RainfallResult | null;
   country?: string | null;
   /** Administrative chain from the boundary service: country, region, district. */
@@ -345,8 +355,6 @@ interface Summary {
     admin2?: string | null;
   } | null;
   analysis?: AnalysisMetadata;
-  /** Uniform measure envelope shipped as of 1.21.0 (contract.py). */
-  measures?: MeasureSummary[];
   caveats?: string[];
 }
 
@@ -378,6 +386,63 @@ function isDatasetId(value: string): value is DatasetId {
 function formatNumber(value: number | null | undefined, maximumFractionDigits = 1): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value);
+}
+
+/** The lon/lat bounds of any supported GeoJSON shape, or null. */
+function geojsonBbox(geojson: unknown): [number, number, number, number] | null {
+  let minLon = Infinity;
+  let minLat = Infinity;
+  let maxLon = -Infinity;
+  let maxLat = -Infinity;
+  const walk = (node: unknown): void => {
+    if (!Array.isArray(node)) return;
+    if (typeof node[0] === 'number' && typeof node[1] === 'number') {
+      const lon = node[0];
+      const lat = node[1];
+      if (lon < minLon) minLon = lon;
+      if (lon > maxLon) maxLon = lon;
+      if (lat < minLat) minLat = lat;
+      if (lat > maxLat) maxLat = lat;
+      return;
+    }
+    node.forEach(walk);
+  };
+  const collect = (g: unknown): void => {
+    if (!g || typeof g !== 'object') return;
+    const geo = g as {
+      type?: string;
+      coordinates?: unknown;
+      geometry?: unknown;
+      features?: unknown[];
+      geometries?: unknown[];
+    };
+    if (geo.type === 'FeatureCollection' && Array.isArray(geo.features)) {
+      geo.features.forEach(collect);
+      return;
+    }
+    if (geo.type === 'Feature') {
+      collect(geo.geometry);
+      return;
+    }
+    if (geo.type === 'GeometryCollection' && Array.isArray(geo.geometries)) {
+      geo.geometries.forEach(collect);
+      return;
+    }
+    walk(geo.coordinates);
+  };
+  collect(geojson);
+  if (!Number.isFinite(minLon) || !Number.isFinite(minLat)) return null;
+  return [minLon, minLat, maxLon, maxLat];
+}
+
+/** An approximate ground area for a lon/lat box, in km². */
+function bboxAreaKm2(bbox: [number, number, number, number] | null): number | null {
+  if (!bbox) return null;
+  const [minLon, minLat, maxLon, maxLat] = bbox;
+  const lat = ((minLat + maxLat) / 2) * Math.PI / 180;
+  const width = (maxLon - minLon) * 111.32 * Math.cos(lat);
+  const height = (maxLat - minLat) * 110.57;
+  return Math.abs(width * height);
 }
 
 function landcoverEntries(landcover: LandcoverStats): Array<[string, number]> {
@@ -515,6 +580,30 @@ function stamp(value?: string | null): string | null {
   return value ? value.replace('T', ' ').slice(0, 19) : null;
 }
 
+/** Totals over the months actually served, not over the requested window.
+ *
+ * `summary.trailing_12m` is null for any window with fewer than 12 observed
+ * months, so the card used to show "—" beside a measure that showed a total.
+ * Summing the served series keeps the headline, the card and the chart on the
+ * same span, and the same-span normal beside it makes the comparison honest.
+ */
+function rainfallTotals(rain: RainfallResult) {
+  const series = rain.series ?? [];
+  const total = series.reduce((sum, month) => sum + (month.precip_mm ?? 0), 0);
+  const normal = series.reduce((sum, month) => sum + (month.normal_mm ?? 0), 0);
+  const months = series.length;
+  const anomalyPct = normal > 0 ? ((total - normal) / normal) * 100 : null;
+  return {
+    series,
+    total,
+    normal,
+    months,
+    anomalyPct,
+    first: series[0]?.month ?? null,
+    last: series.at(-1)?.month ?? null,
+  };
+}
+
 /* Show your working, one section at a time. Everything here was already computed
    and discarded: grid cells, pixels, scenes examined, valid-pixel fraction, and
    the resolution actually read against the one requested. */
@@ -645,7 +734,7 @@ function ReadingActions({
             Download the monthly series (CSV)
           </button>
           {vegetationPending && (
-            <p className="px-2.5 py-1 text-[0.6875rem] text-ink-3">
+            <p className="px-2.5 py-1 text-[0.75rem] text-ink-3">
               Vegetation is still loading — the CSV will be rainfall only until it finishes.
             </p>
           )}
@@ -658,7 +747,7 @@ function ReadingActions({
             Print, or save as PDF
           </button>
           {shareLink && (
-            <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.6875rem] text-ink-3">
+            <code className="mx-2.5 mt-1.5 block truncate rounded-md border border-rule bg-void px-2 py-1 text-[0.75rem] text-ink-3">
               {shareLink}
             </code>
           )}
@@ -702,7 +791,10 @@ function SourceDetail({
   submission?: SubmissionState;
   vegetationSeries?: ClimateVegSeries | null;
 }) {
-  const [open, setOpen] = useState(true);
+  // Closed on arrival. The summary line ("4 of 4 selected data sources
+  // available, with resolution and method") is enough to say the evidence is
+  // there; the cards are one disclosure away, not the first thing on the page.
+  const [open, setOpen] = useState(false);
   const requested = new Set((summary.analysis?.datasets || selectedDatasets).filter(isDatasetId));
   const datasets = DATASET_IDS.filter((dataset) => requested.has(dataset));
   const read = datasets.filter(
@@ -751,6 +843,7 @@ function SourceDetail({
 const WORK_LABELS: Record<string, string> = {
   dem: 'Elevation',
   landcover: 'Land cover',
+  landcover_history: 'Land cover history',
   ndvi: 'Vegetation',
   rainfall: 'Rainfall',
   vegetation_series: 'Veg. series',
@@ -790,6 +883,11 @@ const WORKING_WORDS: Record<string, string[]> = {
     'reading Esri 10 m Land Cover',
     'one annual classification, so it reflects the year',
     'sorting every pixel into its class',
+  ],
+  landcover_history: [
+    'reading one annual land-cover map',
+    'one classification per year, not a continuous series',
+    'sorting each year into its dominant class',
   ],
 };
 
@@ -853,7 +951,7 @@ function WorkRow({
                 style={{ animation: 'sweep 1.4s var(--ease) infinite' }}
               />
             </span>
-            <span className="mt-1 block text-[0.75rem] text-ink-2">
+            <span className="mt-1 block text-[0.8125rem] text-ink-2">
               {words[tick % words.length]}
               {reads ? ` · ${reads} monthly reads` : ''}
             </span>
@@ -863,7 +961,7 @@ function WorkRow({
         )}
       </span>
       {live && elapsed != null && (
-        <span className="w-16 shrink-0 text-right text-[0.75rem] tabular-nums text-ink-3">
+        <span className="w-16 shrink-0 text-right text-[0.8125rem] tabular-nums text-ink-3">
           {elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`}
         </span>
       )}
@@ -1023,48 +1121,54 @@ function Figure({ term, value }: { term: string; value: string }) {
   );
 }
 
-/** Renders one entry of the summary.measures envelope.
- *  Mirrors the backend's honest-read framing: the value, its ground
- *  (extent / over-specified), and its evidence class are inseparable. */
-function MeasureCard({ measure }: { measure: MeasureSummary }) {
-  const freshness = measure.observed_through
-    ? measure.observed_through.slice(0, 10)
-    : null;
-  const overSpecified = measure.extent?.over_specified && measure.extent?.covered_area_km2;
+/** The four numbers a reader scans for, without repeating the cards below.
+ *
+ * The old Measures section showed only the products that happened to have a
+ * measure -- usually elevation and rainfall -- so it looked incomplete next to
+ * four modules while duplicating two of them. This is the summary, not a second
+ * copy: the per-source cards remain the canonical detail.
+ */
+function HeadlineStrip({ summary }: { summary: Summary }) {
+  const dem = summary.dem;
+  const landcover = summary.landcover;
+  const ndvi = summary.ndvi;
+  const rain = summary.rainfall;
+  const landcoverTop = landcover && !landcover.error ? landcoverEntries(landcover)[0] : null;
+  const rainTotals = rain?.status === 'ok' ? rainfallTotals(rain) : null;
+  const stats: Array<{ label: string; value: string; caption: string }> = [
+    {
+      label: 'Elevation',
+      value: dem && !dem.error && dem.mean != null ? `${formatNumber(dem.mean, 0)} m` : '—',
+      caption: dem?.terrain_type || 'mean elevation',
+    },
+    {
+      label: 'Land cover',
+      value: landcoverTop ? `${formatNumber(landcoverTop[1], 1)}%` : '—',
+      caption: landcoverTop ? LANDCOVER_LABELS[landcoverTop[0]] || landcoverTop[0] : 'dominant class',
+    },
+    {
+      label: 'Vegetation',
+      value: ndvi?.mean != null ? formatNumber(ndvi.mean, 3) : '—',
+      caption: 'mean of median composite NDVI',
+    },
+    {
+      label: 'Rainfall',
+      value: rainTotals && rainTotals.months > 0 ? `${formatNumber(rainTotals.total, 0)} mm` : '—',
+      caption: rainTotals && rainTotals.months > 0
+        ? `${rainTotals.months} month${rainTotals.months === 1 ? '' : 's'} to ${rainTotals.last?.slice(0, 7)}`
+        : 'no months in this window',
+    },
+  ];
   return (
-    <div className="rounded-xl border border-rule p-3">
-      <div className="flex items-baseline justify-between gap-3">
-        <dt className="text-sm font-medium text-ink-2">{measure.label}</dt>
-        {measure.units ? (
-          <dd className="fig text-sm text-ink">
-            {measure.value != null ? String(measure.value) : '—'} {measure.units}
-          </dd>
-        ) : (
-          <dd className="fig text-sm text-ink">
-            {measure.value != null ? String(measure.value) : '—'}
-          </dd>
-        )}
-      </div>
-      <p className="mt-1 text-[0.6875rem] text-ink-3">
-        {measure.evidence}
-        {freshness ? ` · as of ${freshness}` : ''}
-      </p>
-      {overSpecified && (
-        <p className="mt-1 text-[0.6875rem] text-ink-3">
-          read over {formatNumber(measure.extent!.covered_area_km2, 0)} km² for a{' '}
-          {measure.extent!.requested_area_km2
-            ? `${formatNumber(measure.extent!.requested_area_km2, 0)} km²`
-            : '? km²'} outline
-        </p>
-      )}
-      {measure.caveats && measure.caveats.length > 0 && (
-        <ul className="mt-1 space-y-0.5 pl-3 text-[0.6875rem] text-ink-3 marker:text-stressed">
-          {measure.caveats.map((c, i) => (
-            <li key={i} className="list-disc">{c}</li>
-          ))}
-        </ul>
-      )}
-    </div>
+    <dl className="mb-7 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-rule bg-rule lg:grid-cols-4">
+      {stats.map((stat) => (
+        <div key={stat.label} className="bg-surface px-4 py-3.5">
+          <dt className="text-[0.75rem] uppercase tracking-[0.12em] text-ink-3">{stat.label}</dt>
+          <dd className="fig mt-1 text-xl text-ink">{stat.value}</dd>
+          <dd className="mt-0.5 text-[0.8125rem] leading-snug text-ink-3">{stat.caption}</dd>
+        </div>
+      ))}
+    </dl>
   );
 }
 
@@ -1097,16 +1201,31 @@ function DatasetResultCard({
         <Headline value={`${formatNumber(dem.elevation_range_m ?? 0, 0)} m`} caption="elevation range" />
         <dl className="rows">
           <Figure term="mean elevation" value={`${formatNumber(dem.mean, 0)} m`} />
-          <Figure term="lowest" value={dem.min == null ? '—' : `${formatNumber(dem.min, 0)} m`} />
-          <Figure term="highest" value={dem.max == null ? '—' : `${formatNumber(dem.max, 0)} m`} />
+          <Figure
+            term="lowest"
+            value={dem.min == null ? '—' : `${formatNumber(dem.min, 0)} m${dem.min_is_outlier ? ' (flagged)' : ''}`}
+          />
+          <Figure
+            term="highest"
+            value={dem.max == null ? '—' : `${formatNumber(dem.max, 0)} m${dem.max_is_outlier ? ' (flagged)' : ''}`}
+          />
           <Figure term="variation" value={dem.std == null ? '—' : `σ ${formatNumber(dem.std, 0)} m`} />
           <Figure term="terrain" value={dem.terrain_type || '—'} />
         </dl>
+        {(dem.min_is_outlier || dem.max_is_outlier) && (
+          <p className="fig mt-2 text-xs text-caution">
+            The {dem.min_is_outlier ? 'lowest' : 'highest'} value is far outside the bulk
+            of the terrain and may be a void or water pixel. Terrain is classified
+            from the middle 90% of the data
+            {dem.robust_range_m != null ? ` (${formatNumber(dem.robust_range_m, 0)} m)` : ''}.
+          </p>
+        )}
         <EvidenceLine evidence={dem.evidence} status={dem.status} />
         <Working
           rows={[
             ['valid pixels', dem.valid_pixel_count?.toLocaleString()],
             ['coverage', demCoverage == null ? null : `${formatNumber(demCoverage * 100, 1)}%`],
+            ['middle 90%', dem.p05 == null || dem.p95 == null ? null : `${formatNumber(dem.p05, 0)}–${formatNumber(dem.p95, 0)} m`],
             ['source product', 'Copernicus DEM GLO-30 30 m'],
           ]}
         />
@@ -1180,21 +1299,36 @@ function DatasetResultCard({
       );
     }
     const s = rain.summary || {};
-    const t = s.trailing_12m;
+    const totals = rainfallTotals(rain);
+    const { total, normal, months, anomalyPct, last } = totals;
     const trend = trendPerYear(rain.series || []);
     const suspect = rain.suspect_months || [];
+    const over = overSpecified({ ...rain, bbox_area_km2: summary.analysis?.bbox_area_km2 });
+    const requestedEnd = rain.window?.end ?? null;
+    const shortOfWindow = !!(last && requestedEnd && last.slice(0, 7) !== requestedEnd.slice(0, 7));
     return (
       <ModuleBlock title={option.label} description={option.description}>
         <Headline
           value={
-            t?.anomaly_pct == null
+            anomalyPct == null
               ? '—'
-              : `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}%`
+              : `${anomalyPct > 0 ? '+' : ''}${formatNumber(anomalyPct, 0)}%`
           }
-          caption="last 12 months vs 1991–2020 normal"
+          caption={
+            months > 0
+              ? `${months} month${months === 1 ? '' : 's'} to ${last?.slice(0, 7)} vs 1991–2020 normal`
+              : 'no months in this window'
+          }
         />
         <dl className="rows">
-          <Figure term="last 12 months" value={t ? `${formatNumber(t.precip_mm, 0)} mm` : '—'} />
+          <Figure
+            term={months > 0 ? `${months}-month total (to ${last?.slice(0, 7)})` : 'total'}
+            value={months > 0 ? `${formatNumber(total, 0)} mm` : '—'}
+          />
+          <Figure
+            term="same-span normal"
+            value={months > 0 && normal > 0 ? `${formatNumber(normal, 0)} mm` : '—'}
+          />
           <Figure
             term="annual normal"
             value={
@@ -1219,6 +1353,12 @@ function DatasetResultCard({
             value={s.wettest_month ? `${s.wettest_month.month} · ${formatNumber(s.wettest_month.precip_mm, 0)} mm` : '—'}
           />
         </dl>
+        {shortOfWindow && (
+          <p className="fig mt-2 text-xs text-caution">
+            The series stops at {last?.slice(0, 7)}; the requested window ended {requestedEnd?.slice(0, 10)}.
+            The total above covers {months} month{months === 1 ? '' : 's'}, not the full window.
+          </p>
+        )}
         {suspect.length > 0 && (
           <p className="fig mt-2 text-xs text-caution">
             {suspect.length} month{suspect.length === 1 ? '' : 's'} reported near-zero totals
@@ -1245,17 +1385,21 @@ function DatasetResultCard({
             // was asked for. Reading window.end claimed a series ran to today
             // when the newest ERA5 month is six months behind -- which is the
             // exact confusion this line exists to remove.
-            const last = (rain.series || []).at(-1)?.month;
             return last ? ` · series ends ${last.slice(0, 7)}` : '';
           })()}
           {rain.label ? ` · ${rain.label}` : ''}
         </p>
-        {overSpecified(rain) && (
+        {over && (
           <p className="fig mt-1 text-xs text-caution">
-            {overSpecified(rain)}
+            {over}
           </p>
         )}
         <EvidenceLine evidence={rain.evidence} status={rain.status} />
+        {rain.status === 'ok' && (
+          <a href="#rainfall-results" className="btn btn-ghost mt-2 h-8 px-3 text-xs font-semibold">
+            View the monthly charts
+          </a>
+        )}
         {/* The charts used to live here, inside a module, inside a two-column
             grid — which left each plot about 480x150 rendered pixels with 9px
             type. They now live in their own full-width section under the
@@ -1271,12 +1415,76 @@ function DatasetResultCard({
             ['area', rain.label],
             ['grid', rain.resolution_km == null ? null : `${rain.resolution_km} km`],
             ['grid cells', rain.grid_cells],
-            ['months', (rain.series || []).length],
+            ['months', months],
             ['climatology', rain.climatology?.standard],
             ['doi', rain.evidence?.doi],
             ['licence', rain.evidence?.license],
             ['retrieved', rain.evidence?.retrieved],
-            ['series ends', rain.window?.end],
+            ['series ends', last],
+            ['requested end', requestedEnd],
+          ]}
+        />
+      </ModuleBlock>
+    );
+  }
+
+  if (dataset === 'landcover_history') {
+    const history = summary.landcover_history;
+    const years = history?.series ?? [];
+    if (!history || history.status !== 'ok' || years.length === 0) {
+      return (
+        <ModuleBlock title={option.label} description={option.description}>
+          <p className="fig text-sm text-ink-2">
+            {history?.message
+              ? history.message
+              : 'Land cover history is read offline, one year at a time. It will appear here when the reading is complete.'}
+          </p>
+          <EvidenceLine evidence={history?.evidence} status={history?.status || 'not_computed'} />
+        </ModuleBlock>
+      );
+    }
+    const latest = years.at(-1)!;
+    const maxPct = Math.max(1, ...years.map((entry) => entry.dominant_percentage ?? 0));
+    const label = (code?: string) => (code ? LANDCOVER_LABELS[code] || code : '—');
+    return (
+      <ModuleBlock title={option.label} description={option.description}>
+        <Headline
+          value={`${formatNumber(latest.dominant_percentage ?? 0, 1)}%`}
+          caption={`${latest.year} · ${label(latest.dominant_class)}`}
+        />
+        <div className="mt-3 space-y-1.5">
+          {years.map((entry) => (
+            <div
+              key={entry.year}
+              className="grid grid-cols-[3rem_1fr_7.5rem] items-center gap-2"
+            >
+              <span className="fig text-[0.8125rem] text-ink-3">{entry.year}</span>
+              <span className="h-2 overflow-hidden rounded-full bg-raised">
+                <span
+                  className="block h-full rounded-full bg-signal/70"
+                  style={{ width: `${((entry.dominant_percentage ?? 0) / maxPct) * 100}%` }}
+                />
+              </span>
+              <span className="truncate text-right text-[0.8125rem] text-ink-2">
+                {label(entry.dominant_class)}
+                <span className="fig ml-1 text-ink-3">{formatNumber(entry.dominant_percentage ?? 0, 0)}%</span>
+              </span>
+            </div>
+          ))}
+        </div>
+        <dl className="rows mt-3">
+          <Figure term="years" value={`${years.length}`} />
+          <Figure term="first year" value={`${years[0].year}`} />
+          <Figure term="latest year" value={`${latest.year}`} />
+          <Figure term="source" value="Esri 10 m Land Cover" />
+        </dl>
+        <EvidenceLine evidence={history.evidence} status={history.status} />
+        <Working
+          rows={[
+            ['years', years.length],
+            ['resolution', history.resolution_m == null ? null : `${history.resolution_m} m`],
+            ['source collection', history.source_collection],
+            ['window', history.window?.start && history.window?.end ? `${history.window.start} → ${history.window.end}` : null],
           ]}
         />
       </ModuleBlock>
@@ -1295,7 +1503,7 @@ function DatasetResultCard({
   const ndviCoverage: number | null = ndvi.valid_pixel_fraction ?? null;
   return (
     <ModuleBlock title={option.label} description={option.description}>
-      <Headline value={formatNumber(ndvi.mean ?? 0, 3)} caption="median composite NDVI" />
+      <Headline value={formatNumber(ndvi.mean ?? 0, 3)} caption="mean of median composite NDVI" />
       <dl className="rows">
         <Figure term="middle 50%" value={`${formatNumber(ndvi.p25 ?? 0, 3)} – ${formatNumber(ndvi.p75 ?? 0, 3)}`} />
         <Figure term="range" value={`${formatNumber(ndvi.min ?? 0, 3)} – ${formatNumber(ndvi.max ?? 0, 3)}`} />
@@ -1309,7 +1517,7 @@ function DatasetResultCard({
           thin composite is the case most likely to be quoted wrongly, so it is
           stated here rather than filed under show-your-working. */}
       {(ndvi.mean ?? 1) < 0.2 && (
-        <p className="fig mt-2 text-[0.75rem] leading-relaxed text-caution">
+        <p className="fig mt-2 text-[0.8125rem] leading-relaxed text-caution">
           A figure below about 0.2 is worth reading as uncertain rather than as bare
           ground. Cloud and thin cover depress the index, and the coverage figure
           below describes the outline rather than the cloud in it.
@@ -1339,7 +1547,20 @@ function DatasetResultCard({
    Splitting them out is what makes the four journeys -- live read, 413->offline,
    poll->complete, and error/retry -- readable as state transitions rather than
    as interleaved ternaries. */
-function LoadingState() {
+function LoadingState({
+  requestedDatasets,
+  rainProduct,
+}: {
+  requestedDatasets?: DatasetId[];
+  rainProduct?: 'rainfall' | 'chirps';
+}) {
+  // The old loading state listed the four catalogue sources, whether or not
+  // they were requested, and gave no per-source status. The reading room's
+  // rows already do that job; reuse them so a skipped or failed source is
+  // visible as it happens.
+  const datasets: DatasetId[] = requestedDatasets?.length
+    ? requestedDatasets
+    : ['dem', 'landcover', 'ndvi', 'rainfall'];
   return (
     <div className="flex flex-col gap-5 py-8">
       <div className="flex items-center gap-3">
@@ -1349,23 +1570,22 @@ function LoadingState() {
       <div className="h-px w-full overflow-hidden bg-raised">
         <div className="scan h-px w-full" />
       </div>
-      <ul className="grid gap-2.5 sm:grid-cols-2">
-        {SOURCES.map((source) => (
-          <li
-            key={source.id}
-            className="flex items-center gap-2.5 text-[0.8125rem] text-ink-3"
-          >
-            <span className="h-1 w-1 rounded-full bg-signal-dim" />
-            {source.label}
-            <span className="text-ink-3/60">— {source.role}</span>
-          </li>
+      <div className="rounded-xl border border-rule bg-raised/40 px-4 py-2">
+        {datasets.map((id) => (
+          <WorkRow
+            key={id}
+            indicator={id}
+            product={id === 'rainfall' ? rainProduct : undefined}
+            label={WORK_LABELS[id] || id}
+            state="active"
+          />
         ))}
-      </ul>
-                      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
-                        We read each source at its native resolution and hold nothing
-                        that is not yours. The first outline is slower than the ones
-                        after it — sources complete in order, shown below.
-                      </p>
+      </div>
+      <p className="max-w-[52ch] text-[0.8125rem] leading-relaxed text-ink-3">
+        We read each source at its native resolution and hold nothing
+        that is not yours. The first outline is slower than the ones
+        after it — sources complete in order, shown below.
+      </p>
     </div>
   );
 }
@@ -1397,8 +1617,9 @@ function EmptyState() {
         Choose an area to get started.
       </p>
       <p className="max-w-[52ch] text-[0.9375rem] leading-relaxed text-ink-3">
-        Draw an area on the map or upload a GeoJSON file. You’ll see its terrain,
-        land cover, vegetation and rainfall, with the data sources shown.
+        Search for a place, draw an area on the map, or upload a GeoJSON file.
+        You’ll see its terrain, land cover, vegetation and rainfall, with the data
+        sources shown.
       </p>
     </div>
   );
@@ -1413,6 +1634,18 @@ export default function Home() {
   const [analysisWarnings, setAnalysisWarnings] = useState<AnalysisWarning[]>([]);
    const [selectedDatasets, setSelectedDatasets] = useState<DatasetId[]>(['dem', 'landcover', 'ndvi', 'rainfall']);
    const [analysisSummary, setAnalysisSummary] = useState<Summary | null>(null);
+  // Field observations uploaded from Survey123/Kobo/ODK/CSV, enriched against
+  // the current AOI's evidence. Kept at page level so the map and the table
+  // share one source of truth.
+  const [fieldObservations, setFieldObservations] = useState<Observation[]>([]);
+  const [fieldFileName, setFieldFileName] = useState<string | null>(null);
+  const fieldRows = useMemo(
+    () => enrichObservations(fieldObservations, analysisSummary),
+    [fieldObservations, analysisSummary],
+  );
+  // The overlay is a reading aid, not part of the result. Clearing it must not
+  // clear the numbers (the old onClearOverlay reset the whole summary).
+  const [overlayVisible, setOverlayVisible] = useState(true);
   const [periodAmount, setPeriodAmount] = useState<number>(1);
   const [periodUnit, setPeriodUnit] = useState<'years' | 'months' | 'days'>('years');
   const [customEnd, setCustomEnd] = useState('');
@@ -1442,6 +1675,11 @@ export default function Home() {
   const [rainProduct, setRainProduct] = useState<'rainfall' | 'chirps'>('rainfall');
   const rainProductRef = useRef(rainProduct);
   useEffect(() => { rainProductRef.current = rainProduct; }, [rainProduct]);
+  // The product is auto-defaulted by area until the reader touches the select.
+  // Without this, an auto-switch would look like a manual change and trigger a
+  // second read on top of the one the reader is about to start.
+  const rainProductTouched = useRef(false);
+  const rainProductAuto = useRef(false);
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
@@ -1463,7 +1701,9 @@ export default function Home() {
           if (!response.ok) return;
           const area = await response.json();
           setUploadedGeojson(area.geometry as GeoJsonObject);
+          setAreaKm2(typeof area.area_km2 === 'number' ? area.area_km2 : null);
           setAdminArea({ id: area.id ?? adminId, name: area.name ?? null, level: area.level ?? null });
+          setSharedAreaLoaded(true);
         } catch {
         }
       })();
@@ -1474,6 +1714,8 @@ export default function Home() {
       const parsed = JSON.parse(decodeURIComponent(area));
       if (!parsed || typeof parsed !== 'object') return;
       setUploadedGeojson(parsed as GeoJsonObject);
+      setAreaKm2(bboxAreaKm2(geojsonBbox(parsed)));
+      setSharedAreaLoaded(true);
     } catch {
       return;
     }
@@ -1532,6 +1774,22 @@ export default function Home() {
   const [adminQuery, setAdminQuery] = useState('');
   const [adminBusy, setAdminBusy] = useState(false);
   const [drawnInfo, setDrawnInfo] = useState<{ areaKm2: number; lon: number; lat: number } | null>(null);
+  // The selected outline's approximate ground area, known before the first read
+  // so the rainfall product can default to the one whose cell fits the area.
+  const [areaKm2, setAreaKm2] = useState<number | null>(null);
+  const [rainProductNote, setRainProductNote] = useState<string | null>(null);
+  // A shared link used to restore the area into the rail and leave the reader
+  // at the marketing hero, so the link looked like it had done nothing. The
+  // area is loaded here, and the page moves to the workspace to show it.
+  const [sharedAreaLoaded, setSharedAreaLoaded] = useState(false);
+  // A shared link should land on the workspace, not the hero.
+  useEffect(() => {
+    if (!sharedAreaLoaded) return;
+    const id = window.setTimeout(() => {
+      document.getElementById('workspace')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [sharedAreaLoaded]);
   const [containingArea, setContainingArea] = useState<{ name: string; level: number; id: string | null; area_km2: number } | null>(null);
   const [containingBusy, setContainingBusy] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1573,8 +1831,8 @@ export default function Home() {
       parts.push(' — no sensor archive reaches back this far, so there will be no vegetation value');
     } else {
       parts.push(months > 120
-        ? ` — ${months} months, so the charts bin it yearly; one bar a month would not be readable`
-        : ` — ${months} month${months === 1 ? '' : 's'}`);
+        ? ` — ${months} monthly samples, so the charts bin it yearly; one bar a month would not be readable`
+        : ` — ${months} monthly sample${months === 1 ? '' : 's'} (inclusive of both dates)`);
     }
     return parts.join('');
   })();
@@ -1678,6 +1936,7 @@ export default function Home() {
       const area = await response.json();
       setSecondaryGeojson(uploadedGeojson);
       setUploadedGeojson(area.geometry as GeoJsonObject);
+      setAreaKm2(typeof area.area_km2 === 'number' ? area.area_km2 : null);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
       setAdminQuery('');
       const km2 = Math.round(area.area_km2 ?? 0);
@@ -1752,12 +2011,14 @@ export default function Home() {
 
   const handleBoundingBoxCreated = useCallback((bbox: BoundingBox | null) => {
     setBoundingBox(bbox);
+    setAreaKm2(bbox ? bboxAreaKm2([bbox.west, bbox.south, bbox.east, bbox.north]) : null);
     if (bbox) trackEvent('area_selected', { source: 'map_bounds' });
     clearAnalysis();
   }, [clearAnalysis]);
 
   const handleFeaturesChange = useCallback((geojson: FeatureCollection) => {
     setDrawnFeatures(geojson);
+    setAreaKm2(bboxAreaKm2(geojsonBbox(geojson)));
     trackEvent('area_selected', { source: 'drawn', feature_count: geojson.features.length });
     clearAnalysis();
   }, [clearAnalysis]);
@@ -1797,6 +2058,7 @@ export default function Home() {
         const canonical = await response.json();
         setSecondaryGeojson(uploadedGeojson);
         setUploadedGeojson((canonical?.geometry ?? canonical) as GeoJsonObject);
+        setAreaKm2(bboxAreaKm2(geojsonBbox(canonical?.geometry ?? canonical)));
         trackEvent('area_selected', { source: 'geojson_upload' });
         toast({
           title: "Success",
@@ -1834,12 +2096,17 @@ export default function Home() {
     if (dem.terrain_type) {
       lines.push(`Terrain: ${dem.terrain_type}.`);
     }
+    if (dem.min_is_outlier || dem.max_is_outlier) {
+      lines.push(
+        `Elevation: the ${dem.min_is_outlier ? 'lowest' : 'highest'} value is far outside the bulk of the terrain and may be a void or water pixel.`,
+      );
+    }
   }
 
   const ndvi = summary.ndvi;
   if (ndvi?.mean != null) {
     lines.push(
-      `Vegetation: NDVI mean is ${formatNumber(ndvi.mean, 2)} (higher values generally indicate denser vegetation).`,
+      `Vegetation: mean of median-composite NDVI is ${formatNumber(ndvi.mean, 2)} (higher values generally indicate denser vegetation).`,
     );
   }
   if (ndvi?.warning) {
@@ -1851,14 +2118,17 @@ export default function Home() {
 
   const landcover = summary.landcover;
   const rain = summary.rainfall;
-  if (rain?.status === 'ok' && rain.summary?.trailing_12m) {
-    const t = rain.summary.trailing_12m;
-    const productLabel = rain.product === 'chirps' ? 'CHIRPS' : 'ERA5';
-    lines.push(
-      `Rainfall (${productLabel}): ${formatNumber(t.precip_mm, 0)} mm over the last 12 months, ` +
-      `${t.anomaly_pct != null ? `${t.anomaly_pct > 0 ? '+' : ''}${formatNumber(t.anomaly_pct, 0)}% ` : ''}` +
-      `against the 1991-2020 normal of ${formatNumber(t.normal_mm, 0)} mm.`,
-    );
+  if (rain?.status === 'ok') {
+    const totals = rainfallTotals(rain);
+    if (totals.months > 0) {
+      const productLabel = rain.product === 'chirps' ? 'CHIRPS' : 'ERA5';
+      const last = totals.last?.slice(0, 7) ?? '—';
+      lines.push(
+        `Rainfall (${productLabel}): ${formatNumber(totals.total, 0)} mm over ${totals.months} month${totals.months === 1 ? '' : 's'} to ${last}, ` +
+        `${totals.anomalyPct != null ? `${totals.anomalyPct > 0 ? '+' : ''}${formatNumber(totals.anomalyPct, 0)}% ` : ''}` +
+        `against the 1991-2020 normal of ${formatNumber(totals.normal, 0)} mm for the same span.`,
+      );
+    }
   }
   if (landcover && !landcover.error) {
     const parts = landcoverEntries(landcover)
@@ -1866,15 +2136,9 @@ export default function Home() {
     if (parts.length > 0) lines.push(`Land cover: ${parts.join(', ')}.`);
   }
 
-  // The measure envelope (summary.measures) carries derived/observed/modelled
-  // figures in a uniform shape. Surface each headline so the text summary stays
-  // in step with the structured panel below.
-  if (summary.measures && summary.measures.length > 0) {
-    for (const m of summary.measures) {
-      const head = m.observed_through ? `${m.label} ${m.value} ${m.units}, as of ${m.observed_through.slice(0, 10)}` : `${m.label} ${m.value} ${m.units}`;
-      lines.push(`${head} — ${m.evidence}.`);
-    }
-  }
+  // The structured cards and the headline strip are the canonical numbers. The
+  // old text summary also appended every measure, which printed the same
+  // rainfall total a third time.
 
   return lines.join(' ') || 'None of the chosen sources have anything to say about this outline.';
 }
@@ -2069,6 +2333,8 @@ export default function Home() {
       }
       const data = await response.json() as { summary?: Summary };
       const summary = data.summary || {};
+      const nextArea = summary.analysis?.bbox_area_km2;
+      if (nextArea != null) setAreaKm2(nextArea);
       // Fold this read-from-artefacts result into what is already on screen;
       // do not replace it. The synchronous read fills dem/landcover/ndvi, and
       // this path fills rainfall once the worker wrote it (and the other modules
@@ -2084,6 +2350,7 @@ export default function Home() {
         const merged: Summary = { ...previous };
         if (summary.dem) merged.dem = summary.dem;
         if (summary.landcover) merged.landcover = summary.landcover;
+        if (summary.landcover_history) merged.landcover_history = summary.landcover_history;
         if (summary.ndvi) merged.ndvi = summary.ndvi;
         if ('rainfall' in summary) merged.rainfall = summary.rainfall ?? null;
         merged.analysis = {
@@ -2098,28 +2365,10 @@ export default function Home() {
           bbox_area_km2:
             previous.analysis?.bbox_area_km2 ?? summary.analysis?.bbox_area_km2,
         };
-        const measures = new Map<string, MeasureSummary>();
-        for (const measure of previous.measures ?? []) {
-          // A new rainfall reading replaces the old one, even when the product
-          // changes (ERA5 vs CHIRPS). Otherwise both stay on screen and the
-          // overview keeps showing the previous product's headline number.
-          if (measure.product === 'rainfall' || measure.product === 'chirps') continue;
-          measures.set(measure.product, measure);
-        }
-        for (const measure of summary.measures ?? []) {
-          if (measure.product === 'rainfall' || measure.product === 'chirps') {
-            // drop any previous rainfall measure before adding the new one
-            for (const key of [...measures.keys()]) {
-              if (key === 'rainfall' || key === 'chirps') measures.delete(key);
-            }
-          }
-          measures.set(measure.product, measure);
-        }
-        merged.measures = [...measures.values()];
         // /context's caveats describe its own modules; its "not yet available"
         // line would contradict modules the synchronous read already shows, so
         // adopt them only once the read covers everything on screen.
-        const coversAll = (['dem', 'landcover', 'ndvi', 'rainfall'] as const).every(
+        const coversAll = (['dem', 'landcover', 'landcover_history', 'ndvi', 'rainfall'] as const).every(
           (key) => previous[key] == null || summary[key] != null,
         );
         if (coversAll) merged.caveats = summary.caveats ?? merged.caveats;
@@ -2529,6 +2778,9 @@ export default function Home() {
       const data = await response.json() as { summary?: Summary };
       const analysis = data.summary?.analysis;
       const box = analysis?.bbox;
+      if (analysis?.bbox_area_km2 != null) {
+        setAreaKm2(analysis.bbox_area_km2);
+      }
       if (Array.isArray(box) && box.length === 4 && analysis?.bbox_area_km2 != null) {
         setDrawnInfo({
           areaKm2: analysis.bbox_area_km2,
@@ -2540,6 +2792,7 @@ export default function Home() {
       const ndviWarning = summary.ndvi?.warning;
       setAnalysisWarnings(ndviWarning ? [{ message: ndviWarning, status: summary.ndvi?.status }] : []);
       setAnalysisSummary(summary);
+      setOverlayVisible(true);
       setResultPhase('success');
       trackEvent('analysis_completed', {
         datasets: selectedDatasets,
@@ -2560,6 +2813,13 @@ export default function Home() {
   useEffect(() => {
     if (prevRainProduct.current !== rainProduct && (uploadedGeojson || drawnFeatures || boundingBox)) {
       prevRainProduct.current = rainProduct;
+      // An auto-default (the reader has not chosen a product) is not a new
+      // reading request: it happened because the area changed, and the reader
+      // still has to press Read this area.
+      if (rainProductAuto.current) {
+        rainProductAuto.current = false;
+        return;
+      }
       // A product change is a new reading: drop the previous rainfall result so
       // its series, source and copy cannot leak into the new one.
       setAnalysisSummary(null);
@@ -2569,6 +2829,25 @@ export default function Home() {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rainProduct]);
+
+  // ERA5 is one ~780 km2 cell below that size, so a small outline is described
+  // by a cell rather than by its own ground. CHIRPS is finer and fresher, so it
+  // is the honest default there. The reader can still choose ERA5 explicitly.
+  useEffect(() => {
+    if (rainProductTouched.current || areaKm2 == null) return;
+    const next: 'rainfall' | 'chirps' = areaKm2 < 780 ? 'chirps' : 'rainfall';
+    if (next === rainProduct) {
+      setRainProductNote(null);
+      return;
+    }
+    rainProductAuto.current = true;
+    setRainProduct(next);
+    setRainProductNote(
+      next === 'chirps'
+        ? `Switched to CHIRPS: this area is about ${Math.round(areaKm2).toLocaleString()} km², smaller than one ERA5 cell (~780 km²). Choose ERA5 above if you want the modelled record.`
+        : null,
+    );
+  }, [areaKm2, rainProduct]);
 
   // A window change is a new reading: the displayed summary was computed
   // against the old window, and showing it under the new window's label is
@@ -2594,27 +2873,6 @@ export default function Home() {
 
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
-
-  // One-tap "Describe this place": the four datasets, 5-year window,
-  // auto sensor, CHIRPS (closest to the ground). Every default is overridable.
-  // The setters synchronously update the refs that handleAnalyze reads, so the
-  // analysis that follows in the same tick sees the new choices rather than
-  // yesterday's state (React updates are async, so a bare setState would race).
-  const handleDescribe = () => {
-    setSelectedDatasets(['dem', 'landcover', 'ndvi', 'rainfall']);
-    setRainProduct('chirps');
-    rainProductRef.current = 'chirps';
-    setSelectedSensor('auto');
-    setCustomStart('');
-    setCustomEnd('');
-    setPeriodAmount(5);
-    setPeriodUnit('years');
-    trackEvent('describe_this_place');
-    // Slight delay for state to settle before analysis reads it.
-    window.setTimeout(() => void handleAnalyze(), 0);
-  };
-  const hasArea = !!(uploadedGeojson || drawnFeatures?.features.length || boundingBox);
-  const showDescribe = hasArea && !isLoading && !analysisSummary;
 
   const rainfallSubmission = activeCacheKey ? submission[activeCacheKey] : undefined;
   const rainfallPending = rainfallSubmission?.state === 'queued'
@@ -2668,8 +2926,8 @@ export default function Home() {
             <Wordmark />
           </a>
 
-          <span className="fig ml-auto hidden text-[0.6875rem] tracking-[0.08em] text-ink-3 md:block">
-            {SOURCES.map((source) => source.label).join('  ·  ')}
+          <span className="fig ml-auto hidden text-[0.75rem] tracking-[0.08em] text-ink-3 md:block">
+            Copernicus DEM · Esri 10 m · Sentinel-2 / Landsat · ERA5 / CHIRPS
           </span>
 
           <a
@@ -2685,15 +2943,8 @@ export default function Home() {
       <main className="relative z-10">
         {/* -------------------------------------------------------------- hero */}
         <section id="top" data-print-hide className="mx-auto max-w-[1440px] px-5 pt-16 sm:px-8 sm:pt-24">
-          <p className="fig flex flex-wrap items-center gap-x-2 gap-y-1 text-[0.6875rem] tracking-[0.14em] text-ink-3 uppercase">
-            {SOURCES.map((source) => (
-              <span key={source.id} className="inline-flex items-center gap-2">
-                <span className="h-1 w-1 rounded-full bg-signal-dim" />
-                {source.label}
-              </span>
-            ))}
-          </p>
-
+          {/* The source list lives in the header. Repeating it here pushed the
+              headline down and said the same thing twice. */}
           {/* Scale contrast is the whole Do argument in one element: a claim set
               far larger than anything else on the page, with the italic doing
               the work a second colour would otherwise do. */}
@@ -2713,19 +2964,19 @@ export default function Home() {
 
             <ol className="grid gap-3 self-start sm:grid-cols-3">
               <li className="border-l border-signal pl-3.5">
-                <span className="fig text-[0.6875rem] text-signal">01 · FIND</span>
+                <span className="fig text-[0.75rem] text-signal">01 · FIND</span>
                 <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Search a place</p>
-                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Type a town or landmark and choose a suggestion to zoom the map there.</p>
+                <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">Type a town or landmark and choose a suggestion to zoom the map there.</p>
               </li>
               <li className="border-l border-rule pl-3.5">
-                <span className="fig text-[0.6875rem] text-ink-3">02 · SELECT</span>
+                <span className="fig text-[0.75rem] text-ink-3">02 · SELECT</span>
                 <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Choose your boundary</p>
-                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Use an administrative area, draw an outline on the map, or upload a GeoJSON polygon.</p>
+                <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">Use an administrative area, draw an outline on the map, or upload a GeoJSON polygon.</p>
               </li>
               <li className="border-l border-rule pl-3.5">
-                <span className="fig text-[0.6875rem] text-ink-3">03 · READ</span>
+                <span className="fig text-[0.75rem] text-ink-3">03 · READ</span>
                 <p className="mt-1 text-[0.8125rem] font-medium leading-tight">Explore the results</p>
-                <p className="mt-1 text-[0.75rem] leading-relaxed text-ink-3">Once an area is selected, choose the time period and read its land and climate data.</p>
+                <p className="mt-1 text-[0.8125rem] leading-relaxed text-ink-3">Once an area is selected, choose the time period and read its land and climate data.</p>
               </li>
             </ol>
           </div>
@@ -2737,6 +2988,12 @@ export default function Home() {
           id="workspace"
           className="mx-auto max-w-[1440px] scroll-mt-20 px-5 pt-20 sm:px-8"
         >
+          {sharedAreaLoaded && (
+            <div className="mb-4 flex items-center gap-2 rounded-xl border border-signal/30 bg-signal/10 px-4 py-2.5 text-[0.8125rem] text-signal">
+              <span className="h-1.5 w-1.5 rounded-full bg-signal" />
+              Shared area loaded. Check the window and press Read this area.
+            </div>
+          )}
           {/* The cap used to be an amber alarm across the top of the page, read
               on arrival and never again. It is a fact about the service, so it
               now sits with the controls it constrains, as a quiet note. */}
@@ -2757,7 +3014,7 @@ export default function Home() {
               className="rail self-start"
             >
               <div className="border-b border-rule px-5 py-4">
-                <p className="fig mb-1 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">01 · Area</p>
+                <p className="fig mb-1 text-[0.75rem] tracking-[0.12em] text-signal uppercase">01 · Area</p>
                 <h2 className="text-[0.9375rem] font-semibold tracking-[-0.01em]">
                   Choose your area
                 </h2>
@@ -2773,7 +3030,7 @@ export default function Home() {
                   <Input id="admin-area" type="text" aria-describedby="admin-area-help" placeholder="Kenya, Nairobi" value={adminQuery} onChange={(event) => setAdminQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void resolveAdminArea(); }} />
                   <Button size="sm" variant="outline" disabled={adminBusy || !adminQuery.trim()} onClick={() => void resolveAdminArea()}>{adminBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Find area'}</Button>
                 </div>
-                <p id="admin-area-help" className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Searches FAO GAUL first, then the live geoBoundaries open dataset if GAUL cannot resolve it. Enter the country first, then the area, for example <span className="text-ink-2">Kenya, Nairobi</span>.</p>
+                <p id="admin-area-help" className="mt-1.5 text-[0.8125rem] leading-relaxed text-ink-3">Searches FAO GAUL first, then the live geoBoundaries open dataset if GAUL cannot resolve it. Enter the country first, then the area, for example <span className="text-ink-2">Kenya, Nairobi</span>.</p>
                 {adminArea && <p className="fig mt-2 text-xs text-ink-2">Using {adminArea.name}, administrative level {adminArea.level}. Its outline is the whole unit, not something you drew.</p>}
               </div>
 
@@ -2783,7 +3040,7 @@ export default function Home() {
                 <div className="relative">
                   <Input id="place-search" type="text" placeholder="Nairobi, Kajiado, Mara North…" value={searchQuery} onChange={(e) => handleSearchChange(e.target.value)} />
                 </div>
-                <p className="mt-1.5 text-[0.75rem] leading-relaxed text-ink-3">Search a town or landmark to move the map. This finds a place to look at; choose an area below or draw its outline to select what to analyse.</p>
+                <p className="mt-1.5 text-[0.8125rem] leading-relaxed text-ink-3">Search a town or landmark to move the map. This finds a place to look at; choose an area below or draw its outline to select what to analyse.</p>
                 {placeSearching && <p className="mt-2 flex items-center gap-2 text-xs text-ink-3"><Loader2 className="h-3 w-3 animate-spin" />Searching places…</p>}
                 {showResults && searchResults.length > 0 && (
                   <div role="listbox" aria-label="Place suggestions" className="mt-2 overflow-hidden rounded-xl border border-rule bg-raised">
@@ -2820,7 +3077,7 @@ export default function Home() {
                   <Upload className="h-4 w-4" />
                   Choose a .geojson
                 </label>
-                <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+                <p className="mt-2 text-[0.8125rem] leading-relaxed text-ink-3">
                   Upload a GeoJSON Polygon or MultiPolygon (up to 500 KB). It becomes the selected analysis area.
                 </p>
               </div>
@@ -2847,7 +3104,7 @@ export default function Home() {
               </div>
 
               <div className="rule-t px-5 py-4">
-                <p className="fig mb-3 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">02 · Time window</p>
+                <p className="fig mb-3 text-[0.75rem] tracking-[0.12em] text-signal uppercase">02 · Time window</p>
 
                 <div className="space-y-5">
                   <div className="space-y-2">
@@ -2867,7 +3124,7 @@ export default function Home() {
                         aria-label="Window start date"
                         className="fig h-8 rounded-lg border border-rule bg-raised px-2 text-ink-2"
                       />
-                      <span className="text-[0.75rem] text-ink-3">to</span>
+                      <span className="text-[0.8125rem] text-ink-3">to</span>
                       <input
                         type="date"
                         value={customEnd || endDate}
@@ -2879,7 +3136,7 @@ export default function Home() {
                       />
                     </div>
 
-                    <div className="fig mb-2.5 flex flex-wrap items-center gap-1.5 text-[0.75rem] text-ink-3">
+                    <div className="fig mb-2.5 flex flex-wrap items-center gap-1.5 text-[0.8125rem] text-ink-3">
                       <span>or</span>
                       {([1, 3, 10, 30] as const).map((years) => (
                         <button
@@ -2901,145 +3158,30 @@ export default function Home() {
                       )}
                     </div>
 
-                    <p className="fig mt-2.5 text-[0.75rem] text-ink-2">
+                    <p className="fig mt-2.5 text-[0.8125rem] text-ink-2">
                       {startDate} → {endDate}
                       <span className="text-ink-3">{windowExplanation}</span>
                     </p>
                     {!customRangeValid && (
-                      <p className="mt-1.5 text-[0.75rem] text-stressed">
+                      <p className="mt-1.5 text-[0.8125rem] text-stressed">
                         The start date is after the end date, or the end date is in the future.
                       </p>
                     )}
                   </div>
 
-                  <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
-                    This window selects the vegetation period, and sets how finely precipitation is sampled. The rainfall record behind it is always the full monthly series — the charts below simply show the part of it you asked to see. Elevation and land cover have no time dimension, so no window changes them.
+                  <p className="mt-2 text-[0.8125rem] leading-relaxed text-ink-3">
+                    This window selects the vegetation period and how finely rainfall is sampled. Elevation and land cover have no time dimension.
                   </p>
-
-                  <div className="border-t border-rule pt-4">
-                    {/* Which precipitation product. Not a preference: they differ
-                        in resolution, freshness and evidence class, and the reader
-                        is told what choosing costs. */}
-                    <p className="fig mb-2 text-[0.6875rem] tracking-[0.12em] text-signal uppercase">03 · Rainfall</p>
-                    <div className="mb-2 flex items-center gap-2">
-                      <Label htmlFor="rain-product" className="text-[0.8125rem] text-ink-2">
-                        Source
-                      </Label>
-                      <select
-                        id="rain-product"
-                        value={rainProduct}
-                        onChange={(e) => {
-                          const next = e.target.value as 'rainfall' | 'chirps';
-                          setRainProduct(next);
-                          setProgress(null);
-                          setSubmission({});
-                          setAnalysisSummary((previous) => {
-                            if (!previous?.rainfall || previous.rainfall.product === next) return previous;
-                            return {
-                              ...previous,
-                              rainfall: {
-                                status: 'not_computed', product: next,
-                                reason: 'product_changed',
-                                message: `${next === 'chirps' ? 'CHIRPS' : 'ERA5'} has not been computed for this area yet.`,
-                              },
-                              measures: previous.measures?.filter(
-                                (measure) => measure.product !== 'rainfall' && measure.product !== 'chirps',
-                              ),
-                              caveats: previous.caveats?.filter((note) => !note.startsWith('Rainfall:')),
-                            };
-                          });
-                        }}
-                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
-                      >
-                        <option value="rainfall">ERA5 · 28 km · modelled</option>
-                        <option value="chirps">CHIRPS · 5.6 km · observed</option>
-                      </select>
-                    </div>
-                    <p className="text-[0.75rem] leading-relaxed text-ink-3">
-                      {rainProduct === 'chirps'
-                        ? 'CHIRPS is a satellite-and-gauge blend at 0.05°, so a small area is described by one 5.6 km cell rather than by a cell covering about 780 km². It is about five months fresher than ERA5. Measured against ERA5 here it reads 0–24% higher, the difference growing as the land gets drier.'
-                        : 'ERA5 is a reanalysis at 0.25°. It is modelled output, not a gauge reading, and below about 780 km² the figure is one grid cell rather than this outline. CHIRPS is finer, fresher and classified observed — switch above if your area is small.'}
-                    </p>
-                  </div>
-
-                  <details className="border-t border-rule pt-4">
-                    <summary className="label cursor-pointer">More settings</summary>
-                    <div className="mt-4 space-y-5">
-                  <div>
-                    <div className="mb-2.5 flex items-center gap-2">
-                      <Label htmlFor="vegetation-source" className="text-[0.8125rem] text-ink-2">
-                        Vegetation source
-                      </Label>
-                      <select
-                        id="vegetation-source"
-                        value={selectedSensor}
-                        onChange={(event) => setSelectedSensor(event.target.value)}
-                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
-                      >
-                        <option value="auto">auto</option>
-                        <option value="sentinel-2">Sentinel-2</option>
-                        <option value="landsat">Landsat</option>
-                        <option value="modis">MODIS</option>
-                      </select>
-                    </div>
-                    <p className="text-[0.75rem] leading-relaxed text-ink-3">
-                      Auto picks the source whose cloud mask can be trusted, and tells
-                      you why it picked it.
-                    </p>
-                  </div>
-
-                  <div>
-                    <p className="label mb-2.5">Data to include</p>
-                    <div className="space-y-0.5">
-                      {DATASET_OPTIONS.map((dataset) => (
-                        <label
-                          key={dataset.id}
-                          htmlFor={`dataset-${dataset.id}`}
-                          className="hoverline flex cursor-pointer items-start gap-2.5 px-2 py-2"
-                        >
-                          <input
-                            type="checkbox"
-                            id={`dataset-${dataset.id}`}
-                            checked={selectedDatasets.includes(dataset.id)}
-                            onChange={(event) => {
-                              setSelectedDatasets((current) => event.target.checked
-                                ? [...current, dataset.id]
-                                : current.filter((id) => id !== dataset.id),
-                              );
-                            }}
-                            className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer appearance-none rounded-[5px] border border-line-2 bg-raised transition-colors duration-150 checked:border-signal checked:bg-signal focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-signal/20"
-                            style={
-                              selectedDatasets.includes(dataset.id)
-                                ? {
-                                    backgroundImage:
-                                      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%230a1405'%3E%3Cpath d='M6.2 11.3 3.4 8.5l1.1-1.1 1.7 1.7 4.6-4.6 1.1 1.1z'/%3E%3C/svg%3E\")",
-                                    backgroundSize: '100%',
-                                  }
-                                : undefined
-                            }
-                          />
-                          <span>
-                            <span className="block text-[0.8125rem] text-ink-2">{dataset.label}</span>
-                            <span className="block text-[0.75rem] text-ink-3">{dataset.description}</span>
-                          </span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-                    </div>
-                  </details>
                 </div>
               </div>
 
-              <div className="sticky bottom-0 z-20 border-t border-rule bg-surface/95 px-5 py-4 backdrop-blur">
-                {showDescribe && (
-                  <button
-                    onClick={handleDescribe}
-                    className="btn-primary mb-2 h-10 w-full text-[0.875rem]"
-                  >
-                    Describe this place
-                  </button>
-                )}
+              {/* The primary action sits above the data settings, not below
+                  them. The rail is long enough that a bottom bar was below the
+                  fold on a laptop, which made the one thing to do invisible
+                  until the reader had scrolled past everything else. The
+                  defaults are all selected, so reading first and adjusting
+                  after is a valid path. */}
+              <div className="border-y border-rule bg-surface/95 px-5 py-4">
                 <Button
                   onClick={handleAnalyze}
                   disabled={
@@ -3062,10 +3204,128 @@ export default function Home() {
                     </>
                   )}
                 </Button>
-                <p className="mt-2 text-center text-[0.75rem] text-ink-3">
-                  Choose an area and data, then start the read.
+                <p className="mt-2 text-center text-[0.8125rem] text-ink-3">
+                  Choose an area, then start the read. Data settings are below.
                 </p>
               </div>
+
+              <div className="rule-t px-5 py-4">
+                <p className="fig mb-3 text-[0.75rem] tracking-[0.12em] text-signal uppercase">03 · Data to include</p>
+
+                {/* Which precipitation product. Not a preference: they differ
+                    in resolution, freshness and evidence class, and the reader
+                    is told what choosing costs. */}
+                <p className="fig mb-2 text-[0.75rem] tracking-[0.12em] text-ink-3 uppercase">Rainfall source</p>
+                <div className="mb-2 flex items-center gap-2">
+                  <Label htmlFor="rain-product" className="text-[0.8125rem] text-ink-2">
+                    Source
+                  </Label>
+                  <select
+                    id="rain-product"
+                    value={rainProduct}
+                        onChange={(e) => {
+                          const next = e.target.value as 'rainfall' | 'chirps';
+                          rainProductTouched.current = true;
+                          rainProductAuto.current = false;
+                          setRainProductNote(null);
+                          setRainProduct(next);
+                      setProgress(null);
+                      setSubmission({});
+                      setAnalysisSummary((previous) => {
+                        if (!previous?.rainfall || previous.rainfall.product === next) return previous;
+                        return {
+                          ...previous,
+                          rainfall: {
+                            status: 'not_computed', product: next,
+                            reason: 'product_changed',
+                            message: `${next === 'chirps' ? 'CHIRPS' : 'ERA5'} has not been computed for this area yet.`,
+                          },
+                          caveats: previous.caveats?.filter((note) => !note.startsWith('Rainfall:')),
+                        };
+                      });
+                    }}
+                    className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                  >
+                    <option value="rainfall">ERA5 · 28 km · modelled</option>
+                    <option value="chirps">CHIRPS · 5.6 km · observed</option>
+                  </select>
+                </div>
+                {rainProductNote && (
+                  <p className="mb-2 text-[0.8125rem] leading-relaxed text-signal">
+                    {rainProductNote}
+                  </p>
+                )}
+                <p className="text-[0.8125rem] leading-relaxed text-ink-3">
+                  {rainProduct === 'chirps'
+                    ? 'CHIRPS is a satellite-and-gauge blend at 0.05°, so a small area is described by one 5.6 km cell rather than by a cell covering about 780 km². It is about five months fresher than ERA5. Measured against ERA5 here it reads 0–24% higher, the difference growing as the land gets drier.'
+                    : 'ERA5 is a reanalysis at 0.25°. It is modelled output, not a gauge reading, and below about 780 km² the figure is one grid cell rather than this outline. CHIRPS is finer, fresher and classified observed — switch above if your area is small.'}
+                </p>
+
+                <p className="label mb-2.5 mt-5">Sources</p>
+                <div className="space-y-0.5">
+                  {DATASET_OPTIONS.map((dataset) => (
+                    <label
+                      key={dataset.id}
+                      htmlFor={`dataset-${dataset.id}`}
+                      className="hoverline flex cursor-pointer items-start gap-2.5 px-2 py-2"
+                    >
+                      <input
+                        type="checkbox"
+                        id={`dataset-${dataset.id}`}
+                        checked={selectedDatasets.includes(dataset.id)}
+                        onChange={(event) => {
+                          setSelectedDatasets((current) => event.target.checked
+                            ? [...current, dataset.id]
+                            : current.filter((id) => id !== dataset.id),
+                          );
+                        }}
+                        className="mt-0.5 h-4 w-4 shrink-0 cursor-pointer appearance-none rounded-[5px] border border-line-2 bg-raised transition-colors duration-150 checked:border-signal checked:bg-signal focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-signal/20"
+                        style={
+                          selectedDatasets.includes(dataset.id)
+                            ? {
+                                backgroundImage:
+                                  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='%230a1405'%3E%3Cpath d='M6.2 11.3 3.4 8.5l1.1-1.1 1.7 1.7 4.6-4.6 1.1 1.1z'/%3E%3C/svg%3E\")",
+                                backgroundSize: '100%',
+                              }
+                            : undefined
+                        }
+                      />
+                      <span>
+                        <span className="block text-[0.8125rem] text-ink-2">{dataset.label}</span>
+                        <span className="block text-[0.8125rem] text-ink-3">{dataset.description}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              <details className="rule-t px-5 py-4">
+                <summary className="label cursor-pointer">Advanced</summary>
+                <div className="mt-4">
+                  <div>
+                    <div className="mb-2.5 flex items-center gap-2">
+                      <Label htmlFor="vegetation-source" className="text-[0.8125rem] text-ink-2">
+                        Vegetation source
+                      </Label>
+                      <select
+                        id="vegetation-source"
+                        value={selectedSensor}
+                        onChange={(event) => setSelectedSensor(event.target.value)}
+                        className="h-8 rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                      >
+                        <option value="auto">auto</option>
+                        <option value="sentinel-2">Sentinel-2</option>
+                        <option value="landsat">Landsat</option>
+                        <option value="modis">MODIS</option>
+                      </select>
+                    </div>
+                    <p className="text-[0.8125rem] leading-relaxed text-ink-3">
+                      Auto picks the source whose cloud mask can be trusted, and tells
+                      you why it picked it.
+                    </p>
+                  </div>
+                </div>
+              </details>
             </aside>
 
             {/* ---------------------------------------------------- the stage */}
@@ -3077,10 +3337,10 @@ export default function Home() {
                     <Globe className="h-4 w-4 text-signal" />
                     <span className="text-[0.9375rem] font-medium">Study area</span>
                   </div>
-                  <p className="fig text-[0.75rem] text-ink-3">
+                  <p className="fig text-[0.8125rem] text-ink-3">
                     {boundingBox || drawnFeatures?.features.length || uploadedGeojson
                       ? 'Area selected — ready to read'
-                      : 'Esri World Imagery · draw with the toolbar top right'}
+                      : 'Esri World Imagery · draw, search or upload an area'}
                   </p>
                 </div>
 
@@ -3091,13 +3351,47 @@ export default function Home() {
                     secondaryGeoJSON={secondaryGeojson}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
-                    overlayTiles={analysisSummary ? {
+                    overlayTiles={analysisSummary && overlayVisible ? {
                       dem: (analysisSummary.dem as DemStats | null | undefined)?.tiles ?? undefined,
                       landcover: (analysisSummary.landcover as LandcoverStats | null | undefined)?.tiles ?? undefined,
                       landcoverYear: (analysisSummary.landcover as LandcoverStats | null | undefined)?.year ?? null,
                     } : null}
-                    onClearOverlay={analysisSummary ? () => setAnalysisSummary(null) : undefined}
+                    onClearOverlay={analysisSummary && overlayVisible ? () => setOverlayVisible(false) : undefined}
+                    points={fieldRows.map((row) => ({ id: row.id, lon: row.lon, lat: row.lat }))}
                   />
+                  {analysisSummary && overlayVisible && (
+                    <div className="absolute left-4 top-4 z-[1000] max-w-[16rem] rounded-lg border border-rule bg-void/90 px-3 py-2.5 text-[0.75rem] leading-relaxed text-ink-2 backdrop-blur">
+                      {(analysisSummary.dem as DemStats | null | undefined)?.tiles?.length ? (
+                        <div className="mb-2">
+                          <p className="label mb-1 text-ink-3">Elevation</p>
+                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#0b1d3a,#1e5631,#a3a33a,#8b5a2b,#ffffff)' }} />
+                          <span className="mt-0.5 flex justify-between text-[0.625rem] text-ink-3"><span>low</span><span>high</span></span>
+                        </div>
+                      ) : null}
+                      {(analysisSummary.landcover as LandcoverStats | null | undefined)?.classes
+                        && Object.keys((analysisSummary.landcover as LandcoverStats).classes || {}).length > 0 ? (
+                        <div>
+                          <p className="label mb-1 text-ink-3">Land cover</p>
+                          <ul className="space-y-0.5">
+                            {landcoverEntries(analysisSummary.landcover as LandcoverStats).slice(0, 6).map(([code]) => (
+                              <li key={code} className="flex items-center gap-1.5">
+                                <span className="h-2 w-2 rounded-sm border border-rule" style={{ background: LANDCOVER_COLOURS[code] || '#6b7280' }} />
+                                {LANDCOVER_LABELS[code] || code}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                  {analysisSummary && !overlayVisible && (
+                    <button
+                      onClick={() => setOverlayVisible(true)}
+                      className="btn btn-ghost absolute bottom-10 left-4 z-[1000] h-9 px-3 text-[0.8125rem]"
+                    >
+                      Show overlay
+                    </button>
+                  )}
                   {drawnFeatures && drawnFeatures.features.length > 0 && (
                     <button
                       onClick={() => {
@@ -3193,7 +3487,7 @@ export default function Home() {
                             <p className="fig text-sm text-ink">
                               Queued in the reading room
                             </p>
-                            <p className="fig text-[0.75rem] text-ink-3">
+                            <p className="fig text-[0.8125rem] text-ink-3">
                               {offline.queued.length} module
                               {offline.queued.length === 1 ? '' : 's'}, one at a time
                             </p>
@@ -3246,7 +3540,7 @@ export default function Home() {
                           {offline.plans.length === 1 ? '' : 's'} in the reading room
                         </button>
                       )}
-                      <p className="fig mt-2.5 text-[0.6875rem] text-ink-3">
+                      <p className="fig mt-2.5 text-[0.75rem] text-ink-3">
                         Times are estimates from the measured per-read cost, not
                         guarantees. A coarser grid is a deliberate choice to bound the
                         wait, not a short-cut on provenance — the resolution each
@@ -3270,7 +3564,7 @@ export default function Home() {
                   ))}
 
                   {isLoading ? (
-                    <LoadingState />
+                    <LoadingState requestedDatasets={selectedDatasets} rainProduct={rainProduct} />
                   ) : resultPhase === 'error' && resultError ? (
                     <ErrorView
                       error={resultError}
@@ -3313,16 +3607,7 @@ export default function Home() {
                               </ul>
                             </div>
                           )}
-                          {analysisSummary.measures && analysisSummary.measures.length > 0 && (
-                            <div className="mb-7">
-                              <h4 className="mb-3 text-base font-semibold text-ink">Measures</h4>
-                              <dl className="grid gap-3 sm:grid-cols-2">
-                                {analysisSummary.measures.map((m) => (
-                                  <MeasureCard key={m.product} measure={m} />
-                                ))}
-                              </dl>
-                            </div>
-                          )}
+                          <HeadlineStrip summary={analysisSummary} />
                           {progress && (
                             <div data-print-hide>
                               <JobProgressLine
@@ -3339,18 +3624,20 @@ export default function Home() {
                             submission={activeCacheKey ? submission[activeCacheKey] : undefined}
                             vegetationSeries={vegetationSeries}
                           />
-                          <section data-print-hide className="mt-6 rounded-xl border border-rule bg-raised/55 p-4 sm:p-5">
-                            <h4 className="text-base font-semibold text-ink">Rainfall reading</h4>
-                            <p className="mt-1 max-w-[60ch] text-sm leading-relaxed text-ink-2">
-                              {analysisSummary.rainfall?.status === 'ok'
-                                ? 'Rainfall results are ready. Open the charts below to review the monthly totals and trends.'
-                                : 'Rainfall is processed separately for this area. Start the reading to add rainfall results and charts.'}
-                            </p>
-                            {analysisSummary.rainfall?.status === 'ok' ? (
-                              <a href="#rainfall-results" className="btn btn-ghost mt-4 h-10 px-4 text-sm font-semibold">
-                                View rainfall charts
-                              </a>
-                            ) : (
+                          <FieldDataPanel
+                            rows={fieldRows}
+                            fileName={fieldFileName}
+                            onObservationsChange={(observations, fileName) => {
+                              setFieldObservations(observations);
+                              setFieldFileName(fileName);
+                            }}
+                          />
+                          {analysisSummary.rainfall?.status !== 'ok' && (
+                            <section data-print-hide className="mt-6 rounded-xl border border-rule bg-raised/55 p-4 sm:p-5">
+                              <h4 className="text-base font-semibold text-ink">Rainfall reading</h4>
+                              <p className="mt-1 max-w-[60ch] text-sm leading-relaxed text-ink-2">
+                                Rainfall is processed separately for this area. Start the reading to add rainfall results and charts.
+                              </p>
                               <Button
                                 onClick={submitForPreprocessing}
                                 disabled={isLoading || rainfallPending}
@@ -3360,8 +3647,8 @@ export default function Home() {
                                   ? 'Rainfall reading in progress'
                                   : rainfallFailed ? 'Try rainfall again' : 'Read rainfall for this area'}
                               </Button>
-                            )}
-                          </section>
+                            </section>
+                          )}
                           {resultPhase === 'success' && (
                             <div id="rainfall-results" className="mt-6 scroll-mt-24">
                               <TimeSection
@@ -3405,11 +3692,8 @@ export default function Home() {
           report, and the line under them is the product's own standard. */}
       <footer className="relative z-10 mt-24 border-t border-rule">
         <div className="mx-auto flex max-w-[1440px] flex-wrap items-center justify-between gap-4 px-5 py-8 sm:px-8">
-          <p className="fig text-[0.75rem] text-ink-3">
-            Copernicus DEM · Esri 10 m Land Cover · Sentinel-2 · ERA5 / CHIRPS
-          </p>
-          <p className="text-[0.75rem] text-ink-3">
-            Data from Copernicus DEM, Esri 10 m Land Cover, Sentinel-2 and ERA5 or CHIRPS.
+          <p className="fig text-[0.8125rem] text-ink-3">
+            Copernicus DEM · Esri 10 m Land Cover · Sentinel-2 / Landsat · ERA5 / CHIRPS
           </p>
         </div>
       </footer>

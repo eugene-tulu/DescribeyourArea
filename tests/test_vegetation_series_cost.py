@@ -32,7 +32,6 @@ class EstimateTests(unittest.TestCase):
         # Seven completed series on the droplet: 25-31 s wall, median 27, each
         # reading 429 months at four workers. The model has to land near that or
         # it is not calibrated on anything.
-        import os
 
         reads = 429
         modelled = reads / 4 * vs.SECONDS_PER_READ + vs.ESTIMATE_OVERHEAD_SECONDS

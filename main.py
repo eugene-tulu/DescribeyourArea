@@ -747,6 +747,37 @@ def _feature_bbox(geojson: dict) -> list[float]:
     return [float(minx), float(miny), float(maxx), float(maxy)]
 
 
+# Elevation percentiles come from a fixed-bin histogram rather than from every
+# pixel: a 100 km2 AOI is ~110k values and a large one is millions, while the
+# histogram is a few thousand integers whatever the area.
+_DEM_HIST_MIN_M = -500.0
+_DEM_HIST_MAX_M = 9000.0
+_DEM_HIST_STEP_M = 1.0
+_DEM_HIST_BINS = int((_DEM_HIST_MAX_M - _DEM_HIST_MIN_M) / _DEM_HIST_STEP_M) + 1
+
+
+def _histogram(values: np.ndarray) -> np.ndarray:
+    idx = np.clip(
+        ((values - _DEM_HIST_MIN_M) / _DEM_HIST_STEP_M).astype(np.int64),
+        0,
+        _DEM_HIST_BINS - 1,
+    )
+    return np.bincount(idx.ravel(), minlength=_DEM_HIST_BINS).astype(np.int64)
+
+
+def _histogram_percentile(hist: np.ndarray, q: float) -> float:
+    total = int(hist.sum())
+    if total == 0:
+        return float("nan")
+    target = q * total
+    cumulative = 0
+    for index, count in enumerate(hist):
+        cumulative += int(count)
+        if cumulative >= target:
+            return _DEM_HIST_MIN_M + (index + 0.5) * _DEM_HIST_STEP_M
+    return _DEM_HIST_MAX_M
+
+
 def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, float]:
     """Accumulate DEM statistics on the equal-area grid across every tile."""
     total = 0.0
@@ -755,6 +786,7 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
     vmin: Optional[float] = None
     vmax: Optional[float] = None
     sampled = 0
+    hist = np.zeros(_DEM_HIST_BINS, dtype=np.int64)
     try:
         for src, clipped in _equal_area_masked_tiles(asset_hrefs, geojson):
             sampled += int(clipped[0].size)
@@ -766,6 +798,7 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
             total += float(valid.sum())
             total_sq += float(np.square(valid).sum())
             count += int(valid.size)
+            hist += _histogram(valid)
             tile_min = float(valid.min())
             tile_max = float(valid.max())
             vmin = tile_min if vmin is None else min(vmin, tile_min)
@@ -781,11 +814,23 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
 
     mean = total / count
     variance = max(0.0, (total_sq / count) - (mean * mean))
+    std = math.sqrt(variance)
+    p05 = _histogram_percentile(hist, 0.05)
+    p95 = _histogram_percentile(hist, 0.95)
+    # A single void or water pixel can drag the minimum to 0 m in an inland
+    # highland AOI. Flag values far outside the bulk rather than presenting them
+    # as observed fact; the terrain label is classified from the robust span.
+    min_is_outlier = vmin < p05 - max(50.0, 3.0 * std)
+    max_is_outlier = vmax > p95 + max(50.0, 3.0 * std)
     return {
         "mean": mean,
         "min": vmin,
         "max": vmax,
-        "std": math.sqrt(variance),
+        "std": std,
+        "p05": round(p05, 1),
+        "p95": round(p95, 1),
+        "min_is_outlier": bool(min_is_outlier),
+        "max_is_outlier": bool(max_is_outlier),
         "valid_pixel_count": count,
         "valid_pixel_fraction": round(count / sampled, 4) if sampled else 0.0,
     }
@@ -801,7 +846,18 @@ def interpret_terrain(dem: Dict[str, float]) -> Dict[str, Any]:
     if any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in values.values()):
         return {**dem, "error": "no_valid_elevation_pixels"}
 
-    elevation_range = dem["max"] - dem["min"]
+    # Classify on the middle 90% when the percentiles are available. A single
+    # void pixel (a 0 m minimum in an inland highland AOI) used to make a plain
+    # plateau read as "highly variable or mountainous".
+    p05 = dem.get("p05")
+    p95 = dem.get("p95")
+    if (isinstance(p05, (int, float)) and isinstance(p95, (int, float))
+            and math.isfinite(p05) and math.isfinite(p95)):
+        elevation_range = float(p95) - float(p05)
+        terrain_range_basis = "p05–p95"
+    else:
+        elevation_range = dem["max"] - dem["min"]
+        terrain_range_basis = "min–max"
 
     if elevation_range < 50:
         terrain = "relatively flat"
@@ -812,7 +868,9 @@ def interpret_terrain(dem: Dict[str, float]) -> Dict[str, Any]:
 
     return {
         **dem,
-        "elevation_range_m": round(elevation_range, 1),
+        "elevation_range_m": round(dem["max"] - dem["min"], 1),
+        "robust_range_m": round(elevation_range, 1),
+        "terrain_range_basis": terrain_range_basis,
         "terrain_type": terrain,
     }
 
@@ -1048,72 +1106,23 @@ async def _search_items(
     window_start: str = "",
     window_end: str = "",
 ) -> list:
-    """Fetch scenes for a sensor, retrying only transient failures.
+    """Fetch scenes for a sensor from the STAC API, retrying transient failures.
 
-    The index first, the STAC API second. A local GeoParquet index makes the
-    second read of any scene window a local column filter rather than a
-    paged API walk; a collection without a `geoparquet-items` snapshot, or a
-    download failure, degrades to searching exactly as before.
+    The STAC API is the index for scene searches: it is spatially indexed on the
+    server and current. The GeoParquet snapshot is deliberately not used here --
+    its Landsat/Sentinel-2 parts are large, the provider's files are not
+    spatially ordered, and the snapshots lag the API. GeoParquet remains the
+    bulk index for the monthly MODIS baseline (pc_geoparquet.month_assets).
+
+    pystac_client is synchronous, so the search runs in a worker thread. The
+    whole search, including retries, is bounded by ASSET_SEARCH_SECONDS; a slow
+    API returns no scenes instead of stalling the event loop.
     """
     if not window_start or not window_end:
         window_start, window_end = _resolve_window(None, None, 90)
     time_window = f"{window_start}/{window_end}"
 
-    # Geoparquet-index path. scene_assets returns the same columns the STAC
-    # item carries (id, datetime, cloud_cover, assets), so the sorting and
-    # capping below is identical from either source. This is a local filter,
-    # so it runs in a thread rather than in the event loop.
-    def from_index() -> list:
-        import pc_geoparquet
-
-        wanted = [a for a in (sensor.ndvi_asset, sensor.red, sensor.nir, sensor.cloud) if a]
-        pool = max(4 * max_scenes, 50)
-        cloud_max = None if sensor.cloud_mask == "product" else 30.0
-        # scene_assets is date-bucketed by the product, so it also spans the
-        # trailing edge. Using the requested window is fine for band sensors,
-        # whose role is the anchor below (the edge-year filter runs on the
-        # returned rows, not inside scene_assets).
-        rows = pc_geoparquet.scene_assets(
-            sensor.collection, bbox, window_start, window_end,
-            assets=wanted,
-            cloud_cover_max=cloud_max, limit=pool * 4,
-        )
-        if not rows:
-            return []
-        # Return STAC-item-shaped objects so the read path below is shared.
-        class _Item:
-            pass
-        items = []
-        for row in rows:
-            item = _Item()
-            item.id = row["id"]
-            item.datetime = row["datetime"]
-            item.properties = {"eo:cloud_cover": row["cloud_cover"]} if row["cloud_cover"] is not None else {}
-            item.assets = {
-                name: type("A", (), {"href": pc_geoparquet.sign_blob(href)})()
-                for name, href in row["assets"].items()
-            }
-            items.append(item)
-        # The index path must also pin to the edge year, or the second call
-        # with a wider window (geoparquet warm) returns trailing-edge scenes
-        # while the first (cold) returned least-cloudy-from-anywhere scenes.
-        if sensor.cloud_mask != "product":
-            try:
-                edge = datetime.date.fromisoformat(window_end[:10]) if window_end else datetime.date.today()
-            except Exception:
-                edge = datetime.date.today()
-            edge_year = f"{edge.year:04d}"
-            items.sort(key=lambda item: (
-                str(getattr(item, "datetime", None))[:4] != edge_year,
-                (item.properties or {}).get("eo:cloud_cover", 100.0),
-            ))
-        return items[:max_scenes * 2]
-
     def search_once() -> list:
-        # Index first; STAC only when the index has nothing.
-        indexed = from_index()
-        if indexed:
-            return indexed
         catalog = pystac_client.Client.open(STAC_URL)
         # Candidates must exceed the number of scenes actually used, or the
         # cloud-cover sort below has nothing to choose from. Capping the pool at
@@ -1133,9 +1142,14 @@ async def _search_items(
             arguments["query"] = {"eo:cloud_cover": {"lt": 30}}
         return list(catalog.search(**arguments).items())[:pool]
 
+    deadline = time.monotonic() + ASSET_SEARCH_SECONDS
     for attempt in range(3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
         try:
-            items = search_once()
+            items = await asyncio.wait_for(
+                asyncio.to_thread(search_once), timeout=remaining)
             if not items:
                 return []
             if sensor.cloud_mask != "product":
@@ -1165,6 +1179,12 @@ async def _search_items(
                 # default ordering is by recency using the field that exists.
                 items.sort(key=_item_start_datetime, reverse=True)
             return items[:max_scenes]
+        except asyncio.TimeoutError:
+            if attempt == 2 or time.monotonic() >= deadline:
+                print(f"STAC search timed out after {ASSET_SEARCH_SECONDS:.0f}s "
+                      f"for {sensor.id}", file=sys.stderr)
+                return []
+            await asyncio.sleep(0.5 * (2 ** attempt))
         except Exception:
             if attempt == 2:
                 print(f"STAC search failed after 3 attempts for {sensor.id}", file=sys.stderr)
@@ -1559,24 +1579,47 @@ def _build_measures(dem, landcover, rainfall_context, requested_area_km2) -> lis
             ).describe())
     if rainfall_context is not None and rainfall_context.get("status") == "ok":
         series = rainfall_context.get("series", [])
-        coverage = rainfall_context.get("coverage", {})
         window = rainfall_context.get("window", {})
-        observed_through = window.get("end")
         if series:
             total = round(sum(m.get("precip_mm", m.get("value", 0)) for m in series), 1)
+            first_month = series[0].get("month")
+            last_month = series[-1].get("month")
+            # The series stops at the last month actually present, not at the end
+            # of the window that was requested. Using window.end claimed a series
+            # ran to today when the newest ERA5 month is months behind.
+            observed_through = last_month or window.get("end")
+            # A monthly series from one grid cell stands for the ground that cell
+            # covers, once -- not once per month. Multiplying by months turned a
+            # 772 km2 ERA5 cell into thousands of square kilometres of claimed
+            # ground, and made "a single 28 km cell" contradict the number beside it.
+            resolution_km = rainfall_context.get("resolution_km")
+            if not isinstance(resolution_km, (int, float)) or resolution_km <= 0:
+                resolution_km = 27.8 if rainfall_context.get("product") == "rainfall" else 5.6
+            cell_area = float(resolution_km) ** 2
+            grid_cells = rainfall_context.get("grid_cells")
+            if isinstance(grid_cells, (int, float)) and grid_cells > 0:
+                covered_area_km2 = round(grid_cells * cell_area, 1)
+            else:
+                covered_area_km2 = round(cell_area, 1)
             measures.append(measure.Measure(
                 product_key=rainfall_context.get("product", "rainfall"),
                 value=total,
                 units="mm",
                 extent=measure.Extent(
                     requested_area_km2=requested_area_km2,
-                    covered_area_km2=(coverage.get("window", {}).get("months") * 310.0 if isinstance(coverage.get("window"), dict) and isinstance(coverage.get("window", {}).get("months"), (int, float)) else None),
+                    covered_area_km2=covered_area_km2,
+                    cell_count=grid_cells if isinstance(grid_cells, int) else None,
                     native_resolution_m=None,
                     native_grid_degrees=0.25 if rainfall_context.get("product") == "rainfall" else 0.05,
-                    window_start=window.get("start"),
+                    window_start=first_month or window.get("start"),
                     window_end=observed_through,
                 ),
                 observed_through=observed_through,
+                extra={
+                    "months": len(series),
+                    "first_month": first_month,
+                    "last_month": last_month,
+                },
             ).describe())
     return measures
 
@@ -1762,15 +1805,6 @@ def _requested_datasets(value: Optional[str]) -> set[str]:
     return requested
 
 
-def _resolve_landcover_year(start: Optional[str] = None,
-                            end: Optional[str] = None) -> int:
-    """The landcover year for a request, honoring a window end date.
-
-    The latest published `io-lulc-annual-v02` year is `extent.upper-1` (2023
-    today). A request whose `end` predates that year resolves to the *latest
-    year the window covers*, so a 2017-2020 history does not resolve to 2023
-    tiles. `start` bounds the window from below but never pushes it newer.
-    """
 def _resolve_landcover_year(start: Optional[str] = None,
                             end: Optional[str] = None) -> int:
     """The landcover year for a request, honoring a window end date.
@@ -1971,21 +2005,16 @@ async def generate_context(
                     geojson,
                     year=landcover_year,
                 )
-        if "landcover_history" in requested:
-            # History lives behind the worker as a per-year series; the sync
-            # path only returns the latest-year landcover above. Surface its
-            # availability so the client does not offer a button that 500s.
-            raster_results_landcover_history = None  # queued offline by design
         raster_timer = usage.Timer()
         raster_timer.__enter__()
-        # ASSET_SEARCH seconds (30s) covers STAC search + token fetch; add
-        # a fixed 60s for the raster read itself (3 COGs, remote SAS traffic
-        # with retries). The previous 30s budget timed out a healthy
-        # dem,landcover,ndvi,rainfall Describe even on a 0.9 km2 polygon.
+        # RASTER_TIMEOUT_SECONDS (90s) covers STAC search + token fetch and
+        # the raster reads themselves. The previous wiring used the 30s search
+        # budget here, which timed out a healthy dem,landcover,ndvi,rainfall
+        # Describe even on a 0.9 km2 polygon.
         try:
             raster_values = await asyncio.wait_for(
                 asyncio.gather(*raster_tasks.values()),
-                timeout=ASSET_SEARCH_SECONDS,
+                timeout=RASTER_TIMEOUT_SECONDS,
             ) if raster_tasks else []
         except asyncio.TimeoutError:
             raster_timer.__exit__(None, None, None)
@@ -2036,18 +2065,24 @@ async def generate_context(
         if "rainfall" in requested:
             import rainfall
 
-            # The product the reader chose, forwarded to the reader. It was
-            # accepted here and then dropped: cached_context was called without
-            # it, so the live preview always read the ERA5 cache and a CHIRPS
-            # request was answered with ERA5 and no indication of the switch.
-            # The window is forwarded the same way: the cached series is the
-            # union of the request and the climatology, so narrowing it here
-            # rather than sending the whole record to be sliced in the browser
-            # makes what was requested equal what is served.
-            rainfall_context = rainfall.cached_context(
-                geom, product=request.product,
-                window_start=requested_window_start,
-                window_end=requested_window_end)
+            # The cache read is local when warm but can become an S3 fetch; it
+            # must not run on the event loop for the same reason the scene search
+            # does not. A timeout degrades this module rather than the request.
+            try:
+                rainfall_context = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        rainfall.cached_context, geom,
+                        product=request.product,
+                        window_start=requested_window_start,
+                        window_end=requested_window_end),
+                    timeout=ASSET_SEARCH_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                rainfall_context = {
+                    "status": "unavailable",
+                    "error": "rainfall_read_timeout",
+                    "message": "The precomputed rainfall series did not load in time.",
+                }
 
         # Get country
         location = await location_context_from_centroid(geom)
@@ -2072,6 +2107,23 @@ async def generate_context(
             area_km2=aoi["bbox_area_km2"],
             ndvi_stats=ndvi_stats,
         )
+        # A single structured line per request. The audit that found this
+        # outage used health-check gaps because there was no latency log; this
+        # makes slow requests visible directly, without logging geometry.
+        if request_timer.elapsed_ms is None:
+            request_timer.__exit__(None, None, None)
+        logger.info(
+            "generate-context datasets=%s area_km2=%.1f modules_ms=%s total_ms=%s",
+            ",".join(sorted(requested)),
+            aoi["bbox_area_km2"],
+            ",".join(f"{name}:{ms}" for name, ms in sorted(module_ms.items())),
+            request_timer.elapsed_ms,
+        )
+        if (request_timer.elapsed_ms or 0) > 30_000:
+            logger.warning(
+                "slow generate-context datasets=%s area_km2=%.1f total_ms=%s",
+                ",".join(sorted(requested)), aoi["bbox_area_km2"],
+                request_timer.elapsed_ms)
         # Build a uniform list of Measure dicts via measure.py, so the client
         # has one shape to render regardless of which products answered.
         # Each Measure carries value, units, evidence, extent, observed_through
@@ -2264,9 +2316,16 @@ def _caveats(aoi, dem, landcover, ndvi, rain):
                 "totals and are worth review."
             )
     if isinstance(rain, dict) and rain.get("status") == "ok":
+        series = rain.get("series") or []
         window = rain.get("window") or {}
-        if window.get("end"):
-            notes.append(f"Rainfall series ends {window['end']}.")
+        last = series[-1].get("month") if series else None
+        if last:
+            notes.append(f"Rainfall series ends {last}.")
+        if last and window.get("end") and last[:7] != window["end"][:7]:
+            notes.append(
+                f"The rainfall total covers {len(series)} month(s) to {last}, "
+                "not the full requested window."
+            )
     return notes
 
 
@@ -2419,8 +2478,8 @@ def _rainfall_by_key(key: str, indicator: str, *,
         # for it: a 1-year vegetation series served for a 5-year window shows
         # the old window under the new label. Report it as not computed so
         # the caller queues the wider read.
-        if artefact is not None and indicator not in ("dem", "landcover") \
-                and not jobs._window_covers_payload(artefact, window_start, window_end):
+        if artefact is not None and not jobs.artefact_covers(
+                artefact, name, window_start, window_end):
             return {
                 "status": "not_computed",
                 "reason": "stored window does not cover the requested window",
@@ -2450,8 +2509,9 @@ async def rainfall_lookup_by_key(cache_key: str, indicator: str = "rainfall",
     GET by any reading of the verb, so the transport follows the intent rather
     than the other way around.
     """
-    result = _rainfall_by_key(cache_key.strip(), indicator,
-                              window_start=window_start, window_end=window_end)
+    result = await asyncio.to_thread(
+        _rainfall_by_key, cache_key.strip(), indicator,
+        window_start=window_start, window_end=window_end)
     import rainfall
 
     return {
@@ -2476,24 +2536,25 @@ async def rainfall_lookup(request: RainfallLookupRequest,
     costs a millisecond and about 1 KB. Applying the raster caps here made the
     published portfolio unreachable for the very areas it was built for.
     """
-    import jobs
     import rainfall
 
     if request.cache_key:
         # A caller that already knows the key never resends a polygon, which for a
         # detailed conservancy is a megabyte of coordinates.
         key = request.cache_key.strip()
-        result = _rainfall_by_key(key, request.indicator or "rainfall",
-                                  window_start=window_start, window_end=window_end)
+        result = await asyncio.to_thread(
+            _rainfall_by_key, key, request.indicator or "rainfall",
+            window_start=window_start, window_end=window_end)
         bbox_area = None
     else:
         if not request.geojson:
             raise HTTPException(status_code=422, detail="supply geojson or cache_key")
         area = validate_for_lookup(request.geojson)
         key = rainfall.geometry_hash(area["feature"]["geometry"])
-        result = _with_rainfall_evidence(
-            rainfall.cached_context(area["feature"]["geometry"],
-                                    window_start=window_start, window_end=window_end))
+        cached = await asyncio.to_thread(
+            rainfall.cached_context, area["feature"]["geometry"],
+            window_start=window_start, window_end=window_end)
+        result = _with_rainfall_evidence(cached)
         bbox_area = round(area["bbox_area_km2"], 2)
     return {
         "rainfall": result,
@@ -3087,13 +3148,13 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
     than fetched.
     """
     import jobs
-    import rainfall
 
     if not re.fullmatch(r"[0-9a-f]{32}", (cache_key or "").strip()):
         raise HTTPException(status_code=422,
                             detail="cache_key must be 32 hexadecimal characters")
     key = cache_key.strip()
-    wanted = [p.strip() for p in (indicators or "dem,landcover,ndvi,rainfall").split(",")
+    wanted = [p.strip() for p in (indicators or
+              "dem,landcover,landcover_history,ndvi,rainfall").split(",")
               if p.strip()]
 
     modules: dict = {}
@@ -3108,9 +3169,9 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             # been computed yet". Read the product the job recorded; a later
             # product submission is the one honoured (see jobs._job_product).
             product = (product or jobs._job_product(key) or "rainfall").strip().lower()
-            context = _rainfall_by_key(key, product,
-                                       window_start=window_start,
-                                       window_end=window_end)
+            context = await asyncio.to_thread(
+                _rainfall_by_key, key, product,
+                window_start=window_start, window_end=window_end)
             if context.get("status") != "ok":
                 missing.append(name)
                 continue
@@ -3119,10 +3180,11 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
         artefact = jobs.read_artefact(key, name)
         # An artefact that does not span the requested window must not answer
         # for it: the same rule as rainfall, because a narrower series served
-        # via /context is the old window under the new window's label.
-        if artefact is not None and name not in ("dem", "landcover") \
-                and not jobs._window_covers_payload(
-                    artefact, window_start, window_end):
+        # via /context is the old window under the new window's label. Land
+        # cover and its history use their year/series semantics instead of a
+        # raw date comparison (see jobs.artefact_covers).
+        if artefact is not None and not jobs.artefact_covers(
+                artefact, name, window_start, window_end):
             missing.append(name)
             continue
         if not artefact or artefact.get("status") not in ("ok", "ready"):

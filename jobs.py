@@ -9,9 +9,9 @@ so a submission survives a restart, and a runner picks up whatever is still
 pending. The runner is idempotent, because an area that already has a series is
 skipped rather than recomputed.
 
-There is no supervision here. ``tools/run_rainfall_jobs.py`` is the runner, and
-running it from cron or a sidecar is the difference between "usually works" and
-"reliably works". Nothing in the design depends on where it runs.
+There is no supervision here. ``worker.py`` is the runner, and running it from
+cron or a sidecar is the difference between "usually works" and "reliably works".
+Nothing in the design depends on where it runs.
 """
 
 from __future__ import annotations
@@ -21,10 +21,9 @@ import datetime
 import json
 import os
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Callable, Optional
 
 import rainfall
-import sensors
 
 # Job states. Terminal states are ready, failed and cancelled.
 PENDING = "pending"
@@ -263,24 +262,43 @@ def _product_ready(key: str, product: Optional[str],
     return _window_covers_payload(payload, start, end)
 
 
-def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
-                    end: Optional[str] = None, year: Optional[int] = None) -> bool:
-    """Whether an artefact for this area covers the requested window/year."""
-    payload = read_artefact(key, indicator)
+def _published_landcover_year(start: Optional[str], end: Optional[str],
+                              year: Optional[int] = None) -> Optional[int]:
+    """The land-cover map year a request should be answered with.
+
+    A window that extends past the published extent resolves to the extent's
+    latest year, not to the window end. Comparing the raw start year (2025) to
+    the artefact's year (2023) was what left a ready artefact reported as
+    not_submitted forever.
+    """
+    if year is not None:
+        return year
+    from indicators import LANDCOVER_EXTENT
+
+    try:
+        end_year = int((end or start or "")[:4])
+    except ValueError:
+        end_year = LANDCOVER_EXTENT[1]
+    return max(LANDCOVER_EXTENT[0], min(LANDCOVER_EXTENT[1], end_year))
+
+
+def artefact_covers(payload: Optional[dict], indicator: str,
+                    start: Optional[str] = None, end: Optional[str] = None,
+                    year: Optional[int] = None) -> bool:
+    """Whether a stored artefact answers the requested window/year.
+
+    Land cover is year-valued: a 2023 map answers a 2025-2026 request because
+    2023 is the latest published year. History is a series: it is ready when
+    the request that produced it covers the same clamped years this request
+    needs. Using the raw requested start year for either made a ready artefact
+    look like it needed recomputing on every poll.
+    """
     if payload is None:
         return False
     if indicator == "dem":
         return True  # no time dimension
-    if indicator in ("landcover", "landcover_history"):
-        # Year-valued: a stored artefact for a different year must not answer.
-        if year is None and start:
-            # start looks like a date; take its year as the landcover year.
-            try:
-                year = int(start[:4])
-            except ValueError:
-                year = None
-        if year is None:
-            return True  # caller did not name a year; any artefact answers
+    if indicator == "landcover":
+        want = _published_landcover_year(start, end, year)
         have = payload.get("year")
         if have is None:
             win = payload.get("window") or {}
@@ -288,10 +306,52 @@ def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
                 have = int((win.get("start") or "")[:4])
             except ValueError:
                 have = None
-        if have is None:
+        return have is not None and want is not None and have == want
+    if indicator == "landcover_history":
+        from indicators import landcover_year_range
+
+        try:
+            want_lo, want_hi = landcover_year_range(start, end)
+        except Exception:
+            return _window_covers_payload(payload, start, end)
+
+        # A payload records the window it was asked to compute. If that request
+        # already covered the years this caller needs, it is ready even when an
+        # individual year had no data and is absent from the series. Falling
+        # back to the series bounds alone would recompute forever for an area
+        # whose last requested year has no imagery.
+        requested = payload.get("requested_window") or {}
+        if requested.get("start") or requested.get("end"):
+            try:
+                have_lo, have_hi = landcover_year_range(
+                    requested.get("start"), requested.get("end"))
+                if have_lo <= want_lo and have_hi >= want_hi:
+                    return True
+            except Exception:
+                pass
+
+        win = payload.get("window") or {}
+        try:
+            have_lo = int((win.get("start") or "")[:4])
+            have_hi = int((win.get("end") or "")[:4])
+        except ValueError:
             return False
-        return have == year
+        years = set()
+        for entry in payload.get("series") or []:
+            if isinstance(entry, dict):
+                try:
+                    years.add(int(entry.get("year")))
+                except (TypeError, ValueError):
+                    pass
+        return have_lo <= want_lo and have_hi >= want_hi and want_hi in years
     return _window_covers_payload(payload, start, end)
+
+
+def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
+                    end: Optional[str] = None, year: Optional[int] = None) -> bool:
+    """Whether an artefact for this area covers the requested window/year."""
+    return artefact_covers(read_artefact(key, indicator), indicator,
+                           start, end, year)
 
 
 def _job_product(key: str) -> Optional[str]:

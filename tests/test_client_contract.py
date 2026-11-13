@@ -121,7 +121,13 @@ class ClientServerContractTests(unittest.TestCase):
         source = (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
         status = re.search(r"rainfall/status\?[^`]*`", source, re.S)
         self.assertIsNotNone(status, "the status call changed shape; update this test")
-        self.assertIn("indicator", status.group(0),
+        params = re.search(
+            r"const statusParams = new URLSearchParams\(\{(.*?)\}\)",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(params, "the status params changed shape; update this test")
+        self.assertIn("indicator", params.group(1),
                       "the status call must say which module it is asking about")
 
     def test_the_share_link_is_actually_read_back(self):
@@ -596,7 +602,6 @@ class ContainingUnitTests(unittest.TestCase):
                       "774 km2 unit needs to see both numbers")
 
     def test_the_server_publishes_the_box_so_the_browser_need_not_measure_it(self):
-        import main
 
         source = (Path(__file__).resolve().parent.parent / "main.py").read_text()
         self.assertIn('"bbox": [round(v, 6) for v in aoi["bbox"]]', source,

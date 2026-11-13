@@ -7,7 +7,6 @@ actually used, and nothing claims a precision the source cannot support.
 
 import unittest
 
-import numpy as np
 
 import vegetation_series as vs
 

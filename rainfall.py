@@ -827,7 +827,6 @@ def reader_for(product_key: str):
     Resolved lazily because the CHIRPS reader is defined further down, and a
     table built at import time would have to be ordered against the file.
     """
-    import registry
 
     key = (product_key or "rainfall").strip().lower()
     if key == "rainfall":
@@ -1485,7 +1484,6 @@ def _chirps_cell_monthly_from_store(grid: dict, start: str, end: str):
 def _chirps_cell_monthly_from_geotiffs(grid: dict, start: str, end: str):
     """The same table, assembled from one GeoTIFF per month."""
     import numpy as np
-    from rasterio.windows import Window
 
     longitudes = [float(v) for v in grid["longitudes"]]
     latitudes = [float(v) for v in grid["latitudes"]]

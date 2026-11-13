@@ -27,7 +27,6 @@ re-derive their own idea of a window.
 
 from __future__ import annotations
 
-import calendar
 import datetime
 from dataclasses import dataclass, field
 from typing import Optional

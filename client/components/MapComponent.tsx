@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback } from "react";
-import { MapContainer, TileLayer, useMap, GeoJSON } from "react-leaflet";
+import { MapContainer, TileLayer, useMap, GeoJSON, CircleMarker, Tooltip } from "react-leaflet";
 import "leaflet-draw";
 import "leaflet/dist/leaflet.css";
 import "leaflet-draw/dist/leaflet.draw.css";
@@ -35,6 +35,7 @@ interface MapComponentProps {
   viewBounds?: [[number, number], [number, number]] | null;
   overlayTiles?: { dem?: string[]; landcover?: string[]; landcoverYear?: number | null } | null;
   onClearOverlay?: () => void;
+  points?: Array<{ id: string; lon: number; lat: number }>;
 }
 
 function isAllowedOverlayUrl(url: string | undefined | null): boolean {
@@ -99,6 +100,30 @@ function boundsOf(geojson: GeoJSON.GeoJsonObject): [[number, number], [number, n
 
 function isDrawCreatedEvent(event: L.LeafletEvent): event is L.DrawEvents.Created {
   return "layer" in event && "layerType" in event;
+}
+
+/** Leaflet.draw renders its toolbar as anchors with href="#".
+ *
+ * That is focusable but not a button: it has no role, no accessible name, and
+ * Enter does not activate it. These are the only way to draw an area without a
+ * mouse, so they are given the semantics and the key handling they lack.
+ */
+function makeDrawAccessible(control: L.Control.Draw): void {
+  const container = control.getContainer();
+  if (!container) return;
+  container.querySelectorAll<HTMLAnchorElement>("a").forEach((anchor) => {
+    anchor.setAttribute("role", "button");
+    anchor.setAttribute("tabindex", "0");
+    if (!anchor.getAttribute("aria-label")) {
+      anchor.setAttribute("aria-label", anchor.title || "Draw a shape");
+    }
+    anchor.onkeydown = (event: KeyboardEvent) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        anchor.click();
+      }
+    };
+  });
 }
 
 function MapController({
@@ -265,6 +290,7 @@ function MapController({
 
       drawControlRef.current = drawControl;
       map.addControl(drawControl);
+      makeDrawAccessible(drawControl);
 
       map.on(L.Draw.Event.CREATED, handleCreated);
       map.on(L.Draw.Event.DELETED, handleDeleted);
@@ -294,9 +320,11 @@ export default function MapComponent({
   viewBounds,
   overlayTiles,
   onClearOverlay,
+  points,
 }: MapComponentProps) {
   return (
     <div className="h-[440px] w-full relative sm:h-[540px] xl:h-[620px]">
+      <style>{`.leaflet-draw-toolbar a:focus-visible{outline:2px solid #b9e84b;outline-offset:2px;}`}</style>
       <MapContainer
         center={[-1.275, 36.8219]} // Nairobi default
         zoom={11}
@@ -325,6 +353,17 @@ export default function MapComponent({
           onSaveFeatures={onSaveFeatures}
         />
 
+        {points?.map((point) => (
+          <CircleMarker
+            key={point.id}
+            center={[point.lat, point.lon]}
+            radius={5}
+            pathOptions={{ color: "#b9e84b", fillColor: "#b9e84b", fillOpacity: 0.8 }}
+          >
+            <Tooltip>{point.id}</Tooltip>
+          </CircleMarker>
+        ))}
+
         {/* Uploaded GeoJSON */}
         {uploadedGeoJSON && (
           <GeoJSON
@@ -342,23 +381,27 @@ export default function MapComponent({
           />
         )}
 
-        {/* DEM / landcover hrefs come from the backend and carry SAS tokens.
-            Render only allowlisted hosts; TileLayer is the fallback renderer
-            for signed Planetary Computer COGs. */}
-        {overlayTiles?.dem && overlayTiles.dem.length > 0 && isAllowedOverlayUrl(overlayTiles.dem[0]) && (
+        {/* Every tile that covers the outline, not just the first. A drawn area
+            can straddle tiles, and showing one made a two-tile read look like a
+            one-tile hole. Signed COG hrefs only. */}
+        {overlayTiles?.dem?.filter(isAllowedOverlayUrl).map((url) => (
           <TileLayer
-            url={overlayTiles.dem[0]}
+            key={`dem-${url}`}
+            url={url}
             attribution="Elevation &copy; Copernicus DEM GLO-30"
             opacity={0.55}
+            zIndex={400}
           />
-        )}
-        {overlayTiles?.landcover && overlayTiles.landcover.length > 0 && isAllowedOverlayUrl(overlayTiles.landcover[0]) && (
+        ))}
+        {overlayTiles?.landcover?.filter(isAllowedOverlayUrl).map((url) => (
           <TileLayer
-            url={overlayTiles.landcover[0]}
+            key={`landcover-${url}`}
+            url={url}
             attribution={`Land cover ${overlayTiles.landcoverYear ?? ''} &copy; Esri 10 m`}
             opacity={0.7}
+            zIndex={410}
           />
-        )}
+        ))}
       </MapContainer>
 
       {(overlayTiles || undefined) && onClearOverlay && (

@@ -165,11 +165,25 @@ def headline(measure: Measure) -> str:
     without saying so, whichever card is drawing it.
     """
     product = measure.product
+    months = measure.extra.get("months")
+    span = (
+        f" ({months} month{'s' if months != 1 else ''})"
+        if isinstance(months, int) and months > 0
+        else ""
+    )
     if measure.observed_through:
-        fresh = f" as of {measure.observed_through[:10]}"
+        fresh = f" as of {measure.observed_through[:10]}{span}"
     else:
-        fresh = ""
+        fresh = span
     if measure.extent.over_specified and measure.extent.covered_area_km2:
+        cells = measure.extent.cell_count
+        if cells and cells > 1:
+            return (
+                f"{product.label} {measure.value} {measure.units}{fresh} — "
+                f"{measure.evidence}, read over {measure.extent.covered_area_km2:,.0f} km² "
+                f"across {cells} grid cells of {product.resolution_km() or 0:,.0f} km for a "
+                f"{measure.extent.requested_area_km2 or 0:,.0f} km² outline"
+            )
         return (
             f"{product.label} {measure.value} {measure.units}{fresh} — "
             f"{measure.evidence}, read over {measure.extent.covered_area_km2:,.0f} km² "

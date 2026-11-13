@@ -8,6 +8,7 @@ bbox/cloud-cover/date filtering is checked without the network.
 """
 
 import datetime
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -94,6 +95,88 @@ class SceneAssetsTests(unittest.TestCase):
             rows = pg.scene_assets("sentinel-2-l2a", self.BBOX, "2025-01-01", "2025-12-31",
                                    assets=["B04"])
         self.assertEqual(rows, [])
+
+
+class SnapshotCacheTests(unittest.TestCase):
+    """Planetary Computer republishes a partition with a new cumulative name.
+
+    The active partition (part-044) arrives as 25 files whose end dates grow
+    through the year. Treating each as a separate part made one lookup read
+    6.66 GB. These pin the dedupe and the cleanup that prevents it.
+    """
+
+    SPECS = [
+        ("landsat-c2-l2.parquet/part-044_2026-01-01T00_00_00_2026-06-02T00_00_00.parquet",
+         "2026-01", "2026-06"),
+        ("landsat-c2-l2.parquet/part-044_2026-01-01T00_00_00_2026-11-03T00_00_00.parquet",
+         "2026-01", "2026-11"),
+        ("landsat-c2-l2.parquet/part-043_2025-01-01T00_00_00_2025-12-31T00_00_00.parquet",
+         "2025-01", "2025-12"),
+    ]
+
+    def test_keeps_only_the_latest_snapshot_per_logical_part(self):
+        deduped = pg._dedupe_specs(self.SPECS)
+        names = {name for name, _first, _last in deduped}
+        self.assertEqual(len(deduped), 2)
+        self.assertIn(self.SPECS[1][0], names)
+        self.assertNotIn(self.SPECS[0][0], names)
+        self.assertIn(self.SPECS[2][0], names)
+
+    def test_ensure_index_returns_one_part_and_deletes_the_superseded_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "landsat-c2-l2-part-044_2026-06-02.parquet"
+            new = root / "landsat-c2-l2-part-044_2026-11-03.parquet"
+            old.write_bytes(b"old")
+            new.write_bytes(b"new")
+            specs = [
+                ("landsat-c2-l2.parquet/part-044_2026-06-02.parquet", "2026-01", "2026-06"),
+                ("landsat-c2-l2.parquet/part-044_2026-11-03.parquet", "2026-01", "2026-11"),
+            ]
+            with mock.patch.object(pg, "index_dir", return_value=root), \
+                    mock.patch.object(pg, "_cached_specs",
+                                      return_value=pg._dedupe_specs(specs)), \
+                    mock.patch.object(pg, "_collection_blob",
+                                      return_value=("items", "landsat-c2-l2.parquet")), \
+                    mock.patch.object(pg, "_part_path",
+                                      side_effect=lambda c, n: root / f"{c}-{n}"):
+                paths = pg.ensure_index("landsat-c2-l2", "2025-11-11", "2026-11-11")
+            self.assertEqual([p.name for p in paths],
+                             ["landsat-c2-l2-part-044_2026-11-03.parquet"])
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
+
+    def test_prune_scene_indexes_removes_only_scene_collections(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            landsat = root / "landsat-c2-l2-part-044.parquet"
+            sentinel = root / "sentinel-2-l2a-part-001.parquet"
+            modis = root / "modis-13Q1-061-part-026.parquet"
+            parts = root / "landsat-c2-l2-parts.json"
+            for path in (landsat, sentinel, modis, parts):
+                path.write_bytes(b"x")
+            with mock.patch.object(pg, "index_dir", return_value=root):
+                result = pg.prune_scene_indexes()
+            self.assertFalse(landsat.exists())
+            self.assertFalse(sentinel.exists())
+            self.assertFalse(parts.exists())
+            self.assertTrue(modis.exists())
+            self.assertEqual(result["files"], 3)
+
+    def test_cache_cap_evicts_the_oldest_part_but_keeps_the_newest(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            old = root / "modis-old.parquet"
+            new = root / "modis-new.parquet"
+            old.write_bytes(b"1234")
+            new.write_bytes(b"5678")
+            os.utime(old, (1, 1))
+            os.utime(new, (2, 2))
+            with mock.patch.object(pg, "index_dir", return_value=root), \
+                    mock.patch.dict(os.environ, {"PC_INDEX_MAX_BYTES": "4"}):
+                pg._enforce_cache_cap()
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
 
 
 class TileAssetsTests(unittest.TestCase):

@@ -1,17 +1,28 @@
-"""STAC-GeoParquet as the index, with only the index cached.
+"""STAC-GeoParquet as the bulk index for the monthly baseline.
 
-Planetary Computer publishes one GeoParquet part per collection-year, each an
-unsigned snapshot of that year's STAC items. Reading it replaces a search per
-month against the STAC API -- which for a twelve-year baseline is a hundred and
-twelve searches for one reading, against a shared public service that has reset
-a connection on this app before.
+Planetary Computer publishes STAC item snapshots as GeoParquet, partitioned by
+time. Reading the monthly parts replaces a search per month against the STAC
+API -- a twelve-year baseline is a hundred and twelve searches against a shared
+public service that has reset a connection on this app before.
 
-Only the INDEX is cached, never the imagery. A year's part is about 6 MB of item
-metadata, so once a year has been indexed it is read from disk and the second
-reading of any area covering those months does no searching at all. That is the
-whole of the trade: pay a few megabytes once per collection-year, then query
-metadata locally. The cache holds what the parts contain -- item metadata. The
-pixels are still read, once a month, from the COGs the parts point at.
+This module is used by the monthly MODIS series (vegetation_series.month_assets)
+and by static tile lookups. Interactive scene search (NDVI) uses the STAC API
+instead: the Landsat/Sentinel-2 parts are hundreds of megabytes per week, the
+provider's files are not spatially ordered, and the snapshots lag the API, so
+reading them for one small AOI is both slower and staler than the API.
+
+Planetary Computer republishes the active partition with a new, cumulative
+filename every week (part-044_..._2026-06-02, part-044_..._2026-11-03, ...).
+Those are snapshots of the same partition, not separate parts. ``_dedupe_specs``
+keeps only the latest snapshot per logical part and ``_prune_superseded``
+deletes the older files; without that the cache grew to 14 GB and one scene
+lookup read 6.66 GB across 26 files.
+
+Only the INDEX is cached, never the imagery. A monthly part is a few megabytes
+of item metadata, so once a year has been indexed it is read from disk and the
+second reading of any area covering those months does no searching at all. The
+cache is capped by ``PC_INDEX_MAX_BYTES`` and can be cleaned of unused scene
+indexes with ``python -m pc_geoparquet --prune-scenes``.
 
 `fastparquet` is the reader rather than `pyarrow` for two reasons: it flattens
 the nested structs into dotted columns, so `bbox.xmin` and
@@ -188,6 +199,35 @@ def _blob_list(prefix: str) -> list[str]:
     return re.findall(r"<Name>([^<]+)</Name>", body)
 
 
+def _logical_part(name: str) -> str:
+    """The partition a snapshot belongs to, independent of its date range.
+
+    Planetary Computer republishes the active partition with a new filename
+    every week (part-044_..._2026-06-02, part-044_..._2026-11-03, ...). Those
+    files are cumulative snapshots of the same partition, not separate parts:
+    reading all of them reads the same rows many times. Grouping by the
+    ``part-NNN`` token lets the cache keep only the latest snapshot.
+    """
+    match = re.search(r"(part-\d+)", name)
+    return match.group(1) if match else name.rsplit("/", 1)[-1]
+
+
+def _dedupe_specs(specs: list[tuple[str, str, str]]) -> list[tuple[str, str, str]]:
+    """Keep the latest snapshot for each logical partition.
+
+    The latest snapshot is cumulative, so it contains every row the older
+    snapshots do. Keeping them all was what made the index grow to 14 GB and
+    what made one scene lookup read 6.66 GB across 26 files.
+    """
+    latest: dict[str, tuple[str, str, str]] = {}
+    for name, first, last in specs:
+        key = _logical_part(name)
+        current = latest.get(key)
+        if current is None or (last, first, name) > (current[2], current[1], current[0]):
+            latest[key] = (name, first, last)
+    return list(latest.values())
+
+
 def _part_specs(names: list[str]) -> list[tuple[str, str, str]]:
     """`(name, first_month, last_month)` for each part, read from its filename.
 
@@ -216,7 +256,7 @@ def _part_specs(names: list[str]) -> list[tuple[str, str, str]]:
             # time so ensure_index can serve any window from it instead
             # of returning [] and forcing a STAC fallback every read.
             specs.append((name, "1970-01", "2100-12"))
-    return specs
+    return _dedupe_specs(specs)
 
 
 def _years_between(start: str, end: str) -> set[int]:
@@ -235,7 +275,8 @@ def _cached_specs(collection: str) -> list[tuple[str, str, str]]:
 
     path = index_dir() / f"{collection}-parts.json"
     try:
-        return [(entry[0], entry[1], entry[2]) for entry in json.loads(path.read_text())]
+        return _dedupe_specs(
+            [(entry[0], entry[1], entry[2]) for entry in json.loads(path.read_text())])
     except (OSError, ValueError, IndexError):
         return []
 
@@ -247,6 +288,79 @@ def _remember_specs(collection: str, specs: list[tuple[str, str, str]]) -> None:
         (index_dir() / f"{collection}-parts.json").write_text(json.dumps(specs))
     except OSError:
         pass
+
+
+def _prune_superseded(collection: str, specs: list[tuple[str, str, str]]) -> None:
+    """Delete older snapshots of a partition that is still represented.
+
+    The latest snapshot is cumulative, so the older files contain no rows the
+    kept one does not. Only partitions still present in the current listing are
+    pruned; a part removed upstream is left for the cache cap to evict, so a
+    transient listing failure cannot delete the only copy.
+    """
+    keep = {_part_path(collection, name.rsplit("/", 1)[-1]).name
+            for name, _first, _last in specs}
+    keep_parts = {_logical_part(name) for name, _first, _last in specs}
+    for path in index_dir().glob(f"{collection}-*.parquet"):
+        if _logical_part(path.name) in keep_parts and path.name not in keep:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+
+
+def _enforce_cache_cap(protect: Optional[set[Path]] = None) -> None:
+    """Evict oldest parts when the index cache exceeds its configured cap.
+
+    A cache with no ceiling and no eviction is how the index reached 14 GB. The
+    cap is a guardrail, not the primary fix: snapshots are deduped before this
+    runs, so the normal cache is a few hundred megabytes.
+    """
+    try:
+        cap = int(os.getenv("PC_INDEX_MAX_BYTES", str(2 * 1024 ** 3)))
+    except ValueError:
+        cap = 2 * 1024 ** 3
+    protected = protect or set()
+    files = [path for path in index_dir().glob("*.parquet") if path.is_file()]
+    total = sum(path.stat().st_size for path in files)
+    evicted = 0
+    for path in sorted((p for p in files if p not in protected),
+                       key=lambda p: p.stat().st_mtime):
+        if total <= cap:
+            break
+        try:
+            size = path.stat().st_size
+            path.unlink()
+            total -= size
+            evicted += 1
+        except OSError:
+            pass
+    if evicted:
+        print(f"stac-geoparquet: cache cap {cap} bytes exceeded; "
+              f"evicted {evicted} part(s), {total} bytes remain", flush=True)
+
+
+def prune_scene_indexes() -> dict[str, int]:
+    """Delete Landsat/Sentinel-2 scene indexes; the interactive path no longer uses them.
+
+    Scene search moved to the STAC API because the provider's GeoParquet parts
+    are large, unsorted for spatial pruning, and lag the API. The scene cache is
+    dead weight and was 14 GB on the droplet. Run this once after deploying:
+    ``python -m pc_geoparquet --prune-scenes``.
+    """
+    removed = 0
+    freed = 0
+    for prefix in ("landsat-", "sentinel-2-"):
+        for path in list(index_dir().glob(f"{prefix}*")):
+            if not path.is_file():
+                continue
+            try:
+                freed += path.stat().st_size
+                path.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return {"files": removed, "bytes": freed}
 
 
 def ensure_index(collection: str, start: str, end: str) -> list[Path]:
@@ -283,6 +397,8 @@ def ensure_index(collection: str, start: str, end: str) -> list[Path]:
                     tmp.write_bytes(response.read())
                 tmp.replace(path)
             local.append(path)
+        _prune_superseded(collection, specs)
+        _enforce_cache_cap(protect=set(local))
         return local
     except Exception as exc:  # noqa: BLE001 - degrade to searching, never fail a read
         print(f"stac-geoparquet: index unavailable ({type(exc).__name__}: {exc}); "
@@ -364,7 +480,6 @@ def tile_assets(collection: str, bbox: list[float], asset: str,
     Returns [] when the index cannot serve (no parts, missing asset, download
     failure) -- the caller falls back to a STAC search, never to nothing.
     """
-    import datetime as _dt
 
     from fastparquet import ParquetFile
 
@@ -499,3 +614,20 @@ def sign_blob(href: str) -> str:
     if not container:
         return href
     return f"{href}?{_sas(account, container)}"
+
+
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(
+        description="Maintain the STAC GeoParquet index cache.")
+    parser.add_argument(
+        "--prune-scenes", action="store_true",
+        help="delete Landsat/Sentinel-2 scene indexes (the interactive path "
+             "uses the STAC API; these files are unused)")
+    args = parser.parse_args()
+    if args.prune_scenes:
+        print(json.dumps(prune_scene_indexes(), sort_keys=True))
+    else:
+        parser.print_help()

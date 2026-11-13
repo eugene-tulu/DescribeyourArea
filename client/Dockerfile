@@ -1,4 +1,4 @@
-FROM node:20-alpine AS builder
+FROM node:26.12.1-alpine AS builder
 WORKDIR /app
 ARG NEXT_PUBLIC_BACKEND_URL=/api
 ARG NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN
@@ -13,7 +13,7 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine AS runner
+FROM node:26.12.1-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=3000

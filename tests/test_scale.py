@@ -85,7 +85,6 @@ class MeaningTests(unittest.TestCase):
 
 class LadderTests(unittest.TestCase):
     def test_it_agrees_with_the_table_it_wraps(self):
-        import sensors
 
         for area in (10.0, 500.0, 5_000.0, 50_000.0):
             with self.subTest(area_km2=area):

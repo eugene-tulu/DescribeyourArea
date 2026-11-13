@@ -34,7 +34,6 @@ different number presented as the same number.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 from pathlib import Path
@@ -120,7 +119,6 @@ def main(argv: list[str] | None = None) -> int:
 
 def _build_per_area(areas, args, end) -> int:
     """Each area read against its own window. Slower, and never wrong."""
-    import vegetation_series as vs
 
     for name, feature, _props in areas:
         window = combined_bbox([feature["geometry"]])

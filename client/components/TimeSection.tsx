@@ -203,10 +203,12 @@ function Frame({
   months,
   children,
   onMove,
+  label,
 }: {
   months: string[];
   children: ReactNode;
   onMove?: (index: number | null) => void;
+  label?: string;
 }) {
   const x = (i: number) =>
     PAD.left + (i / Math.max(1, months.length - 1)) * INNER_W;
@@ -217,6 +219,7 @@ function Frame({
           viewBox={`0 0 ${W} ${H + PAD.top}`}
           className="w-full min-w-[760px]"
           role="img"
+          aria-label={label}
           onMouseLeave={() => onMove?.(null)}
         >
           <g transform={`translate(0, ${PAD.top})`}>
@@ -244,6 +247,56 @@ function Frame({
       </div>
       <span className="sr-only">{x(0)}</span>
     </figure>
+  );
+}
+
+/** The chart's numbers, as a table, for keyboard and screen-reader readers.
+ *
+ * A hover tooltip is not an accessible reading: it needs a pointer, and it
+ * disappears. The table is the same data without either requirement.
+ */
+function DataTable({
+  caption,
+  columns,
+  rows,
+}: {
+  caption: string;
+  columns: string[];
+  rows: Array<Array<string | number>>;
+}) {
+  return (
+    <details className="mt-2">
+      <summary className="label cursor-pointer text-ink-3">View the data table</summary>
+      <div className="mt-2 max-h-64 overflow-auto rounded-lg border border-rule">
+        <table className="w-full border-collapse text-[0.8125rem]">
+          <caption className="sr-only">{caption}</caption>
+          <thead>
+            <tr>
+              {columns.map((column) => (
+                <th
+                  key={column}
+                  scope="col"
+                  className="sticky top-0 bg-surface px-2 py-1.5 text-left font-semibold text-ink-2"
+                >
+                  {column}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, index) => (
+              <tr key={index} className="border-t border-rule/60">
+                {row.map((cell, cellIndex) => (
+                  <td key={cellIndex} className="fig px-2 py-1 text-ink-2">
+                    {cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </details>
   );
 }
 
@@ -340,7 +393,7 @@ function RainChart({ data }: { data: RainPoint[] }) {
           }
         />
       </header>
-      <Frame months={months} onMove={setHover}>
+      <Frame months={months} onMove={setHover} label="Monthly rainfall totals and the 1991–2020 normal">
         {ticks.map((t, i) => (
           <Gridline
             key={i}
@@ -380,6 +433,11 @@ function RainChart({ data }: { data: RainPoint[] }) {
           label={hover != null ? shortLabel(data[hover].month) : ""}
         />
       </Frame>
+      <DataTable
+        caption="Monthly rainfall totals and the 1991–2020 normal"
+        columns={["Month", "Rainfall (mm)", "Normal (mm)"]}
+        rows={data.map((d) => [d.month, d.precip_mm ?? "—", d.normal_mm ?? "—"])}
+      />
     </section>
   );
 }
@@ -458,7 +516,7 @@ function AnomalyChart({ data }: { data: RainPoint[] }) {
           }
         />
       </header>
-      <Frame months={months} onMove={setHover}>
+      <Frame months={months} onMove={setHover} label="Monthly rainfall departure from the 1991–2020 normal">
         {ticks.map((t, i) => (
           <Gridline
             key={i}
@@ -502,6 +560,16 @@ function AnomalyChart({ data }: { data: RainPoint[] }) {
           label={hover != null ? shortLabel(data[hover].month) : ""}
         />
       </Frame>
+      <DataTable
+        caption="Monthly rainfall departure from the 1991–2020 normal"
+        columns={["Month", "Departure"]}
+        rows={data.map((d) => [
+          d.month,
+          d.anomaly_pct == null
+            ? "—"
+            : `${d.anomaly_pct > 0 ? "+" : ""}${d.anomaly_pct.toFixed(1)}%`,
+        ])}
+      />
     </section>
   );
 }
@@ -591,7 +659,7 @@ function VegChart({ data, source, thinMonths }: { data: VegPoint[]; source?: str
           }
         />
       </header>
-      <Frame months={months} onMove={setHover}>
+      <Frame months={months} onMove={setHover} label="Monthly vegetation index (NDVI) and its normal">
         {ticks.map((t, i) => (
           <Gridline
             key={i}
@@ -633,6 +701,15 @@ function VegChart({ data, source, thinMonths }: { data: VegPoint[]; source?: str
           label={hover != null ? shortLabel(data[hover].month) : ""}
         />
       </Frame>
+      <DataTable
+        caption="Monthly vegetation index (NDVI) and its normal"
+        columns={["Month", "NDVI", "Normal"]}
+        rows={data.map((d) => [
+          d.month,
+          d.value == null ? "—" : d.value.toFixed(3),
+          d.normal == null ? "—" : d.normal.toFixed(3),
+        ])}
+      />
     </section>
   );
 }
@@ -742,7 +819,7 @@ export default function TimeSection({
               { value: "record", label: "Full record" },
             ]}
           />
-          <p className="fig text-[0.75rem] text-ink-3">
+          <p className="fig text-[0.8125rem] text-ink-3">
             {range === "window"
               ? `${windowStart.slice(0, 7)} → ${windowEnd.slice(0, 7)} · ${months.length} months`
               : `${months[0]?.slice(0, 7)} → ${months[months.length - 1]?.slice(0, 7)} · ${months.length} months`}
@@ -770,21 +847,30 @@ export default function TimeSection({
             value={hasRain ? String(stats.dry) : "—"}
             sub={hasRain ? "at or below 75% of normal" : undefined}
           />
-          <Stat
-            label="Vegetation now"
-            value={stats.last != null ? stats.last.toFixed(3) : "—"}
-            unit="NDVI"
-          />
-          <Stat
-            label="Change across span"
-            value={stats.vegChange != null ? `${stats.vegChange > 0 ? "+" : ""}${stats.vegChange.toFixed(3)}` : "—"}
-            sub={
-              hasVeg
-                ? "first month to last"
-                : "build the vegetation series to see it"
-            }
-            tone={stats.vegChange != null ? (stats.vegChange >= 0 ? "up" : "down") : undefined}
-          />
+          {hasVeg ? (
+            <>
+              <Stat
+                label="Vegetation now"
+                value={stats.last != null ? stats.last.toFixed(3) : "—"}
+                unit="NDVI"
+              />
+              <Stat
+                label="Change across span"
+                value={stats.vegChange != null ? `${stats.vegChange > 0 ? "+" : ""}${stats.vegChange.toFixed(3)}` : "—"}
+                sub="first month to last"
+                tone={stats.vegChange != null ? (stats.vegChange >= 0 ? "up" : "down") : undefined}
+              />
+            </>
+          ) : (
+            // Two empty tiles plus a separate button read as three things to
+            // do. One tile says the series is not built; the button below is the
+            // single action.
+            <Stat
+              label="Vegetation series"
+              value="Not built"
+              sub="build the series below to see change over time"
+            />
+          )}
         </div>
 
         {hasRain && (
@@ -839,7 +925,7 @@ export default function TimeSection({
       </div>
 
       <footer className="border-t border-rule px-6 py-4 sm:px-8">
-        <p className="max-w-[76ch] text-[0.75rem] leading-relaxed text-ink-3">
+        <p className="max-w-[76ch] text-[0.8125rem] leading-relaxed text-ink-3">
           Rainfall is {rainfallProduct === 'chirps' ? 'CHIRPS, a satellite-and-gauge blend' : 'ERA5, a reanalysis that assimilates observations'},
           rather than a gauge reading. Vegetation is MODIS MOD13Q1 at 250 m. Co-variation between the
           two is not attribution: vegetation responds to rain with a lag that varies by
@@ -874,7 +960,7 @@ function Stat({
         {value}
         {unit && <span className="text-[0.9375rem] font-normal tracking-normal text-ink-3">{unit}</span>}
       </p>
-      {sub && <p className="mt-2 text-[0.75rem] leading-snug text-ink-3">{sub}</p>}
+      {sub && <p className="mt-2 text-[0.8125rem] leading-snug text-ink-3">{sub}</p>}
     </div>
   );
 }

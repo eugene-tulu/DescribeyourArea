@@ -9,9 +9,6 @@ shape, the same provenance and the same evidence.
 
 from __future__ import annotations
 
-import asyncio
-import math
-import os
 import datetime
 from typing import Any, Optional
 
@@ -22,6 +19,35 @@ import sensors
 # ask for a specific window. MOD13Q1 begins in 2000-02, so 2010 leaves two
 # decades of record without pretending to more.
 DEFAULT_SERIES_YEARS = 16
+
+# The io-lulc-annual-v02 published extent. A window outside it is clamped to
+# the latest/earliest published year rather than producing an empty series.
+# The job readiness check uses the same clamp, so "ready" and "computed" cannot
+# disagree about which years a request means.
+LANDCOVER_EXTENT = (2017, 2023)
+
+
+def landcover_year_range(start: Optional[str], end: Optional[str]) -> tuple[int, int]:
+    """The inclusive years the land-cover history worker will compute.
+
+    A 2025-2026 request clamps to 2023-2023; a 2010-2026 request clamps to
+    2017-2023; a 2017-2020 request stays 2017-2020.
+    """
+    try:
+        start_year = int((start or "")[:4])
+    except ValueError:
+        start_year = int((end or "")[:4]) - 6 if end else LANDCOVER_EXTENT[0]
+    try:
+        end_year = int((end or "")[:4])
+    except ValueError:
+        end_year = start_year + 6
+    start_year = max(start_year, LANDCOVER_EXTENT[0])
+    end_year = min(end_year, LANDCOVER_EXTENT[1])
+    if end_year < start_year:
+        start_year = end_year
+    if end_year - start_year > 10:
+        end_year = start_year + 10
+    return start_year, end_year
 
 
 def resolution_for(bbox_area_km2: float, indicator: str) -> tuple[int, str]:
@@ -59,25 +85,7 @@ async def _compute_landcover_history(
 
     end = window_end or dt.date.today().isoformat()
     start = window_start or f"{dt.date.fromisoformat(end[:10]).year - 6:04d}-01-01"
-    # The collection publishes 2017-2023; a window outside it cannot produce
-    # per-year entries. Clamp the loop to the published extent so a 2025-2026
-    # request returns the latest published year (2023) instead of an empty
-    # series that surfaces as "No data available for 2025".
-    _extent_lo, _extent_hi = 2017, 2023
-    try:
-        start_year = int(start[:4])
-    except ValueError:
-        start_year = int(end[:4]) - 6
-    try:
-        end_year = int(end[:4])
-    except ValueError:
-        end_year = start_year + 6
-    start_year = max(start_year, _extent_lo)
-    end_year = min(end_year, _extent_hi)
-    if end_year < start_year:
-        start_year = end_year
-    if end_year - start_year > 10:
-        end_year = start_year + 10
+    start_year, end_year = landcover_year_range(start, end)
 
     series: list[dict[str, Any]] = []
     for year in range(start_year, end_year + 1):
@@ -115,6 +123,10 @@ async def _compute_landcover_history(
         "resolution_m": 10.0,
         "window": {"start": f"{series[0]['year']:04d}-01-01",
                    "end": f"{series[-1]['year']:04d}-12-31"},
+        # What the caller asked for, so readiness can tell a series computed for
+        # this window from one computed for a narrower one, even when a year is
+        # absent because it had no imagery.
+        "requested_window": {"start": start, "end": end},
         "series": series,
         "source_collection": "io-lulc-annual-v02",
     }
@@ -142,15 +154,11 @@ async def compute_indicator(
     from main import (
         _bbox_area_km2,
         _find_core_assets,
-        _load_and_summarize_ndvi,
-        _scene_index_on_grid,
-        _vegetation_target_grid,
         compute_landcover_percentages,
         compute_raster_stats,
         compute_vegetation_index,
         interpret_terrain,
     )
-    from shapely.geometry import shape
 
     area = area_km2 if area_km2 is not None else _bbox_area_km2(bbox)
     chosen, reason = resolution_for(area, indicator)

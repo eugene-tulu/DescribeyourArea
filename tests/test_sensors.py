@@ -149,7 +149,7 @@ class CloudMaskTests(unittest.TestCase):
         self.assertEqual(cloud_mask(SENTINEL2, values, classes).ravel().tolist(), [False, False, False])
 
     def test_qa_bits_reject_cloud_shadow_snow_and_fill(self):
-        from sensors import QA_CLOUD_MASK, QA_FILL
+        from sensors import QA_FILL
 
         clear = np.array([[0]], dtype="int64")
         cloud = np.array([[1 << 3]], dtype="int64")

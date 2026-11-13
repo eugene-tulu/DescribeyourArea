@@ -70,7 +70,13 @@ class DemResult(BaseModel):
     min: Optional[float] = None
     max: Optional[float] = None
     std: Optional[float] = None
+    p05: Optional[float] = None
+    p95: Optional[float] = None
+    min_is_outlier: Optional[bool] = None
+    max_is_outlier: Optional[bool] = None
     elevation_range_m: Optional[float] = None
+    robust_range_m: Optional[float] = None
+    terrain_range_basis: Optional[str] = None
     terrain_type: Optional[str] = None
     valid_pixel_count: Optional[int] = None
     valid_pixel_fraction: Optional[float] = None
@@ -196,6 +202,7 @@ class AdminContext(BaseModel):
 class ContextSummary(BaseModel):
     dem: Optional[DemResult] = None
     landcover: Optional[LandcoverResult] = None
+    landcover_history: Optional[Dict[str, Any]] = None
     ndvi: Optional[VegetationResult] = None
     rainfall: Optional[RainfallResult] = None
     country: Optional[str] = None

@@ -338,7 +338,6 @@ class PublishResilienceTests(unittest.TestCase):
     def test_a_job_stays_ready_when_only_the_upload_fails(self):
         import unittest.mock
 
-        import rainfall as _r
         from tests.test_rainfall import _StubClient  # noqa: F401  (import check)
 
         os.environ[rainfall.REMOTE_URI_ENV] = "s3://bucket/prefix"
@@ -440,3 +439,61 @@ class PublishResilienceTests(unittest.TestCase):
         finally:
             for indicator in ("dem", "landcover", "ndvi", "vegetation_series"):
                 jobs.drop(key, indicator)
+
+
+class ArtefactCoverageTests(unittest.TestCase):
+    """A ready artefact must be reported ready for the window it can answer.
+
+    The queue used to compare the requested start year (2025) with the
+    published land-cover year (2023), so a ready artefact was reported
+    not_submitted forever and the client re-queued it on every poll.
+    """
+
+    def test_landcover_2023_answers_a_2025_2026_window(self):
+        payload = {"year": 2023,
+                   "window": {"start": "2023-01-01", "end": "2023-12-31"}}
+        self.assertTrue(jobs.artefact_covers(
+            payload, "landcover", "2025-11-11", "2026-11-11"))
+
+    def test_landcover_2023_does_not_answer_a_2020_window(self):
+        payload = {"year": 2023,
+                   "window": {"start": "2023-01-01", "end": "2023-12-31"}}
+        self.assertFalse(jobs.artefact_covers(
+            payload, "landcover", "2020-01-01", "2020-12-31"))
+
+    def test_history_2023_answers_a_2025_2026_window(self):
+        payload = {"window": {"start": "2023-01-01", "end": "2023-12-31"},
+                   "series": [{"year": 2023}]}
+        self.assertTrue(jobs.artefact_covers(
+            payload, "landcover_history", "2025-11-11", "2026-11-11"))
+
+    def test_history_2023_does_not_answer_a_full_2017_2023_request(self):
+        payload = {"window": {"start": "2023-01-01", "end": "2023-12-31"},
+                   "series": [{"year": 2023}]}
+        self.assertFalse(jobs.artefact_covers(
+            payload, "landcover_history", "2017-01-01", "2023-12-31"))
+
+    def test_history_requested_window_covers_a_missing_year(self):
+        # The worker records what it was asked for. A year with no imagery is
+        # absent from the series but must not make the artefact look unfinished.
+        payload = {
+            "requested_window": {"start": "2010-01-01", "end": "2026-11-11"},
+            "window": {"start": "2018-01-01", "end": "2023-12-31"},
+            "series": [{"year": 2018}, {"year": 2023}],
+        }
+        self.assertTrue(jobs.artefact_covers(
+            payload, "landcover_history", "2017-01-01", "2023-12-31"))
+
+
+class LandcoverYearRangeTests(unittest.TestCase):
+    def test_a_window_past_the_extent_clamps_to_the_latest_published_year(self):
+        from indicators import landcover_year_range
+        self.assertEqual(landcover_year_range("2025-11-11", "2026-11-11"), (2023, 2023))
+
+    def test_a_historical_window_keeps_its_years(self):
+        from indicators import landcover_year_range
+        self.assertEqual(landcover_year_range("2017-01-01", "2020-12-31"), (2017, 2020))
+
+    def test_a_wide_window_clamps_to_the_published_extent(self):
+        from indicators import landcover_year_range
+        self.assertEqual(landcover_year_range("2010-01-01", "2026-11-11"), (2017, 2023))

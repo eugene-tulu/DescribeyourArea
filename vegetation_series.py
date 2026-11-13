@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import datetime
 import os
-import math
 from typing import Any, Optional
 
 import numpy as np
@@ -191,7 +190,6 @@ def _items_by_month(bbox, months) -> dict[str, Any]:
               f"({type(exc).__name__}: {exc}); searching instead", flush=True)
 
     wanted = set(months)
-    import planetary_computer
     import pystac_client
 
     catalog = pystac_client.Client.open(main.STAC_URL)
@@ -342,7 +340,6 @@ def compute_monthly_series(
     about data that does not exist.
     """
     import planetary_computer
-    import pystac_client
     import rasterio as rio
     from rasterio.features import geometry_mask
     from shapely.geometry import shape

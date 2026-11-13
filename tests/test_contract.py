@@ -9,7 +9,6 @@ These tests fail when a producer changes shape without the contract changing,
 which is the whole point.
 """
 
-import json
 import unittest
 
 from fastapi.testclient import TestClient

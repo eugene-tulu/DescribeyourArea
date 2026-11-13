@@ -71,7 +71,6 @@ class LockTests(unittest.TestCase):
 
     def test_a_second_holder_is_refused_and_reported(self):
         import fcntl
-        import json as _json
 
         path = worker.lock_path()
         path.parent.mkdir(parents=True, exist_ok=True)

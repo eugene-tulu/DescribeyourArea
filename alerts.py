@@ -21,7 +21,6 @@ rather than a crash.
 
 from __future__ import annotations
 
-import datetime
 import json
 import os
 import urllib.error

@@ -17,7 +17,6 @@ import math
 import os
 import unittest
 
-import numpy as np
 
 import main
 from main import (

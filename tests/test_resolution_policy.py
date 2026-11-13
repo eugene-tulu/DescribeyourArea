@@ -8,7 +8,6 @@ coarser answer, and the honesty of the resolution it reports.
 import unittest
 
 import indicators
-import sensors
 from sensors import COARSEST_RESOLUTION_M, RESOLUTION_STEPS, resolution_for_area
 
 
@@ -101,7 +100,8 @@ class MultiIndicatorJobTests(unittest.TestCase):
 
         self.assertEqual(
             set(jobs.INDICATORS),
-            {"rainfall", "dem", "landcover", "ndvi", "vegetation_series"},
+            {"rainfall", "dem", "landcover", "landcover_history",
+             "ndvi", "vegetation_series"},
         )
 
     def test_artefacts_do_not_collide_across_indicators(self):

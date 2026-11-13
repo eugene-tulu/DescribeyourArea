@@ -6,7 +6,6 @@ neither is required for the sweep to work.
 
 import json
 import os
-import tempfile
 import unittest
 import urllib.error
 from unittest import mock

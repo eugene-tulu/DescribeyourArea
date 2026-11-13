@@ -10,7 +10,6 @@ are no brackets to miscount.
 """
 
 import json
-import math
 import unittest
 
 import main
