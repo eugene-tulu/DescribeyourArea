@@ -32,6 +32,8 @@ import registry
 import sensors
 import measure
 import enrich
+import projects
+import connectors
 from dotenv import load_dotenv
 import sys
 import warnings
@@ -41,7 +43,15 @@ from affine import Affine
 from pyproj import CRS, Geod, Transformer
 import logging
 
-from contract import ContextResponse, EnrichRequest, EnrichResponse  # noqa: F401
+from contract import (  # noqa: F401
+    ContextResponse,
+    EnrichRequest,
+    EnrichResponse,
+    Project,
+    ProjectCreate,
+    ProjectSummary,
+    IngestResponse,
+)
 from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
     DEFAULT_SENSOR,
     cloud_mask,
@@ -2364,6 +2374,68 @@ def enrich_observations(request: EnrichRequest) -> EnrichResponse:
         records=records,
         sampled=len(records),
         point_samples=point_samples,
+    )
+
+
+# --------------------------------------------------
+# PROJECTS AND CONNECTORS
+# --------------------------------------------------
+@app.post("/v1/projects", response_model=Project)
+def create_project(payload: ProjectCreate) -> Project:
+    """Save a pipeline configuration: one AOI, one window, N connectors."""
+    return projects.create(payload)
+
+
+@app.get("/v1/projects", response_model=list[ProjectSummary])
+def list_projects() -> list[ProjectSummary]:
+    return projects.list_projects()
+
+
+@app.get("/v1/projects/{project_id}", response_model=Project)
+def get_project(project_id: str) -> Project:
+    project = projects.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@app.delete("/v1/projects/{project_id}")
+def delete_project(project_id: str) -> dict[str, str]:
+    if not projects.delete(project_id):
+        raise HTTPException(status_code=404, detail="Project not found")
+    return {"deleted": project_id}
+
+
+@app.post("/v1/projects/{project_id}/ingest", response_model=IngestResponse)
+def ingest_project(project_id: str) -> IngestResponse:
+    """Run the project's connector and return normalised observations.
+
+    The observations are then enriched by the same pipeline as an upload; the
+    connector only knows how to fetch, not how to analyse.
+    """
+    project = projects.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if not project.connectors:
+        raise HTTPException(status_code=400, detail="The project has no connector.")
+    connector = project.connectors[0]
+    if connector.kind != "arcgis":
+        raise HTTPException(
+            status_code=400,
+            detail=f"The {connector.kind} connector is not implemented yet.",
+        )
+    try:
+        bbox = _feature_bbox(project.geojson)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Could not read the project AOI: {exc}",
+        ) from exc
+    observations, errors = connectors.fetch_arcgis({**connector.config, "bbox": bbox})
+    return IngestResponse(
+        project_id=project.id,
+        connector=connector.name,
+        observations=observations,
+        errors=errors,
     )
 
 def require_admin_key(

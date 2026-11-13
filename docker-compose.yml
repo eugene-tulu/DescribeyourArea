@@ -20,6 +20,9 @@ services:
       # instrumentation that gates every later decision measures nothing. Read it
       # with: docker compose exec backend python -m usage
       - usage-events:/app/.usage
+      # Saved pipeline configurations (AOI, window, connectors). Without a
+      # volume a project disappears on the next image build.
+      - projects-data:/app/projects
     env_file:
       - .env
     environment:
@@ -54,6 +57,7 @@ services:
       RAINFALL_S3_ENDPOINT: ${RAINFALL_S3_ENDPOINT:-https://nyc3.digitaloceanspaces.com}
       RAINFALL_S3_REGION: ${RAINFALL_S3_REGION:-nyc3}
       USAGE_EVENTS_PATH: ${USAGE_EVENTS_PATH:-/app/.usage/events.jsonl}
+      PROJECTS_DIR: ${PROJECTS_DIR:-/app/projects}
       # The boundary service, by container name on the shared network. Left
       # unset the resolver falls back to http://gaul-api:8000, which does not
       # resolve on a host where that project is named differently -- and an
@@ -161,6 +165,7 @@ services:
 volumes:
   rainfall-cache:
   usage-events:
+  projects-data:
 
 networks:
   default:

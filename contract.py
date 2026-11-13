@@ -268,3 +268,59 @@ class EnrichResponse(BaseModel):
     records: List[EnrichedRecord]
     sampled: int
     point_samples: int
+
+
+class Observation(BaseModel):
+    """The connector-independent shape every source is normalised into."""
+
+    id: Optional[str] = None
+    lon: float
+    lat: float
+    timestamp: Optional[str] = None
+    observer: Optional[str] = None
+    type: Optional[str] = None
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class Connector(BaseModel):
+    kind: str
+    name: str
+    config: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ProjectCreate(BaseModel):
+    """A saved pipeline configuration: one AOI, one window, N connectors.
+
+    The project type selects the view (dMRV evidence, conservancy rangeland,
+    cooperative production, or custom); it does not fork the pipeline.
+    """
+
+    name: str
+    type: str = "custom"
+    geojson: Dict[str, Any]
+    bbox_area_km2: Optional[float] = None
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+    datasets: List[str] = Field(default_factory=lambda: ["dem", "landcover", "ndvi", "rainfall"])
+    connectors: List[Connector] = Field(default_factory=list)
+
+
+class Project(ProjectCreate):
+    id: str
+    created_at: str
+    updated_at: str
+
+
+class ProjectSummary(BaseModel):
+    id: str
+    name: str
+    type: str
+    created_at: str
+    connectors: int
+
+
+class IngestResponse(BaseModel):
+    project_id: str
+    connector: str
+    observations: List[Observation]
+    errors: List[str]

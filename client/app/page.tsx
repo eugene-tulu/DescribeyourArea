@@ -3683,6 +3683,11 @@ export default function Home() {
                           <FieldDataPanel
                             rows={fieldRows}
                             fileName={fieldFileName}
+                            aoiGeojson={currentGeojson() ?? null}
+                            windowStart={startDate}
+                            windowEnd={endDate}
+                            datasets={selectedDatasets}
+                            bboxAreaKm2={analysisSummary.analysis?.bbox_area_km2 ?? null}
                             onObservationsChange={(observations, fileName) => {
                               setFieldObservations(observations);
                               setFieldFileName(fileName);

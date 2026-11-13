@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
+import type { GeoJsonObject } from 'geojson';
 import {
   observationsToCsv,
   observationsToGeojson,
@@ -28,17 +29,83 @@ function fmt(value: number | null, digits = 2): string {
 interface FieldDataPanelProps {
   rows: EnrichedObservation[];
   fileName: string | null;
+  aoiGeojson: GeoJsonObject | null;
+  windowStart: string;
+  windowEnd: string;
+  datasets: string[];
+  bboxAreaKm2: number | null;
   onObservationsChange: (observations: Observation[], fileName: string | null) => void;
 }
 
 export function FieldDataPanel({
   rows,
   fileName,
+  aoiGeojson,
+  windowStart,
+  windowEnd,
+  datasets,
+  bboxAreaKm2,
   onObservationsChange,
 }: FieldDataPanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [projectType, setProjectType] = useState('conservancy');
+  const [arcgisUrl, setArcgisUrl] = useState('');
+  const [layerId, setLayerId] = useState('0');
+  const [token, setToken] = useState('');
+  const [dateField, setDateField] = useState('');
+  const [where, setWhere] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [connectError, setConnectError] = useState<string | null>(null);
+
+  const connectArcGIS = async () => {
+    if (!aoiGeojson) {
+      setConnectError('Select an area first.');
+      return;
+    }
+    if (!arcgisUrl.trim()) {
+      setConnectError('Enter the Feature Service URL.');
+      return;
+    }
+    setConnecting(true);
+    setConnectError(null);
+    try {
+      const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+      const projectResponse = await fetch(`${backendUrl}/v1/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `${projectType} · ${new Date().toISOString().slice(0, 10)}`,
+          type: projectType,
+          geojson: aoiGeojson,
+          bbox_area_km2: bboxAreaKm2 ?? undefined,
+          window_start: windowStart,
+          window_end: windowEnd,
+          datasets,
+          connectors: [{
+            kind: 'arcgis',
+            name: arcgisUrl,
+            config: { url: arcgisUrl, layer_id: layerId, token, date_field: dateField, where },
+          }],
+        }),
+      });
+      if (!projectResponse.ok) throw new Error(await projectResponse.text());
+      const project = await projectResponse.json() as { id: string };
+      const ingestResponse = await fetch(`${backendUrl}/v1/projects/${project.id}/ingest`, { method: 'POST' });
+      if (!ingestResponse.ok) throw new Error(await ingestResponse.text());
+      const data = await ingestResponse.json() as {
+        observations?: Observation[];
+        errors?: string[];
+      };
+      if (data.errors?.length) setConnectError(data.errors.join(' · '));
+      onObservationsChange(data.observations ?? [], `ArcGIS · ${data.observations?.length ?? 0} observations`);
+    } catch (error) {
+      setConnectError(error instanceof Error ? error.message : 'Could not connect.');
+    } finally {
+      setConnecting(false);
+    }
+  };
 
   const handleFile = async (file: File) => {
     setBusy(true);
@@ -116,6 +183,85 @@ export function FieldDataPanel({
         )}
         {fileName && <span className="fig text-[0.75rem] text-ink-3">{fileName}</span>}
       </div>
+
+      <details className="mt-4 rounded-lg border border-rule bg-surface/60 p-3">
+        <summary className="label cursor-pointer">Connect ArcGIS / Survey123</summary>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          <label className="text-[0.75rem] text-ink-3">
+            Project view
+            <select
+              value={projectType}
+              onChange={(event) => setProjectType(event.target.value)}
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            >
+              <option value="dmrv">dMRV evidence</option>
+              <option value="conservancy">Conservancy rangeland</option>
+              <option value="cooperative">Cooperative production</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label className="text-[0.75rem] text-ink-3">
+            Feature Service URL
+            <input
+              value={arcgisUrl}
+              onChange={(event) => setArcgisUrl(event.target.value)}
+              placeholder="https://services.arcgis.com/.../FeatureServer"
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            />
+          </label>
+          <label className="text-[0.75rem] text-ink-3">
+            Layer id
+            <input
+              value={layerId}
+              onChange={(event) => setLayerId(event.target.value)}
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            />
+          </label>
+          <label className="text-[0.75rem] text-ink-3">
+            Date field
+            <input
+              value={dateField}
+              onChange={(event) => setDateField(event.target.value)}
+              placeholder="e.g. survey_date"
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            />
+          </label>
+          <label className="text-[0.75rem] text-ink-3">
+            Token (optional)
+            <input
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              type="password"
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            />
+          </label>
+          <label className="text-[0.75rem] text-ink-3">
+            Where (optional)
+            <input
+              value={where}
+              onChange={(event) => setWhere(event.target.value)}
+              placeholder="1=1"
+              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+            />
+          </label>
+        </div>
+        <button
+          type="button"
+          onClick={() => void connectArcGIS()}
+          disabled={connecting}
+          className="btn btn-primary mt-3 h-9 px-3 text-sm font-semibold"
+        >
+          {connecting ? 'Connecting…' : 'Connect and fetch'}
+        </button>
+        {connectError && (
+          <p className="mt-2 text-[0.75rem] leading-relaxed text-caution">{connectError}</p>
+        )}
+        <p className="mt-2 text-[0.75rem] leading-relaxed text-ink-3">
+          The connector fetches points inside the current AOI and normalises them into the
+          same record as an upload. Per-point elevation and land cover are sampled on the
+          backend; NDVI and rainfall come from the AOI evidence.
+        </p>
+      </details>
 
       {errors.length > 0 && (
         <div className="mt-3 rounded-lg border border-caution/30 bg-caution/10 px-3 py-2 text-[0.75rem] leading-relaxed text-caution">
