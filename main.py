@@ -3475,7 +3475,7 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -
         try:
             signed = href if href.startswith("/") else planetary_computer.sign(href)
             with COGReader(signed) as cog:
-                image = cog.tile(z, x, y)
+                image = cog.tile(x, y, z)
                 if image.array.size == 0:
                     continue
                 return image.render(colormap=colormap, add_alpha=True)
