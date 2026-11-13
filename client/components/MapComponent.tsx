@@ -33,23 +33,9 @@ interface MapComponentProps {
   secondaryGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
   viewBounds?: [[number, number], [number, number]] | null;
-  overlayTiles?: { dem?: string[]; landcover?: string[]; landcoverYear?: number | null } | null;
+  tileLayers?: Array<{ id: string; url: string; attribution: string; opacity?: number; zIndex?: number }>;
   onClearOverlay?: () => void;
   points?: Array<{ id: string; lon: number; lat: number }>;
-}
-
-function isAllowedOverlayUrl(url: string | undefined | null): boolean {
-  if (!url) return false;
-  try {
-    const u = new URL(url);
-    return u.protocol === "https:" && (
-      u.hostname.endsWith("ai4edataeuwest.blob.core.windows.net") ||
-      u.hostname.endsWith("amazonaws.com") ||
-      u.hostname === "planetarycomputer.microsoft.com"
-    );
-  } catch {
-    return false;
-  }
 }
 
 /** The [south, west] / [north, east] pair Leaflet wants, from any GeoJSON.
@@ -318,7 +304,7 @@ export default function MapComponent({
   secondaryGeoJSON,
   onSaveFeatures,
   viewBounds,
-  overlayTiles,
+  tileLayers,
   onClearOverlay,
   points,
 }: MapComponentProps) {
@@ -381,30 +367,20 @@ export default function MapComponent({
           />
         )}
 
-        {/* Every tile that covers the outline, not just the first. A drawn area
-            can straddle tiles, and showing one made a two-tile read look like a
-            one-tile hole. Signed COG hrefs only. */}
-        {overlayTiles?.dem?.filter(isAllowedOverlayUrl).map((url) => (
+        {/* Real XYZ tiles from the rio-tiler endpoint. COG overviews make
+            panning and zooming cheap; the old raw-COG hrefs could not render. */}
+        {tileLayers?.map((layer) => (
           <TileLayer
-            key={`dem-${url}`}
-            url={url}
-            attribution="Elevation &copy; Copernicus DEM GLO-30"
-            opacity={0.55}
-            zIndex={400}
-          />
-        ))}
-        {overlayTiles?.landcover?.filter(isAllowedOverlayUrl).map((url) => (
-          <TileLayer
-            key={`landcover-${url}`}
-            url={url}
-            attribution={`Land cover ${overlayTiles.landcoverYear ?? ''} &copy; Esri 10 m`}
-            opacity={0.7}
-            zIndex={410}
+            key={layer.id}
+            url={layer.url}
+            attribution={layer.attribution}
+            opacity={layer.opacity}
+            zIndex={layer.zIndex}
           />
         ))}
       </MapContainer>
 
-      {(overlayTiles || undefined) && onClearOverlay && (
+      {(tileLayers?.length ?? 0) > 0 && onClearOverlay && (
         <button
           type="button"
           onClick={onClearOverlay}

@@ -611,6 +611,8 @@ async def _compute_job(
                 window_start=job.get("start"),
                 window_end=job.get("end"), enforce_budget=False,
                 year=job.get("year"),
+                cog_path=(f"/app/.rainfall-cache/tiles/{key}/ndvi.tif"
+                          if indicator == "ndvi" else None),
             )
             # The resolution to report is the one actually read, not the policy
             # target. A MODIS 250 m composite computed because the policy asked

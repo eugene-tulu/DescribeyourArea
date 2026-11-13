@@ -1,7 +1,7 @@
 # --------------------------------------------------
 # IMPORTS
 # --------------------------------------------------
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
@@ -12,6 +12,7 @@ from rasterio.transform import from_bounds as transform_from_bounds
 from rasterio.warp import reproject
 from rasterio.windows import Window, transform as window_transform
 import numpy as np
+import base64
 import planetary_computer
 import datetime
 import threading
@@ -1326,6 +1327,7 @@ def _load_and_summarize_ndvi(
     sensor: Sensor,
     sensor_reason: str = "",
     window: Optional[dict] = None,
+    cog_path: Optional[str] = None,
 ) -> dict:
     """Build a per-pixel median NDVI composite and summarize it.
 
@@ -1379,6 +1381,25 @@ def _load_and_summarize_ndvi(
         median_ndvi = np.nanmedian(stack, axis=0)
     observed = np.isfinite(median_ndvi)
     values = median_ndvi[observed]
+    if cog_path:
+        # Write the median composite as a tiled GeoTIFF with overviews so the
+        # map can render it through rio-tiler at any zoom without re-reading
+        # the scenes. The composite is the map layer; the summary stays stats.
+        try:
+            os.makedirs(os.path.dirname(cog_path), exist_ok=True)
+            _crs, _transform, _width, _height = target
+            profile = {
+                "driver": "GTiff", "width": _width, "height": _height,
+                "count": 1, "dtype": "float32", "crs": _crs,
+                "transform": _transform, "nodata": -9999.0,
+                "tiled": True, "blockxsize": 512, "blockysize": 512,
+                "compress": "DEFLATE",
+            }
+            with rio.open(cog_path, "w", **profile) as dst:
+                dst.write(np.nan_to_num(median_ndvi, nan=-9999.0).astype("float32"), 1)
+                dst.build_overviews([2, 4, 8, 16])
+        except Exception as exc:
+            logger.warning("NDVI COG write failed: %s: %s", type(exc).__name__, str(exc)[:160])
     if values.size == 0:
         return {
             "status": "unavailable",
@@ -1416,6 +1437,7 @@ def _load_and_summarize_ndvi(
         ),
         "scene_ids": scene_ids,
         "scene_dates": [d for d in scene_dates if d],
+        "tile_path": cog_path,
     }
 
 
@@ -1459,6 +1481,7 @@ async def compute_vegetation_index(
     window_days: int = 90,
     start: Optional[str] = None,
     end: Optional[str] = None,
+    cog_path: Optional[str] = None,
 ) -> dict:
     """Compute a bounded vegetation index from Planetary Computer only.
 
@@ -1548,7 +1571,7 @@ async def compute_vegetation_index(
             return await asyncio.wait_for(
                 run_blocking(
                     _load_and_summarize_ndvi, items, bbox, geojson_geom, resolution_m,
-                    sensor, reason, {"start": window_start, "end": window_end},
+                    sensor, reason, {"start": window_start, "end": window_end}, cog_path,
                 ),
                 timeout=NDVI_TIMEOUT_SECONDS,
             )
@@ -3421,6 +3444,92 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
             f"shown; the rest is still being computed.")
     return ContextResponse(summary=summary).model_dump(
         exclude_none=True, exclude_defaults=False)
+
+
+# --------------------------------------------------
+# COG TILES (cloud-native raster rendering)
+# --------------------------------------------------
+_TILE_ASSET_CACHE: dict[str, list[str]] = {}
+_TILE_TRANSPARENT_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+# Esri 10 m class colours, as RGBA for rio-tiler's colormap.
+_LULC_RGBA = {
+    1: (0, 0, 255, 255), 2: (0, 80, 0, 255), 4: (0, 150, 150, 255),
+    5: (150, 100, 0, 255), 7: (200, 0, 50, 255), 8: (160, 160, 160, 255),
+    9: (255, 255, 255, 255), 10: (0, 0, 200, 255), 11: (180, 220, 120, 255),
+}
+
+
+def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -> bytes:
+    """Render one XYZ tile from the first source COG that covers it.
+
+    rio-tiler reads the COG overview that matches the zoom, so a 16,000 km2 AOI
+    pans and zooms without re-reading 10 m native pixels. The signed URL is
+    created per request, so an expired token is never served to the browser.
+    """
+    from rio_tiler.io import COGReader
+
+    colormap = _LULC_RGBA if indicator in ("landcover", "landcover_history") else None
+    for href in hrefs:
+        try:
+            signed = href if href.startswith("/") else planetary_computer.sign(href)
+            with COGReader(signed) as cog:
+                image = cog.tile(z, x, y)
+                if image.array.size == 0:
+                    continue
+                return image.render(colormap=colormap, add_alpha=True)
+        except Exception:
+            continue
+    return _TILE_TRANSPARENT_PNG
+
+
+@app.get("/tiles/{cache_key}/{indicator}/{z}/{x}/{y}.png")
+async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
+                   year: Optional[int] = None):
+    """XYZ tiles for a computed area, rendered from the source COGs.
+
+    The browser asks for tiles in WebMercator (EPSG:3857), the same grid Leaflet
+    uses. Tiles are immutable per area/indicator/year, so nginx and the browser
+    cache them; a pan/zoom only fetches the tiles it has not seen.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
+        raise HTTPException(status_code=422, detail="cache_key must be 32 hex characters")
+    if indicator not in ("dem", "landcover", "landcover_history", "ndvi"):
+        raise HTTPException(status_code=404, detail="no raster layer for this indicator")
+    artefact = jobs.read_artefact(cache_key, indicator)
+    bbox = (artefact or {}).get("bbox")
+    if not bbox:
+        raise HTTPException(status_code=404, detail="no area for this cache key")
+
+    if indicator == "ndvi":
+        # The worker writes the median composite as a local tiled COG; no STAC
+        # search is needed per tile.
+        tile_path = (artefact or {}).get("tile_path")
+        if not tile_path:
+            raise HTTPException(status_code=404, detail="NDVI raster not computed for this area")
+        hrefs = [tile_path]
+    else:
+        asset_key = f"{cache_key}:{indicator}:{year}"
+    hrefs = _TILE_ASSET_CACHE.get(asset_key)
+    if hrefs is None:
+        assets = await _find_core_assets(
+            bbox,
+            need_dem=indicator == "dem",
+            need_landcover=indicator in ("landcover", "landcover_history"),
+            landcover_year=year,
+        )
+        hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
+        if len(_TILE_ASSET_CACHE) > 100:
+            _TILE_ASSET_CACHE.clear()
+        _TILE_ASSET_CACHE[asset_key] = hrefs
+
+    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 
 @app.get("/analytics/summary")

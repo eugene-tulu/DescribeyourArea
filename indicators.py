@@ -152,6 +152,7 @@ async def compute_indicator(
     window_end: Optional[str] = None,
     enforce_budget: bool = True,
     year: Optional[int] = None,
+    cog_path: Optional[str] = None,
 ) -> dict:
     """Compute one indicator and return a payload shaped like the contract's.
 
@@ -224,6 +225,7 @@ async def compute_indicator(
             resolution_m=chosen,
             start=window_start,
             end=window_end,
+            cog_path=cog_path,
         )
 
     raise ValueError(f"unknown indicator {indicator!r}; choose from {('dem','landcover','ndvi','rainfall')}")

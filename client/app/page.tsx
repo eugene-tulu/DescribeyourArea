@@ -1702,6 +1702,48 @@ export default function Home() {
   // The overlay is a reading aid, not part of the result. Clearing it must not
   // clear the numbers (the old onClearOverlay reset the whole summary).
   const [overlayVisible, setOverlayVisible] = useState(true);
+  // The cache key the backend reported for this analysis, so a submission state
+  // can be matched to the area that produced it and the map can request tiles.
+  const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
+  const [mapLayers, setMapLayers] = useState({
+    dem: true, landcover: true, ndvi: false, landcover_history: false,
+  });
+  const [historyYear, setHistoryYear] = useState<number | null>(null);
+  useEffect(() => {
+    const years = analysisSummary?.landcover_history?.series ?? [];
+    if (years.length && historyYear == null) setHistoryYear(years.at(-1)?.year ?? null);
+  }, [analysisSummary?.landcover_history, historyYear]);
+
+  // One XYZ tile URL per requested layer. The backend renders each tile from
+  // the COG overview that matches the zoom, so panning/zooming is cheap.
+  const tileLayers = useMemo(() => {
+    if (!activeCacheKey || !analysisSummary || !overlayVisible) return undefined;
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    const base = `${backendUrl}/tiles/${activeCacheKey}`;
+    const layers: Array<{
+      id: string; url: string; attribution: string;
+      opacity?: number; zIndex?: number;
+    }> = [];
+    if (mapLayers.dem) {
+      layers.push({ id: 'dem', url: `${base}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
+    }
+    if (mapLayers.landcover) {
+      layers.push({ id: 'landcover', url: `${base}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
+    }
+    if (mapLayers.ndvi) {
+      layers.push({ id: 'ndvi', url: `${base}/ndvi/{z}/{x}/{y}.png`, attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+    }
+    if (mapLayers.landcover_history && historyYear) {
+      layers.push({
+        id: 'lch',
+        url: `${base}/landcover_history/{z}/{x}/{y}.png?year=${historyYear}`,
+        attribution: `Land cover ${historyYear}`,
+        opacity: 0.65,
+        zIndex: 430,
+      });
+    }
+    return layers;
+  }, [activeCacheKey, analysisSummary, overlayVisible, mapLayers, historyYear]);
   const [periodAmount, setPeriodAmount] = useState<number>(1);
   const [periodUnit, setPeriodUnit] = useState<'years' | 'months' | 'days'>('years');
   const [customEnd, setCustomEnd] = useState('');
@@ -1736,9 +1778,6 @@ export default function Home() {
   // second read on top of the one the reader is about to start.
   const rainProductTouched = useRef(false);
   const rainProductAuto = useRef(false);
-  // The cache key the backend reported for this analysis, so a submission state
-  // can be matched to the area that produced it.
-  const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
   // Whether the share link was just copied, so the action can say so. The
   // clipboard API reports nothing, so this is the only honest confirmation.
   const [linkCopied, setLinkCopied] = useState(false);
@@ -3400,6 +3439,44 @@ export default function Home() {
                   </p>
                 </div>
 
+                {analysisSummary && (
+                  <div className="mb-3 flex flex-wrap items-center gap-2" data-print-hide>
+                    <span className="label text-ink-3">Map layers</span>
+                    {[
+                      { id: 'dem' as const, label: 'Elevation' },
+                      { id: 'landcover' as const, label: 'Land cover' },
+                      { id: 'ndvi' as const, label: 'NDVI' },
+                      { id: 'landcover_history' as const, label: 'Land cover history' },
+                    ].map((layer) => (
+                      <label
+                        key={layer.id}
+                        className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={mapLayers[layer.id]}
+                          onChange={(event) => setMapLayers((previous) => ({
+                            ...previous,
+                            [layer.id]: event.target.checked,
+                          }))}
+                          className="h-3.5 w-3.5 accent-signal"
+                        />
+                        {layer.label}
+                      </label>
+                    ))}
+                    {mapLayers.landcover_history && (analysisSummary.landcover_history?.series?.length ?? 0) > 0 && (
+                      <select
+                        value={historyYear ?? ''}
+                        onChange={(event) => setHistoryYear(event.target.value ? Number(event.target.value) : null)}
+                        className="h-7 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+                      >
+                        {(analysisSummary.landcover_history?.series ?? []).map((entry) => (
+                          <option key={entry.year} value={entry.year}>{entry.year}</option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
                 <div className="relative">
                   <MapComponent
                     onBoundingBoxCreated={handleBoundingBoxCreated}
@@ -3407,24 +3484,21 @@ export default function Home() {
                     secondaryGeoJSON={secondaryGeojson}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
-                    overlayTiles={analysisSummary && overlayVisible ? {
-                      dem: (analysisSummary.dem as DemStats | null | undefined)?.tiles ?? undefined,
-                      landcover: (analysisSummary.landcover as LandcoverStats | null | undefined)?.tiles ?? undefined,
-                      landcoverYear: (analysisSummary.landcover as LandcoverStats | null | undefined)?.year ?? null,
-                    } : null}
+                    tileLayers={tileLayers}
                     onClearOverlay={analysisSummary && overlayVisible ? () => setOverlayVisible(false) : undefined}
                     points={fieldRows.map((row) => ({ id: row.id, lon: row.lon, lat: row.lat }))}
                   />
-                  {analysisSummary && overlayVisible && (
+                  {analysisSummary && overlayVisible && tileLayers && tileLayers.length > 0 && (
                     <div className="absolute left-4 top-4 z-[1000] max-w-[16rem] rounded-lg border border-rule bg-void/90 px-3 py-2.5 text-[0.75rem] leading-relaxed text-ink-2 backdrop-blur">
-                      {(analysisSummary.dem as DemStats | null | undefined)?.tiles?.length ? (
+                      {mapLayers.dem && (
                         <div className="mb-2">
                           <p className="label mb-1 text-ink-3">Elevation</p>
                           <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#0b1d3a,#1e5631,#a3a33a,#8b5a2b,#ffffff)' }} />
                           <span className="mt-0.5 flex justify-between text-[0.625rem] text-ink-3"><span>low</span><span>high</span></span>
                         </div>
-                      ) : null}
-                      {(analysisSummary.landcover as LandcoverStats | null | undefined)?.classes
+                      )}
+                      {(mapLayers.landcover || mapLayers.landcover_history)
+                        && (analysisSummary.landcover as LandcoverStats | null | undefined)?.classes
                         && Object.keys((analysisSummary.landcover as LandcoverStats).classes || {}).length > 0 ? (
                         <div>
                           <p className="label mb-1 text-ink-3">Land cover</p>
@@ -3438,6 +3512,13 @@ export default function Home() {
                           </ul>
                         </div>
                       ) : null}
+                      {mapLayers.ndvi && (
+                        <div>
+                          <p className="label mb-1 text-ink-3">NDVI</p>
+                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#8b5a2b,#e8d8a0,#2f7d3a)' }} />
+                          <span className="mt-0.5 flex justify-between text-[0.625rem] text-ink-3"><span>low</span><span>high</span></span>
+                        </div>
+                      )}
                     </div>
                   )}
                   {analysisSummary && !overlayVisible && (
