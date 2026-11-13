@@ -81,11 +81,19 @@ async def _compute_landcover_history(
     """Per-year land-cover classes for a window, as a `series` of years."""
     import datetime as dt
 
-    from main import _find_core_assets, _resolve_landcover_year, compute_landcover_percentages
+    from main import (
+        _bbox_area_km2,
+        _find_core_assets,
+        _resolve_landcover_year,
+        compute_landcover_percentages,
+    )
 
     end = window_end or dt.date.today().isoformat()
     start = window_start or f"{dt.date.fromisoformat(end[:10]).year - 6:04d}-01-01"
     start_year, end_year = landcover_year_range(start, end)
+    # Read each annual map at the AOI's resolution policy (250 m for a large
+    # landscape) through the COG overview, not at native 10 m.
+    resolution = resolution_for(_bbox_area_km2(bbox), "landcover")[0]
 
     series: list[dict[str, Any]] = []
     for year in range(start_year, end_year + 1):
@@ -102,6 +110,7 @@ async def _compute_landcover_history(
             assets["landcover"],
             {"type": "Feature", "properties": {}, "geometry": geojson_geom},
             year=year,
+            resolution_m=resolution,
         )
         if result.get("error"):
             continue
@@ -186,8 +195,10 @@ async def compute_indicator(
 
     if indicator == "dem":
         assets = await _find_core_assets(bbox, need_dem=True, need_landcover=False)
-        stats = compute_raster_stats(assets["dem"], {"type": "Feature", "properties": {},
-                                                     "geometry": geojson_geom})
+        stats = compute_raster_stats(
+            assets["dem"], {"type": "Feature", "properties": {}, "geometry": geojson_geom},
+            resolution_m=chosen,
+        )
         return interpret_terrain(stats)
 
     if indicator == "landcover":
@@ -200,6 +211,7 @@ async def compute_indicator(
             assets["landcover"],
             {"type": "Feature", "properties": {}, "geometry": geojson_geom},
             year=used_year,
+            resolution_m=chosen,
         )
 
     if indicator == "landcover_history":

@@ -711,7 +711,9 @@ def _iter_tile_windows(src, bbox: list[float]):
     return window
 
 
-def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
+def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict, *,
+                             resolution_m: Optional[float] = None,
+                             resampling: Resampling = Resampling.nearest):
     """Yield masked, in-AOI arrays for every source tile, skipping empty overlaps.
 
     A study area can straddle many source tiles, so the statistics are accumulated
@@ -719,11 +721,68 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict):
     memory by the number of tiles. ``crop=True`` already restricts the read to the
     part of each tile inside the AOI; the explicit window check only avoids
     opening tiles that cannot contribute.
+
+    When ``resolution_m`` is given, the source is read through the COG overview
+    closest to (and not finer than) that resolution, then warped to the target
+    grid. The Esri 10 m land-cover COG is 66,794 x 88,550 with overviews at
+    20/40/80/160/320 m; a 16,000 km2 AOI at 250 m reads ~625k overview pixels
+    instead of ~160M native pixels. Without this, a large land-cover read
+    exhausts the worker and retries.
     """
     geometry = geojson["geometry"]
     bbox = _feature_bbox(geojson)
+    target_crs = None
+    target_transform = None
+    target_width = target_height = 0
+    geom_for_read = None
+    if resolution_m:
+        from rasterio.vrt import WarpedVRT
+        from rasterio.warp import transform_bounds, transform_geom
+
+        target_crs = _target_crs(bbox)
+        west, south, east, north = transform_bounds("EPSG:4326", target_crs, *bbox)
+        target_width = max(1, int(math.ceil((east - west) / resolution_m)))
+        target_height = max(1, int(math.ceil((north - south) / resolution_m)))
+        target_transform = transform_from_bounds(
+            west, south, east, north, target_width, target_height)
+        geom_for_read = transform_geom(
+            CRS.from_epsg(4326), target_crs, mapping(shape(geometry)))
+
     for href in asset_hrefs:
-        with rio.open(planetary_computer.sign(href)) as src:
+        signed = planetary_computer.sign(href)
+        if resolution_m and target_crs is not None:
+            try:
+                with rio.open(signed) as probe:
+                    overviews = probe.overviews(1)
+                    native_res = float(probe.res[0]) if probe.res else 0.0
+                level = 0
+                if overviews and native_res:
+                    # The finest overview no coarser than the target: the 160 m
+                    # overview for a 250 m read, not the 320 m one.
+                    candidates = [
+                        index for index, factor in enumerate(overviews)
+                        if native_res * factor <= resolution_m
+                    ]
+                    if candidates:
+                        level = candidates[-1]
+                with rio.open(signed, OVERVIEW_LEVEL=level) as src:
+                    with WarpedVRT(src, crs=target_crs, transform=target_transform,
+                                   width=target_width, height=target_height,
+                                   resampling=resampling, nodata=src.nodata) as vrt:
+                        clipped, _tb = mask(vrt, [geom_for_read], crop=True,
+                                            nodata=src.nodata)
+                        if clipped.size == 0:
+                            continue
+                        yield vrt, clipped
+                continue
+            except Exception as exc:  # noqa: BLE001 - empty intersection for this tile
+                if ("Intersection is empty" in str(exc)
+                        or type(exc).__name__ == "WindowError"
+                        or "do not overlap" in str(exc)):
+                    continue
+                raise
+
+        with rio.open(signed) as src:
             win = _window_for_bbox(src, bbox)
             if win is None:
                 continue
@@ -789,7 +848,8 @@ def _histogram_percentile(hist: np.ndarray, q: float) -> float:
     return _DEM_HIST_MAX_M
 
 
-def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, float]:
+def compute_raster_stats(asset_hrefs: list[str], geojson: dict, *,
+                         resolution_m: Optional[float] = None) -> Dict[str, float]:
     """Accumulate DEM statistics on the equal-area grid across every tile."""
     total = 0.0
     total_sq = 0.0
@@ -799,7 +859,9 @@ def compute_raster_stats(asset_hrefs: list[str], geojson: dict) -> Dict[str, flo
     sampled = 0
     hist = np.zeros(_DEM_HIST_BINS, dtype=np.int64)
     try:
-        for src, clipped in _equal_area_masked_tiles(asset_hrefs, geojson):
+        for src, clipped in _equal_area_masked_tiles(
+                asset_hrefs, geojson,
+                resolution_m=resolution_m, resampling=Resampling.bilinear):
             sampled += int(clipped[0].size)
             arr = clipped[0].astype("float64")
             valid = arr[arr != src.nodata] if src.nodata is not None else arr
@@ -887,13 +949,17 @@ def interpret_terrain(dem: Dict[str, float]) -> Dict[str, Any]:
 
 
 def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
-                                 year: Optional[int] = None) -> Dict[str, Any]:
+                                 year: Optional[int] = None,
+                                 resolution_m: Optional[float] = None) -> Dict[str, Any]:
     """Accumulate land-cover class counts on the equal-area grid for one year."""
     counts: Counter = Counter()
     sampled = 0
     for href in asset_hrefs:
         try:
-            tiles = list(_equal_area_masked_tiles([href], geojson))
+            tiles = list(_equal_area_masked_tiles(
+                [href], geojson,
+                resolution_m=resolution_m, resampling=Resampling.nearest,
+            ))
         except Exception as exc:  # noqa: BLE001 - one bad tile must not poison the rest
             if "Intersection is empty" in str(exc) or type(exc).__name__ == "WindowError" or "do not overlap" in str(exc):
                 logger.warning("landcover tile skipped (no window intersection): %s", type(exc).__name__)
@@ -902,12 +968,15 @@ def compute_landcover_percentages(asset_hrefs: list[str], geojson: dict, *,
             return {"error": "landcover_unavailable"}
         for src, clipped in tiles:
             sampled += int(clipped[0].size)
-            arr = clipped[0].astype("float64")
+            arr = clipped[0]
             valid = arr[arr != src.nodata] if src.nodata is not None else arr
-            valid = valid[np.isfinite(valid)]
             if valid.size == 0:
                 continue
-            counts.update(valid.astype(int).flatten().tolist())
+            # Class codes are small non-negative integers. np.bincount avoids
+            # the float64 copy and the 160M-element Python list that made a
+            # 10 m land-cover read of a large AOI exhaust memory and retry.
+            histogram = np.bincount(valid.ravel(), minlength=256)
+            counts.update({int(k): int(v) for k, v in enumerate(histogram) if v})
 
     total = sum(counts.values())
     if total == 0:
