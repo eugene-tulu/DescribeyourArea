@@ -23,7 +23,7 @@ from contract import Project, ProjectCreate, ProjectSummary
 
 
 def _dir() -> Path:
-    return Path(os.environ.get("PROJECTS_DIR", "/app/projects"))
+    return Path(os.environ.get("PROJECTS_DIR", "/app/.usage/projects"))
 
 
 def _path(project_id: str) -> Path:
