@@ -3475,6 +3475,9 @@ export default function Home() {
                         ))}
                       </select>
                     )}
+                    <span className="text-[0.75rem] text-ink-3">
+                      Rainfall and the vegetation series are charts below.
+                    </span>
                   </div>
                 )}
                 <div className="relative">

@@ -31,6 +31,27 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## Unreleased — Map tiles and dMRV field data
+
+### The map renders the requested datasets, not raw COG hrefs
+
+The overlay used to hand Leaflet signed COG hrefs; `TileLayer` requested
+`...tif/{z}/{x}/{y}.png`, which cannot render. The map now uses a self-hosted
+`rio-tiler` endpoint (`GET /tiles/{cache_key}/{indicator}/{z}/{x}/{y}.png`) that
+reads the COG overview matching each zoom, with `Cache-Control: public,
+max-age=86400`, so pans and zooms are cached. DEM, land cover, NDVI
+(worker-written median-composite COG) and per-year land-cover history are
+selectable layers with a legend and a year selector.
+
+- `main.py`: `/tiles/...` endpoint; `_render_tile_png`; NDVI composite COG written
+  by `_load_and_summarize_ndvi`; `tile_path` in the artefact.
+- `client/components/MapComponent.tsx`: `tileLayers` prop (XYZ URLs).
+- `client/app/page.tsx`: layer control, `tileLayers` memo, dynamic legend.
+- `requirements.txt`: `rio-tiler`, `morecantile`.
+- Evidence: live Mara AOI (`cache_key 2e430ec...`) returns 200 `image/png` tiles
+  at z=10 and z=12 for DEM, land cover, NDVI and 2017–2023 history; an invalid
+  key returns 422.
+
 ## Unreleased — The CHIRPS cache that was checked but never written
 
 ### /generate-context honours the rainfall product
