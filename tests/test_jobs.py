@@ -497,3 +497,45 @@ class LandcoverYearRangeTests(unittest.TestCase):
     def test_a_wide_window_clamps_to_the_published_extent(self):
         from indicators import landcover_year_range
         self.assertEqual(landcover_year_range("2010-01-01", "2026-11-11"), (2017, 2023))
+
+
+class ArtefactReadinessTests(unittest.TestCase):
+    """A failed artefact must not be reported as ready.
+
+    The Mara journey exposed this: NDVI's stored artefact had status
+    "unavailable", but submit/status_for reported it ready because the
+    window-less payload "covered"; /context then correctly omitted it, so the
+    reader saw "ready" and "not yet available" at the same time.
+    """
+
+    def setUp(self):
+        self.previous = os.environ.get("RAINFALL_CACHE_DIR")
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["RAINFALL_CACHE_DIR"] = self.tmp.name
+
+    def tearDown(self):
+        if self.previous is None:
+            os.environ.pop("RAINFALL_CACHE_DIR", None)
+        else:
+            os.environ["RAINFALL_CACHE_DIR"] = self.previous
+        self.tmp.cleanup()
+
+    def test_a_failed_artefact_is_not_ready(self):
+        key = "a" * 32
+        jobs.write_artefact(key, "ndvi", {
+            "status": "unavailable", "indicator": "ndvi",
+        })
+        self.assertFalse(jobs._artefact_ready(key, "ndvi", "2025-11-13", "2026-11-12"))
+        status = jobs.status_for(key, indicator="ndvi",
+                                 start="2025-11-13", end="2026-11-12")
+        self.assertNotEqual(status["state"], "ready")
+
+    def test_an_ok_artefact_is_ready(self):
+        key = "b" * 32
+        jobs.write_artefact(key, "ndvi", {
+            "status": "ok", "indicator": "ndvi",
+        })
+        self.assertTrue(jobs._artefact_ready(key, "ndvi", "2025-11-13", "2026-11-12"))
+        status = jobs.status_for(key, indicator="ndvi",
+                                 start="2025-11-13", end="2026-11-12")
+        self.assertEqual(status["state"], "ready")

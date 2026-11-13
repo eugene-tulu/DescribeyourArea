@@ -349,9 +349,17 @@ def artefact_covers(payload: Optional[dict], indicator: str,
 
 def _artefact_ready(key: str, indicator: str, start: Optional[str] = None,
                     end: Optional[str] = None, year: Optional[int] = None) -> bool:
-    """Whether an artefact for this area covers the requested window/year."""
-    return artefact_covers(read_artefact(key, indicator), indicator,
-                           start, end, year)
+    """Whether an artefact for this area covers the requested window/year.
+
+    A failed artefact (`status: unavailable`) is not ready even when its window
+    is window-less and therefore "covers": submit used to report it ready while
+    /context correctly rejected it, so the reader was told NDVI was already
+    computed and then shown it missing.
+    """
+    artefact = read_artefact(key, indicator)
+    if not artefact or artefact.get("status") not in ("ok", "ready"):
+        return False
+    return artefact_covers(artefact, indicator, start, end, year)
 
 
 def _job_product(key: str) -> Optional[str]:
