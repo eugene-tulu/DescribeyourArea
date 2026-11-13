@@ -3511,18 +3511,18 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
         hrefs = [tile_path]
     else:
         asset_key = f"{cache_key}:{indicator}:{year}"
-    hrefs = _TILE_ASSET_CACHE.get(asset_key)
-    if hrefs is None:
-        assets = await _find_core_assets(
-            bbox,
-            need_dem=indicator == "dem",
-            need_landcover=indicator in ("landcover", "landcover_history"),
-            landcover_year=year,
-        )
-        hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
-        if len(_TILE_ASSET_CACHE) > 100:
-            _TILE_ASSET_CACHE.clear()
-        _TILE_ASSET_CACHE[asset_key] = hrefs
+        hrefs = _TILE_ASSET_CACHE.get(asset_key)
+        if hrefs is None:
+            assets = await _find_core_assets(
+                bbox,
+                need_dem=indicator == "dem",
+                need_landcover=indicator in ("landcover", "landcover_history"),
+                landcover_year=year,
+            )
+            hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
+            if len(_TILE_ASSET_CACHE) > 100:
+                _TILE_ASSET_CACHE.clear()
+            _TILE_ASSET_CACHE[asset_key] = hrefs
 
     png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
     return Response(
