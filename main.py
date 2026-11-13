@@ -2422,6 +2422,14 @@ def _caveats(aoi, dem, landcover, ndvi, rain):
                 f"Rainfall: {len(module['suspect_months'])} month(s) reported near-zero "
                 "totals and are worth review."
             )
+    if isinstance(dem, dict):
+        zero_fraction = dem.get("zero_fraction")
+        if isinstance(zero_fraction, (int, float)) and zero_fraction > 0.05:
+            notes.append(
+                f"Elevation: {zero_fraction * 100:.0f}% of the source pixels were "
+                "0 m void/water and were excluded; the terrain is based on the "
+                "remaining land."
+            )
     if isinstance(rain, dict) and rain.get("status") == "ok":
         series = rain.get("series") or []
         window = rain.get("window") or {}
