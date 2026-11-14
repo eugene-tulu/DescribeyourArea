@@ -48,9 +48,12 @@ selectable layers with a legend and a year selector.
 - `client/components/MapComponent.tsx`: `tileLayers` prop (XYZ URLs).
 - `client/app/page.tsx`: layer control, `tileLayers` memo, dynamic legend.
 - `requirements.txt`: `rio-tiler`, `morecantile`.
+- Sync reads: `/tiles/bbox/{indicator}/{z}/{x}/{y}.png?bbox=...` uses the AOI
+  bounding box when there is no artefact; NDVI remains offline-only because the
+  composite is not persisted.
 - Evidence: live Mara AOI (`cache_key 2e430ec...`) returns 200 `image/png` tiles
-  at z=10 and z=12 for DEM, land cover, NDVI and 2017–2023 history; an invalid
-  key returns 422.
+  at z=10 and z=12 for DEM, land cover, NDVI and 2017–2023 history; the bbox
+  route returns the same DEM/land-cover/history tiles; an invalid key returns 422.
 
 ## Unreleased — The CHIRPS cache that was checked but never written
 
