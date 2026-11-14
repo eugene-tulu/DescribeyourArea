@@ -51,6 +51,7 @@ from contract import (  # noqa: F401
     Project,
     ProjectCreate,
     ProjectSummary,
+    ProjectRecords,
     IngestResponse,
 )
 from sensors import (  # noqa: F401 - NDVI_MIN_PLAUSIBLE and SCL_REJECTED are re-exported
@@ -2549,6 +2550,15 @@ def list_projects() -> list[ProjectSummary]:
 @app.get("/v1/projects/{project_id}", response_model=Project)
 def get_project(project_id: str) -> Project:
     project = projects.get(project_id)
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return project
+
+
+@app.post("/v1/projects/{project_id}/records", response_model=Project)
+def save_project_records(project_id: str, payload: ProjectRecords) -> Project:
+    """Save the enriched observations and the AOI snapshot with the project."""
+    project = projects.save_records(project_id, payload.records, payload.snapshot)
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return project

@@ -19,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import rainfall
+
 from contract import Project, ProjectCreate, ProjectSummary
 
 
@@ -52,12 +54,26 @@ def _save(project: Project) -> None:
         raise
 
 
+def _geometry(geojson: dict) -> Optional[dict]:
+    if not isinstance(geojson, dict):
+        return None
+    if geojson.get("type") == "FeatureCollection":
+        features = geojson.get("features") or []
+        return features[0].get("geometry") if features else None
+    if geojson.get("type") == "Feature":
+        return geojson.get("geometry")
+    return geojson
+
+
 def create(data: ProjectCreate) -> Project:
     now = _now()
+    geometry = _geometry(data.geojson)
+    cache_key = rainfall.geometry_hash(geometry) if geometry else None
     project = Project(
         id=secrets.token_hex(8),
         created_at=now,
         updated_at=now,
+        cache_key=cache_key,
         **data.model_dump(),
     )
     _save(project)
@@ -69,6 +85,20 @@ def get(project_id: str) -> Optional[Project]:
     if not path.exists():
         return None
     return Project.model_validate_json(path.read_text(encoding="utf-8"))
+
+
+def save_records(project_id: str, records: list, snapshot=None) -> Optional[Project]:
+    project = get(project_id)
+    if not project:
+        return None
+    updated = project.model_copy(update={
+        "records": [record.model_dump() if hasattr(record, "model_dump") else record
+                    for record in records],
+        "snapshot": snapshot,
+        "updated_at": _now(),
+    })
+    _save(updated)
+    return updated
 
 
 def list_projects() -> list[ProjectSummary]:

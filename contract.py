@@ -280,6 +280,13 @@ class EnrichResponse(BaseModel):
     point_samples: int
 
 
+class ProjectRecords(BaseModel):
+    """The enriched observations and the AOI summary saved with a project."""
+
+    records: List[EnrichedRecord] = Field(default_factory=list)
+    snapshot: Optional[Dict[str, Any]] = None
+
+
 class Observation(BaseModel):
     """The connector-independent shape every source is normalised into."""
 
@@ -319,6 +326,9 @@ class Project(ProjectCreate):
     id: str
     created_at: str
     updated_at: str
+    cache_key: Optional[str] = None
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    snapshot: Optional[Dict[str, Any]] = None
 
 
 class ProjectSummary(BaseModel):

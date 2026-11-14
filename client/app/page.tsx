@@ -1643,6 +1643,7 @@ export default function Home() {
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it and the map can request tiles.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
   // A synchronous read has no artefact, but the worker wrote its NDVI composite
   // under the geometry hash; this key addresses that tile route.
   const syncKey = (analysisSummary?.ndvi as { sync_key?: string } | null | undefined)?.sync_key
@@ -3004,6 +3005,44 @@ export default function Home() {
   // Keep the poller's view of the analysis current.
   analyzeRef.current = handleAnalyze;
 
+  // Save the current reading as a project: the AOI, window and datasets are the
+  // configuration; the enriched rows and the summary are the snapshot. The
+  // dashboard route /d/<id> renders that without re-running the analysis.
+  const handleSaveDashboard = async () => {
+    if (!analysisSummary) return;
+    const geojson = currentGeojson();
+    if (!geojson) return;
+    try {
+      const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+      const response = await fetch(`${backendUrl}/v1/projects`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: `Dashboard · ${new Date().toISOString().slice(0, 10)}`,
+          type: 'conservancy',
+          geojson,
+          bbox_area_km2: analysisSummary.analysis?.bbox_area_km2 ?? null,
+          window_start: startDate,
+          window_end: endDate,
+          datasets: selectedDatasets,
+          connectors: [],
+        }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const project = await response.json() as { id: string };
+      const save = await fetch(`${backendUrl}/v1/projects/${project.id}/records`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ records: fieldRows, snapshot: analysisSummary }),
+      });
+      if (!save.ok) throw new Error(await save.text());
+      setProjectId(project.id);
+      trackEvent('dashboard_saved', { project_id: project.id });
+    } catch (error) {
+      window.alert(`Could not save the dashboard: ${error instanceof Error ? error.message : 'unknown error'}`);
+    }
+  };
+
   const rainfallSubmission = activeCacheKey ? submission[activeCacheKey] : undefined;
   const rainfallPending = rainfallSubmission?.state === 'queued'
     || rainfallSubmission?.state === 'pending'
@@ -3625,6 +3664,17 @@ export default function Home() {
                         onRemove={activeCacheKey ? () => void forgetThisArea() : undefined}
                         vegetationPending={!!vegetationSeries && vegetationSeries.status !== 'ok'}
                       />
+                      <Button
+                        onClick={() => void handleSaveDashboard()}
+                        className="btn btn-ghost h-9 px-3 text-[0.8125rem]"
+                      >
+                        Save dashboard
+                      </Button>
+                      {projectId && (
+                        <a href={`/d/${projectId}`} className="btn btn-primary h-9 px-3 text-[0.8125rem]">
+                          Open dashboard
+                        </a>
+                      )}
                     </div>
                   )}
                   {offline && (
