@@ -3484,6 +3484,46 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -
     return _TILE_TRANSPARENT_PNG
 
 
+@app.get("/tiles/bbox/{indicator}/{z}/{x}/{y}.png")
+async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
+                        bbox: str, year: Optional[int] = None):
+    """Tiles for a synchronous read, addressed by its bounding box.
+
+    The sync path computes on the fly and writes no artefact, so there is no
+    cache key to look up. The bbox is enough to find the source COGs. NDVI is
+    not available on this route because the composite is not persisted; the
+    offline path writes it and uses the cache-key route.
+    """
+    if indicator not in ("dem", "landcover", "landcover_history"):
+        raise HTTPException(status_code=404, detail="no raster layer for this indicator")
+    try:
+        bounds = [float(value) for value in bbox.split(",")]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
+    if len(bounds) != 4:
+        raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
+
+    asset_key = f"bbox:{bbox}:{indicator}:{year}"
+    hrefs = _TILE_ASSET_CACHE.get(asset_key)
+    if hrefs is None:
+        assets = await _find_core_assets(
+            bounds,
+            need_dem=indicator == "dem",
+            need_landcover=indicator in ("landcover", "landcover_history"),
+            landcover_year=year,
+        )
+        hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
+        if len(_TILE_ASSET_CACHE) > 100:
+            _TILE_ASSET_CACHE.clear()
+        _TILE_ASSET_CACHE[asset_key] = hrefs
+    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
 @app.get("/tiles/{cache_key}/{indicator}/{z}/{x}/{y}.png")
 async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
                    year: Optional[int] = None):

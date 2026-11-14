@@ -1711,32 +1711,50 @@ export default function Home() {
   const [historyYear, setHistoryYear] = useState<number | null>(null);
   useEffect(() => {
     const years = analysisSummary?.landcover_history?.series ?? [];
-    if (years.length && historyYear == null) setHistoryYear(years.at(-1)?.year ?? null);
-  }, [analysisSummary?.landcover_history, historyYear]);
+    if (years.length && historyYear == null) {
+      setHistoryYear(years.at(-1)?.year ?? null);
+    } else if (historyYear == null && analysisSummary?.landcover?.year != null) {
+      // A synchronous read has no history artefact, but the land-cover year is
+      // a valid year to request from the bbox tile route.
+      setHistoryYear(analysisSummary.landcover.year);
+    }
+  }, [analysisSummary?.landcover_history, analysisSummary?.landcover?.year, historyYear]);
 
-  // One XYZ tile URL per requested layer. The backend renders each tile from
-  // the COG overview that matches the zoom, so panning/zooming is cheap.
+  // One XYZ tile URL per requested layer. Offline readings use the cache-key
+  // route; synchronous readings have no artefact, so they use the bbox route.
   const tileLayers = useMemo(() => {
-    if (!activeCacheKey || !analysisSummary || !overlayVisible) return undefined;
+    if (!analysisSummary || !overlayVisible) return undefined;
+    const bbox = analysisSummary.analysis?.bbox;
+    const canTile = !!activeCacheKey || (Array.isArray(bbox) && bbox.length === 4);
+    if (!canTile) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
-    const base = `${backendUrl}/tiles/${activeCacheKey}`;
+    const base = activeCacheKey ? `${backendUrl}/tiles/${activeCacheKey}` : `${backendUrl}/tiles/bbox`;
+    const bboxQuery = activeCacheKey || !bbox
+      ? ''
+      : `bbox=${bbox.map((value) => value.toFixed(5)).join(',')}`;
+    const tileUrl = (indicator: string, year?: number) => {
+      const query: string[] = [];
+      if (bboxQuery) query.push(bboxQuery);
+      if (year) query.push(`year=${year}`);
+      return `${base}/${indicator}/{z}/{x}/{y}.png${query.length ? `${bboxQuery ? '&' : '?'}${query.join('&')}` : ''}`;
+    };
     const layers: Array<{
       id: string; url: string; attribution: string;
       opacity?: number; zIndex?: number;
     }> = [];
     if (mapLayers.dem) {
-      layers.push({ id: 'dem', url: `${base}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
+      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
     }
     if (mapLayers.landcover) {
-      layers.push({ id: 'landcover', url: `${base}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
+      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
     }
-    if (mapLayers.ndvi) {
-      layers.push({ id: 'ndvi', url: `${base}/ndvi/{z}/{x}/{y}.png`, attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+    if (mapLayers.ndvi && activeCacheKey) {
+      layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
     }
     if (mapLayers.landcover_history && historyYear) {
       layers.push({
         id: 'lch',
-        url: `${base}/landcover_history/{z}/{x}/{y}.png?year=${historyYear}`,
+        url: tileUrl('landcover_history', historyYear),
         attribution: `Land cover ${historyYear}`,
         opacity: 0.65,
         zIndex: 430,
@@ -3455,6 +3473,10 @@ export default function Home() {
                         <input
                           type="checkbox"
                           checked={mapLayers[layer.id]}
+                          disabled={layer.id === 'ndvi' && !activeCacheKey}
+                          title={layer.id === 'ndvi' && !activeCacheKey
+                            ? 'NDVI map layer is available for offline readings'
+                            : undefined}
                           onChange={(event) => setMapLayers((previous) => ({
                             ...previous,
                             [layer.id]: event.target.checked,
