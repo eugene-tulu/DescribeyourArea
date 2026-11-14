@@ -141,6 +141,8 @@ class VegetationResult(BaseModel):
     window: Optional[Dict[str, Optional[str]]] = None
     scene_ids: List[str] = Field(default_factory=list)
     scene_dates: List[str] = Field(default_factory=list)
+    tile_path: Optional[str] = None
+    sync_key: Optional[str] = None
     warning: Optional[str] = None
     error: Optional[str] = None
     evidence: ModuleEvidence
