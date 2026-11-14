@@ -3535,8 +3535,10 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
     rio-tiler reads the COG overview that matches the zoom, so a 16,000 km2 AOI
     pans and zooms without re-reading 10 m native pixels. The signed URL is
     created per request, so an expired token is never served to the browser.
-    When an AOI geometry is given, the alpha channel is zeroed outside the
-    polygon: the tile is a true clip, not a dim mask.
+
+    Clipping is the rio-tiler pattern: rasterize the AOI onto the tile grid, set
+    it as the image mask, and render with add_alpha=True. No Pillow, no full
+    float64 copy. The mask also keeps nodata transparent.
     """
     from rio_tiler.io import COGReader
 
@@ -3548,10 +3550,7 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                 image = cog.tile(x, y, z)
                 if image.array.size == 0:
                     continue
-                png = image.render(colormap=colormap, add_alpha=True)
                 if geometry:
-                    from PIL import Image
-                    import io
                     from rasterio.features import geometry_mask
                     from rasterio.transform import from_bounds as _from_bounds
                     from rasterio.warp import transform_geom as _transform_geom
@@ -3559,16 +3558,11 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                     transform = _from_bounds(*image.bounds, 256, 256)
                     inside = geometry_mask([projected], out_shape=(256, 256),
                                            transform=transform, invert=True)
-                    rgba = Image.open(io.BytesIO(png)).convert("RGBA")
-                    nodata = (image.array.mask[0]
-                              if image.array.mask is not np.ma.nomask
-                              else np.zeros((256, 256), dtype=bool))
-                    alpha = Image.fromarray(((inside & ~nodata) * 255).astype("uint8"))
-                    rgba.putalpha(alpha)
-                    buffer = io.BytesIO()
-                    rgba.save(buffer, format="PNG")
-                    return buffer.getvalue()
-                return png
+                    outside = ~inside
+                    if image.array.mask is not np.ma.nomask:
+                        outside = outside | image.array.mask[0]
+                    image.array.mask = np.broadcast_to(outside, image.array.shape)
+                return image.render(colormap=colormap, add_alpha=True)
         except Exception:
             continue
     return _TILE_TRANSPARENT_PNG
