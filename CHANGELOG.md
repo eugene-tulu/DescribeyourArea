@@ -31,6 +31,24 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## Unreleased — Saved project dashboard
+
+### `/d/<id>` renders a saved reading
+
+Projects now persist the AOI, window, datasets, cache key, enriched records and a
+summary snapshot. `client/app/d/[id]/page.tsx` renders a dashboard: a KPI strip,
+the AOI map with observation points and raster layers, the rainfall/vegetation
+charts, the observation table, CSV/GeoJSON export, and print. The results pane
+can save the current reading as a project with one action.
+
+- `contract.py`: `Project.cache_key/records/snapshot`, `ProjectRecords`.
+- `projects.py`: file-backed project store with cache key and record/snapshot
+  persistence.
+- `main.py`: `POST /v1/projects/{id}/records`.
+- `client/app/page.tsx`: “Save dashboard” / “Open dashboard”.
+- Evidence: Greater Mara project `90cc189147f16d63` returns 200 with 2 records
+  and the AOI snapshot; `/d/90cc189147f16d63` returns 200.
+
 ## Unreleased — Map tiles and dMRV field data
 
 ### The map renders the requested datasets, not raw COG hrefs
