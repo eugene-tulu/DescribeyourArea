@@ -39,3 +39,6 @@ requests==2.34.2
 # Cloud-native raster tiling: render XYZ tiles from COGs with overviews.
 rio-tiler>=7.0,<8.0
 morecantile>=5.0,<6.0
+
+# Tile alpha compositing for AOI-clipped COG tiles.
+pillow>=10.0
