@@ -3517,12 +3517,26 @@ _LULC_RGBA = {
 }
 
 
-def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -> bytes:
+def _geometry_of(geojson: Any) -> Optional[dict]:
+    if not isinstance(geojson, dict):
+        return None
+    if geojson.get("type") == "FeatureCollection":
+        features = geojson.get("features") or []
+        return features[0].get("geometry") if features else None
+    if geojson.get("type") == "Feature":
+        return geojson.get("geometry")
+    return geojson
+
+
+def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
+                    geometry: Optional[dict] = None) -> bytes:
     """Render one XYZ tile from the first source COG that covers it.
 
     rio-tiler reads the COG overview that matches the zoom, so a 16,000 km2 AOI
     pans and zooms without re-reading 10 m native pixels. The signed URL is
     created per request, so an expired token is never served to the browser.
+    When an AOI geometry is given, the alpha channel is zeroed outside the
+    polygon: the tile is a true clip, not a dim mask.
     """
     from rio_tiler.io import COGReader
 
@@ -3534,6 +3548,15 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -
                 image = cog.tile(x, y, z)
                 if image.array.size == 0:
                     continue
+                if geometry:
+                    from rasterio.features import geometry_mask
+                    from rasterio.transform import from_bounds as _from_bounds
+                    from rasterio.warp import transform_geom as _transform_geom
+                    projected = _transform_geom(CRS.from_epsg(4326), "EPSG:3857", geometry)
+                    transform = _from_bounds(*image.bounds, 256, 256)
+                    inside = geometry_mask([projected], out_shape=(256, 256),
+                                           transform=transform, invert=True)
+                    image.array[3][~inside] = 0
                 return image.render(colormap=colormap, add_alpha=True)
         except Exception:
             continue
@@ -3542,7 +3565,8 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int) -
 
 @app.get("/tiles/bbox/{indicator}/{z}/{x}/{y}.png")
 async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
-                        bbox: str, year: Optional[int] = None):
+                        bbox: str, year: Optional[int] = None,
+                        geom: Optional[str] = None):
     """Tiles for a synchronous read, addressed by its bounding box.
 
     The sync path computes on the fly and writes no artefact, so there is no
@@ -3558,6 +3582,7 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
     if len(bounds) != 4:
         raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
+    geometry = _geometry_of(json.loads(geom)) if geom else None
 
     asset_key = f"bbox:{bbox}:{indicator}:{year}"
     hrefs = _TILE_ASSET_CACHE.get(asset_key)
@@ -3572,7 +3597,7 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         if len(_TILE_ASSET_CACHE) > 100:
             _TILE_ASSET_CACHE.clear()
         _TILE_ASSET_CACHE[asset_key] = hrefs
-    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
+    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
     return Response(
         content=png,
         media_type="image/png",
@@ -3581,7 +3606,8 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
 
 
 @app.get("/tiles/sync/{sync_key}/ndvi/{z}/{x}/{y}.png")
-async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int):
+async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int,
+                             geom: Optional[str] = None):
     """NDVI tiles for a synchronous read.
 
     The sync path writes the median composite to a tiled COG keyed by the
@@ -3593,7 +3619,8 @@ async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int):
     path = f"/app/.rainfall-cache/tiles/sync/{sync_key}/ndvi.tif"
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="NDVI raster not computed for this area")
-    png = await asyncio.to_thread(_render_tile_png, [path], "ndvi", z, x, y)
+    geometry = _geometry_of(json.loads(geom)) if geom else None
+    png = await asyncio.to_thread(_render_tile_png, [path], "ndvi", z, x, y, geometry)
     return Response(
         content=png,
         media_type="image/png",
@@ -3616,6 +3643,7 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
         raise HTTPException(status_code=404, detail="no raster layer for this indicator")
     artefact = jobs.read_artefact(cache_key, indicator)
     bbox = (artefact or {}).get("bbox")
+    geometry = (artefact or {}).get("geometry")
     if not bbox:
         raise HTTPException(status_code=404, detail="no area for this cache key")
 
@@ -3641,7 +3669,7 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
                 _TILE_ASSET_CACHE.clear()
             _TILE_ASSET_CACHE[asset_key] = hrefs
 
-    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
+    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
     return Response(
         content=png,
         media_type="image/png",

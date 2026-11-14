@@ -645,6 +645,10 @@ async def _compute_job(
                 "pixels_analysed": indicators.pixels_for(area, applied),
                 "bbox": bbox,
             })
+            # Keep the AOI geometry with the artefact so the tile endpoint can
+            # clip the raster to the polygon (transparent outside) without the
+            # browser re-sending it.
+            payload["geometry"] = geometry
             write_artefact(key, indicator, payload)
         record = complete(key, payload, indicator)
         if indicator == "rainfall":

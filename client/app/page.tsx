@@ -1728,58 +1728,7 @@ export default function Home() {
     }
   }, [analysisSummary?.landcover_history, analysisSummary?.landcover?.year, historyYear]);
 
-  // One XYZ tile URL per requested layer. Offline readings use the cache-key
-  // route; synchronous readings have no artefact, so they use the bbox route.
-  const tileLayers = useMemo(() => {
-    if (!analysisSummary || !overlayVisible) return undefined;
-    const bbox = analysisSummary.analysis?.bbox;
-    const canTile = !!activeCacheKey || (Array.isArray(bbox) && bbox.length === 4);
-    if (!canTile) return undefined;
-    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
-    const base = activeCacheKey ? `${backendUrl}/tiles/${activeCacheKey}` : `${backendUrl}/tiles/bbox`;
-    const bboxQuery = activeCacheKey || !bbox
-      ? ''
-      : `bbox=${bbox.map((value) => value.toFixed(5)).join(',')}`;
-    const tileUrl = (indicator: string, year?: number) => {
-      const query: string[] = [];
-      if (bboxQuery) query.push(bboxQuery);
-      if (year) query.push(`year=${year}`);
-      return `${base}/${indicator}/{z}/{x}/{y}.png${query.length ? `${bboxQuery ? '&' : '?'}${query.join('&')}` : ''}`;
-    };
-    const layers: Array<{
-      id: string; url: string; attribution: string;
-      opacity?: number; zIndex?: number;
-    }> = [];
-    if (mapLayers.dem) {
-      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
-    }
-    if (mapLayers.landcover) {
-      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
-    }
-    if (mapLayers.ndvi) {
-      if (activeCacheKey) {
-        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
-      } else if (syncKey) {
-        layers.push({
-          id: 'ndvi',
-          url: `${backendUrl}/tiles/sync/${syncKey}/ndvi/{z}/{x}/{y}.png`,
-          attribution: 'NDVI',
-          opacity: 0.65,
-          zIndex: 420,
-        });
-      }
-    }
-    if (mapLayers.landcover_history && historyYear) {
-      layers.push({
-        id: 'lch',
-        url: tileUrl('landcover_history', historyYear),
-        attribution: `Land cover ${historyYear}`,
-        opacity: 0.65,
-        zIndex: 430,
-      });
-    }
-    return layers;
-  }, [activeCacheKey, syncKey, analysisSummary, overlayVisible, mapLayers, historyYear]);
+
   const [periodAmount, setPeriodAmount] = useState<number>(1);
   const [periodUnit, setPeriodUnit] = useState<'years' | 'months' | 'days'>('years');
   const [customEnd, setCustomEnd] = useState('');
@@ -3070,6 +3019,71 @@ export default function Home() {
   useEffect(() => {
     if (uploadedGeojson) setUploadedGeojson(uploadedGeojson);
   }, [uploadedGeojson]);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- currentGeojson closes over these three values
+  const aoiGeojson = useMemo(
+    () => currentGeojson(),
+    [uploadedGeojson, drawnFeatures, boundingBox],
+  );
+
+  // One XYZ tile URL per requested layer. Offline readings use the cache-key
+  // route; synchronous readings have no artefact, so they use the bbox route.
+  const tileLayers = useMemo(() => {
+    if (!analysisSummary || !overlayVisible) return undefined;
+    const bbox = analysisSummary.analysis?.bbox;
+    const canTile = !!activeCacheKey || (Array.isArray(bbox) && bbox.length === 4);
+    if (!canTile) return undefined;
+    const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    const base = activeCacheKey ? `${backendUrl}/tiles/${activeCacheKey}` : `${backendUrl}/tiles/bbox`;
+    const bboxQuery = activeCacheKey || !bbox
+      ? ''
+      : `bbox=${bbox.map((value) => value.toFixed(5)).join(',')}`;
+    // Synchronous reads have no artefact; the AOI geometry travels with the tile
+    // request so the server can alpha-clip to it.
+    const geomQuery = !activeCacheKey && aoiGeojson
+      ? `geom=${encodeURIComponent(JSON.stringify(aoiGeojson))}`
+      : '';
+    const tileUrl = (indicator: string, year?: number) => {
+      const query: string[] = [];
+      if (bboxQuery) query.push(bboxQuery);
+      if (geomQuery) query.push(geomQuery);
+      if (year) query.push(`year=${year}`);
+      return `${base}/${indicator}/{z}/{x}/{y}.png${query.length ? `?${query.join('&')}` : ''}`;
+    };
+    const layers: Array<{
+      id: string; url: string; attribution: string;
+      opacity?: number; zIndex?: number;
+    }> = [];
+    if (mapLayers.dem) {
+      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
+    }
+    if (mapLayers.landcover) {
+      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
+    }
+    if (mapLayers.ndvi) {
+      if (activeCacheKey) {
+        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+      } else if (syncKey) {
+        layers.push({
+          id: 'ndvi',
+          url: `${backendUrl}/tiles/sync/${syncKey}/ndvi/{z}/{x}/{y}.png${geomQuery ? `?${geomQuery}` : ''}`,
+          attribution: 'NDVI',
+          opacity: 0.65,
+          zIndex: 420,
+        });
+      }
+    }
+    if (mapLayers.landcover_history && historyYear) {
+      layers.push({
+        id: 'lch',
+        url: tileUrl('landcover_history', historyYear),
+        attribution: `Land cover ${historyYear}`,
+        opacity: 0.65,
+        zIndex: 430,
+      });
+    }
+    return layers;
+  }, [activeCacheKey, syncKey, analysisSummary, overlayVisible, mapLayers, historyYear, aoiGeojson]);
 
   return (
     <div className="min-h-screen bg-void text-ink">

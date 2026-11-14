@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { MapContainer, TileLayer, useMap, GeoJSON, CircleMarker, Tooltip } from "react-leaflet";
 import "leaflet-draw";
 import "leaflet/dist/leaflet.css";
@@ -308,40 +308,6 @@ export default function MapComponent({
   onClearOverlay,
   points,
 }: MapComponentProps) {
-  // Visual clip: when raster overlays are on, dim everything outside the AOI.
-  // A world polygon with the AOI rings as holes (fillRule evenodd) sits above
-  // the tiles but below the AOI boundary and observation points. The raster is
-  // still fetched, but the reader sees only the area they selected.
-  const maskGeojson = useMemo(() => {
-    if (!uploadedGeoJSON || !tileLayers?.length) return null;
-    const rings: number[][][] = [];
-    const collect = (geometry: GeoJSON.Geometry | null | undefined) => {
-      if (!geometry) return;
-      if (geometry.type === "Polygon") rings.push(...geometry.coordinates);
-      else if (geometry.type === "MultiPolygon") {
-        geometry.coordinates.forEach((polygon) => rings.push(...polygon));
-      }
-    };
-    if (uploadedGeoJSON.type === "FeatureCollection") {
-      const collection = uploadedGeoJSON as GeoJSON.FeatureCollection;
-      collection.features.forEach((feature) => collect(feature.geometry));
-    } else if (uploadedGeoJSON.type === "Feature") {
-      const feature = uploadedGeoJSON as GeoJSON.Feature;
-      collect(feature.geometry);
-    } else if (uploadedGeoJSON.type === "Polygon" || uploadedGeoJSON.type === "MultiPolygon") {
-      collect(uploadedGeoJSON as GeoJSON.Geometry);
-    }
-    if (rings.length === 0) return null;
-    return {
-      type: "Feature",
-      properties: {},
-      geometry: {
-        type: "Polygon",
-        coordinates: [[[-180, -85], [180, -85], [180, 85], [-180, 85], [-180, -85]], ...rings],
-      },
-    } as GeoJSON.Feature;
-  }, [uploadedGeoJSON, tileLayers]);
-
   return (
     <div className="h-[440px] w-full relative sm:h-[540px] xl:h-[620px]">
       <style>{`.leaflet-draw-toolbar a:focus-visible{outline:2px solid #b9e84b;outline-offset:2px;}`}</style>
@@ -393,12 +359,6 @@ export default function MapComponent({
           />
         )}
         {/* Secondary outline, kept visible when a second boundary is added */}
-        {maskGeojson && (
-          <GeoJSON
-            data={maskGeojson as GeoJSON.GeoJsonObject}
-            style={{ fillColor: "#0B1020", fillOpacity: 0.92, stroke: false, fillRule: "evenodd" } as L.PathOptions}
-          />
-        )}
         {secondaryGeoJSON && (
           <GeoJSON
             key={JSON.stringify(secondaryGeoJSON)}
