@@ -3548,6 +3548,7 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                 image = cog.tile(x, y, z)
                 if image.array.size == 0:
                     continue
+                has_alpha = image.array.shape[0] == 4
                 if geometry:
                     from rasterio.features import geometry_mask
                     from rasterio.transform import from_bounds as _from_bounds
@@ -3563,10 +3564,11 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                         gray = image.array[0]
                         alpha = np.full_like(gray, 255, dtype=gray.dtype)
                         image.array = np.ma.stack([gray, gray, gray, alpha], axis=0)
+                        has_alpha = True
                     image.array[3][~inside] = 0
                     if image.array.mask is not np.ma.nomask:
                         image.array[3][image.array.mask[3]] = 0
-                return image.render(colormap=colormap, add_alpha=True)
+                return image.render(colormap=colormap, add_alpha=not has_alpha)
         except Exception:
             continue
     return _TILE_TRANSPARENT_PNG
