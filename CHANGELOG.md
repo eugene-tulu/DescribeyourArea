@@ -52,6 +52,11 @@ selectable layers with a legend and a year selector.
   bounding box when there is no artefact; NDVI is served from
   `/tiles/sync/{key}/ndvi/{z}/{x}/{y}.png`, backed by the worker-written NDVI
   COG and exposed as `ndvi.sync_key` / `ndvi.tile_path`.
+- Enrichment: `/v1/enrich` samples NDVI, DEM and land cover **per observation**
+  from the COGs (signed source tiles; `ndvi_cache_key`/`ndvi_sync_key`), with
+  the AOI mean and dominant class as fallbacks.
+- Evidence: two Mara points returned distinct elevation (1,587 m / 1,929 m),
+  land cover and NDVI (0.311 / 0.330) with no flags.
 - Evidence: live Mara AOI (`cache_key 2e430ec...`) returns 200 `image/png` tiles
   at z=10 and z=12 for DEM, land cover, NDVI and 2017–2023 history; the bbox
   route returns the same DEM/land-cover/history tiles; an invalid key returns 422.
