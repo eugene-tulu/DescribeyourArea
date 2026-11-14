@@ -5,6 +5,7 @@ from connectors import (
     arcgis_query_url,
     features_to_observations,
     fetch_arcgis,
+    fetch_kobo,
 )
 
 FEATURES = [
@@ -118,3 +119,40 @@ class FetchArcGISTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class KoboTests(unittest.TestCase):
+    @patch("connectors.requests.get")
+    def test_maps_geolocation_and_filters_bbox_and_date(self, get):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"results": [
+            {"_id": 1, "_submission_time": "2026-06-15T10:00:00", "_geolocation": [-1.5, 35.4],
+             "_submitted_by": "A. Kima", "land_use": "grazing"},
+            {"_id": 2, "_submission_time": "2026-07-01T10:00:00", "_geolocation": [-1.5, 40.0],
+             "_submitted_by": "B. Siron", "land_use": "crops"},
+        ]}
+        get.return_value = response
+        observations, errors = fetch_kobo({
+            "server_url": "https://kf.kobotoolbox.org",
+            "asset_uid": "abc",
+            "bbox": [35.0, -2.0, 36.0, -1.0],
+            "start": "2026-06-01",
+            "end": "2026-06-30",
+            "type_field": "land_use",
+        })
+        self.assertEqual(errors, [])
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].lon, 35.4)
+        self.assertEqual(observations[0].lat, -1.5)
+        self.assertEqual(observations[0].observer, "A. Kima")
+        self.assertEqual(observations[0].type, "grazing")
+
+    @patch("connectors.requests.get")
+    def test_missing_geolocation_is_skipped(self, get):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"results": [{"_id": 1, "_submission_time": "2026-06-15"}]}
+        get.return_value = response
+        observations, errors = fetch_kobo({"server_url": "https://kf.kobotoolbox.org", "asset_uid": "abc"})
+        self.assertEqual(observations, [])
+        self.assertEqual(errors, [])

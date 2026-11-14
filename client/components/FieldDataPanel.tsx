@@ -51,23 +51,34 @@ export function FieldDataPanel({
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [projectType, setProjectType] = useState('conservancy');
+  const [sourceKind, setSourceKind] = useState<'arcgis' | 'kobo'>('arcgis');
   const [arcgisUrl, setArcgisUrl] = useState('');
   const [layerId, setLayerId] = useState('0');
+  const [koboServer, setKoboServer] = useState('https://kf.kobotoolbox.org');
+  const [koboAsset, setKoboAsset] = useState('');
   const [token, setToken] = useState('');
   const [dateField, setDateField] = useState('');
+  const [typeField, setTypeField] = useState('');
   const [where, setWhere] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
-  const connectArcGIS = async () => {
+  const connectSource = async () => {
     if (!aoiGeojson) {
       setConnectError('Select an area first.');
       return;
     }
-    if (!arcgisUrl.trim()) {
+    if (sourceKind === 'arcgis' && !arcgisUrl.trim()) {
       setConnectError('Enter the Feature Service URL.');
       return;
     }
+    if (sourceKind === 'kobo' && (!koboServer.trim() || !koboAsset.trim())) {
+      setConnectError('Enter the Kobo server URL and asset UID.');
+      return;
+    }
+    const connector = sourceKind === 'arcgis'
+      ? { kind: 'arcgis', name: arcgisUrl, config: { url: arcgisUrl, layer_id: layerId, token, date_field: dateField, where } }
+      : { kind: 'kobo', name: `${koboServer}/${koboAsset}`, config: { server_url: koboServer, asset_uid: koboAsset, token, date_field: dateField, type_field: typeField } };
     setConnecting(true);
     setConnectError(null);
     try {
@@ -83,11 +94,7 @@ export function FieldDataPanel({
           window_start: windowStart,
           window_end: windowEnd,
           datasets,
-          connectors: [{
-            kind: 'arcgis',
-            name: arcgisUrl,
-            config: { url: arcgisUrl, layer_id: layerId, token, date_field: dateField, where },
-          }],
+          connectors: [connector],
         }),
       });
       if (!projectResponse.ok) throw new Error(await projectResponse.text());
@@ -99,7 +106,8 @@ export function FieldDataPanel({
         errors?: string[];
       };
       if (data.errors?.length) setConnectError(data.errors.join(' · '));
-      onObservationsChange(data.observations ?? [], `ArcGIS · ${data.observations?.length ?? 0} observations`);
+      const label = sourceKind === 'arcgis' ? 'ArcGIS' : 'Kobo';
+      onObservationsChange(data.observations ?? [], `${label} · ${data.observations?.length ?? 0} observations`);
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'Could not connect.');
     } finally {
@@ -185,7 +193,7 @@ export function FieldDataPanel({
       </div>
 
       <details className="mt-4 rounded-lg border border-rule bg-surface/60 p-3">
-        <summary className="label cursor-pointer">Connect ArcGIS / Survey123</summary>
+        <summary className="label cursor-pointer">Connect a field source</summary>
         <div className="mt-3 grid gap-2 sm:grid-cols-2">
           <label className="text-[0.75rem] text-ink-3">
             Project view
@@ -201,22 +209,76 @@ export function FieldDataPanel({
             </select>
           </label>
           <label className="text-[0.75rem] text-ink-3">
-            Feature Service URL
-            <input
-              value={arcgisUrl}
-              onChange={(event) => setArcgisUrl(event.target.value)}
-              placeholder="https://services.arcgis.com/.../FeatureServer"
+            Source
+            <select
+              value={sourceKind}
+              onChange={(event) => setSourceKind(event.target.value as 'arcgis' | 'kobo')}
               className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
-            />
+            >
+              <option value="arcgis">ArcGIS / Survey123</option>
+              <option value="kobo">KoboToolbox</option>
+            </select>
           </label>
-          <label className="text-[0.75rem] text-ink-3">
-            Layer id
-            <input
-              value={layerId}
-              onChange={(event) => setLayerId(event.target.value)}
-              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
-            />
-          </label>
+          {sourceKind === 'arcgis' ? (
+            <>
+              <label className="text-[0.75rem] text-ink-3">
+                Feature Service URL
+                <input
+                  value={arcgisUrl}
+                  onChange={(event) => setArcgisUrl(event.target.value)}
+                  placeholder="https://services.arcgis.com/.../FeatureServer"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+              <label className="text-[0.75rem] text-ink-3">
+                Layer id
+                <input
+                  value={layerId}
+                  onChange={(event) => setLayerId(event.target.value)}
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+              <label className="text-[0.75rem] text-ink-3">
+                Where (optional)
+                <input
+                  value={where}
+                  onChange={(event) => setWhere(event.target.value)}
+                  placeholder="1=1"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="text-[0.75rem] text-ink-3">
+                Kobo server URL
+                <input
+                  value={koboServer}
+                  onChange={(event) => setKoboServer(event.target.value)}
+                  placeholder="https://kf.kobotoolbox.org"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+              <label className="text-[0.75rem] text-ink-3">
+                Asset UID
+                <input
+                  value={koboAsset}
+                  onChange={(event) => setKoboAsset(event.target.value)}
+                  placeholder="aBcD1234..."
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+              <label className="text-[0.75rem] text-ink-3">
+                Type field (optional)
+                <input
+                  value={typeField}
+                  onChange={(event) => setTypeField(event.target.value)}
+                  placeholder="e.g. land_use"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+            </>
+          )}
           <label className="text-[0.75rem] text-ink-3">
             Date field
             <input
@@ -235,19 +297,10 @@ export function FieldDataPanel({
               className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
             />
           </label>
-          <label className="text-[0.75rem] text-ink-3">
-            Where (optional)
-            <input
-              value={where}
-              onChange={(event) => setWhere(event.target.value)}
-              placeholder="1=1"
-              className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
-            />
-          </label>
         </div>
         <button
           type="button"
-          onClick={() => void connectArcGIS()}
+          onClick={() => void connectSource()}
           disabled={connecting}
           className="btn btn-primary mt-3 h-9 px-3 text-sm font-semibold"
         >

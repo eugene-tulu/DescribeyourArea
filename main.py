@@ -2584,18 +2584,26 @@ def ingest_project(project_id: str) -> IngestResponse:
     if not project.connectors:
         raise HTTPException(status_code=400, detail="The project has no connector.")
     connector = project.connectors[0]
-    if connector.kind != "arcgis":
-        raise HTTPException(
-            status_code=400,
-            detail=f"The {connector.kind} connector is not implemented yet.",
-        )
     try:
         bbox = _feature_bbox(project.geojson)
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Could not read the project AOI: {exc}",
         ) from exc
-    observations, errors = connectors.fetch_arcgis({**connector.config, "bbox": bbox})
+    if connector.kind == "arcgis":
+        observations, errors = connectors.fetch_arcgis({**connector.config, "bbox": bbox})
+    elif connector.kind == "kobo":
+        observations, errors = connectors.fetch_kobo({
+            **connector.config,
+            "bbox": bbox,
+            "start": project.window_start,
+            "end": project.window_end,
+        })
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"The {connector.kind} connector is not implemented yet.",
+        )
     return IngestResponse(
         project_id=project.id,
         connector=connector.name,

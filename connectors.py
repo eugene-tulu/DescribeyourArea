@@ -145,3 +145,73 @@ def fetch_arcgis(config: dict[str, Any]) -> tuple[list[Observation], list[str]]:
         config.get("id_field"),
         config.get("date_field"),
     ), []
+
+def fetch_kobo(config: dict[str, Any]) -> tuple[list[Observation], list[str]]:
+    """Fetch KoboToolbox submissions and map them to observations.
+
+    Kobo stores geopoints as `_geolocation: [lat, lon]` and the submission time
+    as `_submission_time`; the survey fields are the rest. The bbox/date filters
+    are applied here so the pipeline receives only the relevant records.
+    """
+    server = (config.get("server_url") or "").strip().rstrip("/")
+    asset = (config.get("asset_uid") or "").strip()
+    if not server or not asset:
+        return [], ["A KoboToolbox server URL and asset UID are required."]
+
+    url = f"{server}/api/v2/assets/{asset}/data/"
+    params = {"format": "json", "limit": int(config.get("limit", 2000))}
+    headers: dict[str, str] = {}
+    token = config.get("token")
+    if token:
+        headers["Authorization"] = f"Token {token}"
+
+    try:
+        response = requests.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return [], [f"KoboToolbox request failed: {exc}"]
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if results is None:
+        return [], ["The KoboToolbox response had no results."]
+
+    bbox = config.get("bbox")
+    start = (config.get("start") or "")[:10]
+    end = (config.get("end") or "")[:10]
+    type_field = config.get("type_field")
+    observations: list[Observation] = []
+    for index, submission in enumerate(results):
+        if not isinstance(submission, dict):
+            continue
+        geo = submission.get("_geolocation")
+        if not isinstance(geo, list) or len(geo) < 2:
+            continue
+        lat, lon = geo[0], geo[1]
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        if isinstance(bbox, list) and len(bbox) == 4:
+            if lon < bbox[0] or lon > bbox[2] or lat < bbox[1] or lat > bbox[3]:
+                continue
+        timestamp = submission.get("_submission_time")
+        if not isinstance(timestamp, str) or not timestamp:
+            timestamp = None
+        if timestamp and start and timestamp[:10] < start:
+            continue
+        if timestamp and end and timestamp[:10] > end:
+            continue
+        attributes: dict[str, Any] = {
+            key: value
+            for key, value in submission.items()
+            if isinstance(value, (str, int, float, bool, type(None)))
+        }
+        observations.append(Observation(
+            id=str(submission.get("_id") or f"kobo-{index + 1}"),
+            lon=float(lon),
+            lat=float(lat),
+            timestamp=timestamp,
+            observer=str(submission.get("_submitted_by") or "") or None,
+            type=str(submission.get(type_field) or "") if type_field else None,
+            attributes=attributes,
+        ))
+    return observations, []
