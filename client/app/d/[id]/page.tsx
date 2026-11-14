@@ -3,8 +3,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
+import dynamic from 'next/dynamic';
 import type { FeatureCollection, GeoJsonObject } from 'geojson';
-import MapComponent from '@/components/MapComponent';
 import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
 import { observationsToCsv, observationsToGeojson, type EnrichedObservation } from '@/lib/observations';
 
@@ -55,6 +55,11 @@ function download(name: string, content: string, type: string): void {
   anchor.click();
   URL.revokeObjectURL(url);
 }
+
+const MapComponent = dynamic(() => import('@/components/MapComponent'), {
+  ssr: false,
+  loading: () => <div className="h-[440px] w-full rounded-xl border border-rule bg-raised sm:h-[540px]" />,
+});
 
 export default function DashboardPage() {
   const params = useParams();
