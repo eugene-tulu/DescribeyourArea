@@ -4,6 +4,7 @@ import {
   observationsToCsv,
   parseObservationCsv,
   parseObservationGeojson,
+  parseObservationRows,
   type Observation,
 } from './observations';
 
@@ -153,5 +154,47 @@ describe('observationsToCsv', () => {
     expect(csv.split('\n')[0]).toContain('ndvi,landcover,rainfall_mm,elevation_m,flags,note');
     expect(csv).toContain('"near river, ""good"""');
     expect(csv).toContain('Rangeland');
+  });
+});
+
+describe('lat/lon column variations', () => {
+  it.each([
+    ['GPS Lat,GPS Long,date\n-1.5,35.4,2026-06-15'],
+    ['Lat (DD),Long (DD),date\n-1.5,35.4,2026-06-15'],
+    ['Y,X,date\n-1.5,35.4,2026-06-15'],
+    ['decimal_latitude,decimal_longitude,date\n-1.5,35.4,2026-06-15'],
+    ['coordinates,date\n"-1.5, 35.4",2026-06-15'],
+  ])('reads %s', (csv) => {
+    const result = parseObservationCsv(csv);
+    expect(result.errors).toEqual([]);
+    expect(result.observations).toHaveLength(1);
+    expect(result.observations[0].lon).toBe(35.4);
+    expect(result.observations[0].lat).toBe(-1.5);
+  });
+
+  it('does not treat projected easting/northing as lon/lat', () => {
+    const result = parseObservationCsv('easting,northing,date\n500000,9850000,2026-06-15');
+    expect(result.observations).toHaveLength(0);
+    expect(result.errors[0]).toContain('longitude/latitude');
+  });
+
+  it('parses an xlsx sheet through the shared row parser', async () => {
+    const XLSX = await import('xlsx');
+    const sheet = XLSX.utils.aoa_to_sheet([
+      ['GPS Lat', 'GPS Long', 'date', 'observer'],
+      [-1.5, 35.4, '2026-06-15', 'A. Kima'],
+    ]);
+    const buffer = XLSX.write(
+      { SheetNames: ['Sheet1'], Sheets: { Sheet1: sheet } },
+      { type: 'array', bookType: 'xlsx' },
+    ) as ArrayBuffer;
+    const workbook = XLSX.read(buffer, { type: 'array' });
+    const matrix = XLSX.utils.sheet_to_json<string[]>(workbook.Sheets[workbook.SheetNames[0]], { header: 1, defval: '', raw: false });
+    const headers = (matrix[0] ?? []).map((cell) => String(cell ?? ''));
+    const rows = matrix.slice(1).map((row) => row.map((cell) => String(cell ?? '')));
+    const result = parseObservationRows(headers, rows);
+    expect(result.errors).toEqual([]);
+    expect(result.observations).toHaveLength(1);
+    expect(result.observations[0]).toMatchObject({ lon: 35.4, lat: -1.5, observer: 'A. Kima' });
   });
 });

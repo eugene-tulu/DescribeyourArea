@@ -50,6 +50,7 @@ const TIMESTAMP_KEYS = ["timestamp", "date", "time", "observed_at", "survey_date
 const ID_KEYS = ["id", "plot_id", "uuid", "name"];
 const OBSERVER_KEYS = ["observer", "observer_name", "enumerator", "created_by", "collector"];
 const TYPE_KEYS = ["type", "land_use", "condition", "class", "landcover"];
+const COMBINED_KEYS = ["coordinates", "coordinate", "location", "gps", "point", "latlon", "latlong", "latitudelongitude", "latlng"];
 
 function firstString(source: Record<string, unknown>, keys: string[]): string | null {
   for (const key of keys) {
@@ -179,37 +180,86 @@ function splitCsvLine(line: string): string[] {
   return cells.map((cell) => cell.trim());
 }
 
-function findColumn(headers: string[], candidates: string[]): number {
-  const lower = headers.map((header) => header.toLowerCase().replace(/[\s_-]/g, ""));
+function normalizedHeader(header: string): string {
+  return header.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function isLatHeader(header: string): boolean {
+  return header === "lat" || header === "latitude" || header === "y"
+    || header.startsWith("lat") || header.endsWith("lat") || header.includes("latitude")
+    || header.startsWith("gpslat");
+}
+
+function isLonHeader(header: string): boolean {
+  return header === "lon" || header === "lng" || header === "long" || header === "x"
+    || header.startsWith("lon") || header.endsWith("lon") || header.includes("longitude")
+    || header.startsWith("gpslon") || header.startsWith("gpslng");
+}
+
+function findColumn(headers: string[], kind: "lat" | "lon"): number {
+  const normalized = headers.map(normalizedHeader);
+  for (let index = 0; index < normalized.length; index += 1) {
+    if (kind === "lat" ? isLatHeader(normalized[index]) : isLonHeader(normalized[index])) return index;
+  }
+  return -1;
+}
+
+function findAny(headers: string[], candidates: string[]): number {
+  const lower = headers.map(normalizedHeader);
   for (const candidate of candidates) {
-    const normalized = candidate.toLowerCase().replace(/[\s_-]/g, "");
-    const index = lower.indexOf(normalized);
+    const index = lower.indexOf(normalizedHeader(candidate));
     if (index >= 0) return index;
   }
   return -1;
 }
 
-export function parseObservationCsv(text: string): ParseResult {
+function parseCoordinateCell(cell: string): [number, number] | null {
+  const text = cell.trim();
+  if (!text) return null;
+  if (/^point\s*\(/i.test(text)) {
+    const match = text.match(/point\s*\(\s*([-\d.]+)\s+([-\d.]+)/i);
+    if (match) return [Number(match[1]), Number(match[2])];
+  }
+  const parts = text.split(/[,;\s]+/).filter(Boolean).map(Number);
+  if (parts.length < 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return null;
+  const [a, b] = parts;
+  // Assume "lat, lon"; swap if the first value cannot be a latitude.
+  if (a >= -90 && a <= 90 && b >= -180 && b <= 180) return [b, a];
+  if (b >= -90 && b <= 90 && a >= -180 && a <= 180) return [a, b];
+  return [b, a];
+}
+
+/** Parse a table of strings into observations. Shared by CSV and XLSX. */
+export function parseObservationRows(headers: string[], rows: string[][]): ParseResult {
   const observations: Observation[] = [];
   const errors: string[] = [];
-  const lines = text.split(/\r?\n/).filter((line) => line.trim());
-  if (lines.length < 2) {
-    return { observations, errors: ["The CSV needs a header row and at least one data row."] };
+  const lonIndex = findColumn(headers, "lon");
+  const latIndex = findColumn(headers, "lat");
+  const combinedIndex = findAny(headers, COMBINED_KEYS);
+  if (lonIndex < 0 && latIndex < 0 && combinedIndex < 0) {
+    return { observations, errors: ["The file needs longitude/latitude columns (lon/lat, GPS Lat/Long, X/Y, decimal degrees) or a coordinates/location column."] };
   }
-  const headers = splitCsvLine(lines[0]);
-  const lonIndex = findColumn(headers, ["lon", "longitude", "long", "x"]);
-  const latIndex = findColumn(headers, ["lat", "latitude", "y"]);
-  if (lonIndex < 0 || latIndex < 0) {
-    return { observations, errors: ["The CSV needs longitude/latitude columns (lon/lon_gd, lat/lat_gd)."] };
-  }
-  const timeIndex = findColumn(headers, TIMESTAMP_KEYS);
-  const idIndex = findColumn(headers, ID_KEYS);
-  const observerIndex = findColumn(headers, OBSERVER_KEYS);
-  const typeIndex = findColumn(headers, TYPE_KEYS);
-  lines.slice(1).forEach((line, rowOffset) => {
-    const cells = splitCsvLine(line);
-    const lon = Number(cells[lonIndex]);
-    const lat = Number(cells[latIndex]);
+  const timeIndex = findAny(headers, TIMESTAMP_KEYS);
+  const idIndex = findAny(headers, ID_KEYS);
+  const observerIndex = findAny(headers, OBSERVER_KEYS);
+  const typeIndex = findAny(headers, TYPE_KEYS);
+  rows.forEach((cells, rowOffset) => {
+    let lon: number;
+    let lat: number;
+    if (lonIndex >= 0 && latIndex >= 0) {
+      lon = Number(cells[lonIndex]);
+      lat = Number(cells[latIndex]);
+    } else if (combinedIndex >= 0) {
+      const coords = parseCoordinateCell(cells[combinedIndex] ?? "");
+      if (!coords) {
+        errors.push(`Row ${rowOffset + 2}: invalid coordinates.`);
+        return;
+      }
+      [lon, lat] = coords;
+    } else {
+      errors.push(`Row ${rowOffset + 2}: missing longitude/latitude.`);
+      return;
+    }
     if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
       errors.push(`Row ${rowOffset + 2}: invalid longitude/latitude.`);
       return;
@@ -230,6 +280,14 @@ export function parseObservationCsv(text: string): ParseResult {
     });
   });
   return { observations, errors };
+}
+
+export function parseObservationCsv(text: string): ParseResult {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) {
+    return { observations: [], errors: ["The CSV needs a header row and at least one data row."] };
+  }
+  return parseObservationRows(splitCsvLine(lines[0]), lines.slice(1).map(splitCsvLine));
 }
 
 export function enrichObservations(

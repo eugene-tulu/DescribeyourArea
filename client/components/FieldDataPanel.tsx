@@ -8,9 +8,12 @@ import {
   observationsToGeojson,
   parseObservationCsv,
   parseObservationGeojson,
+  parseObservationRows,
   type EnrichedObservation,
   type Observation,
+  type ParseResult,
 } from '../lib/observations';
+import * as XLSX from 'xlsx';
 
 function download(name: string, content: string, type: string): void {
   const blob = new Blob([content], { type });
@@ -119,11 +122,23 @@ export function FieldDataPanel({
     setBusy(true);
     setErrors([]);
     try {
-      const text = await file.text();
-      const isCsv = /\.csv$/i.test(file.name);
-      const parsed = isCsv
-        ? parseObservationCsv(text)
-        : parseObservationGeojson(JSON.parse(text));
+      const isXlsx = /\.(xlsx|xls)$/i.test(file.name);
+      let parsed: ParseResult;
+      if (isXlsx) {
+        const buffer = await file.arrayBuffer();
+        const workbook = XLSX.read(buffer, { type: 'array' });
+        const sheet = workbook.Sheets[workbook.SheetNames[0]];
+        const matrix = XLSX.utils.sheet_to_json<string[]>(sheet, { header: 1, defval: '', raw: false });
+        const headers = (matrix[0] ?? []).map((cell) => String(cell ?? ''));
+        const rows = matrix.slice(1).map((row) => row.map((cell) => String(cell ?? '')));
+        parsed = parseObservationRows(headers, rows);
+      } else {
+        const text = await file.text();
+        const isCsv = /\.csv$/i.test(file.name);
+        parsed = isCsv
+          ? parseObservationCsv(text)
+          : parseObservationGeojson(JSON.parse(text));
+      }
       onObservationsChange(parsed.observations, file.name);
       setErrors(parsed.errors);
     } catch (error) {
@@ -159,7 +174,7 @@ export function FieldDataPanel({
         <input
           ref={inputRef}
           type="file"
-          accept=".csv,.geojson,.json"
+          accept=".csv,.geojson,.json,.xlsx,.xls"
           className="hidden"
           onChange={onInput}
         />
