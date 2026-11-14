@@ -1640,6 +1640,14 @@ export default function Home() {
   const [fieldObservations, setFieldObservations] = useState<Observation[]>([]);
   const [fieldFileName, setFieldFileName] = useState<string | null>(null);
   const [fieldRows, setFieldRows] = useState<EnrichedObservation[]>([]);
+  // The cache key the backend reported for this analysis, so a submission state
+  // can be matched to the area that produced it and the map can request tiles.
+  const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
+  // A synchronous read has no artefact, but the worker wrote its NDVI composite
+  // under the geometry hash; this key addresses that tile route.
+  const syncKey = (analysisSummary?.ndvi as { sync_key?: string } | null | undefined)?.sync_key
+    ?? (analysisSummary?.rainfall as { cache_key?: string } | null | undefined)?.cache_key
+    ?? null;
   // Per-point enrichment runs on the backend so every connector (CSV, ArcGIS,
   // EarthRanger, COPA) gets the same record. The AOI-level result is the
   // fallback when the tiles are unavailable or the API is unreachable.
@@ -1666,6 +1674,8 @@ export default function Home() {
         dem_tiles: demTiles,
         landcover_tiles: landcoverTiles,
         ndvi_mean: analysisSummary.ndvi?.mean ?? null,
+        ndvi_cache_key: activeCacheKey ?? undefined,
+        ndvi_sync_key: activeCacheKey ? undefined : syncKey ?? undefined,
         landcover_dominant: analysisSummary.landcover?.dominant_class ?? null,
         rainfall_series: analysisSummary.rainfall?.series ?? [],
         bbox: analysisSummary.analysis?.bbox ?? null,
@@ -1698,18 +1708,10 @@ export default function Home() {
         if (!controller.signal.aborted) setFieldRows(fallback);
       });
     return () => controller.abort();
-  }, [fieldObservations, analysisSummary]);
+  }, [fieldObservations, analysisSummary, activeCacheKey, syncKey]);
   // The overlay is a reading aid, not part of the result. Clearing it must not
   // clear the numbers (the old onClearOverlay reset the whole summary).
   const [overlayVisible, setOverlayVisible] = useState(true);
-  // The cache key the backend reported for this analysis, so a submission state
-  // can be matched to the area that produced it and the map can request tiles.
-  const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
-  // A synchronous read has no artefact, but the worker wrote its NDVI composite
-  // under the geometry hash; this key addresses that tile route.
-  const syncKey = (analysisSummary?.ndvi as { sync_key?: string } | null | undefined)?.sync_key
-    ?? (analysisSummary?.rainfall as { cache_key?: string } | null | undefined)?.cache_key
-    ?? null;
   const [mapLayers, setMapLayers] = useState({
     dem: true, landcover: true, ndvi: false, landcover_history: false,
   });

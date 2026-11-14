@@ -99,6 +99,15 @@ class EnrichRecordsTests(unittest.TestCase):
         ]))
         self.assertIn("no timestamp", records[0].flags)
 
+    def test_per_point_ndvi_samples_the_cog(self):
+        ndvi_path = _write_raster(self.tmp.name, "ndvi.tif", 0.5, None)
+        request = EnrichRequest(
+            observations=[EnrichPoint(id="P", lon=35.5, lat=-1.5, timestamp="2026-06-15")],
+            ndvi_mean=0.9,
+        )
+        records = enrich_records(request, ndvi_tile=ndvi_path)
+        self.assertEqual(records[0].ndvi, 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

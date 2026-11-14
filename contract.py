@@ -244,12 +244,16 @@ class EnrichRequest(BaseModel):
 
     The tiles are the signed COGs the analysis already produced; the NDVI mean,
     dominant land-cover class and rainfall series are the AOI-level context.
+    `ndvi_cache_key`/`ndvi_sync_key` let the server resolve the NDVI COG so each
+    observation gets its own value instead of the AOI mean.
     """
 
     observations: List[EnrichPoint]
     dem_tiles: List[str] = Field(default_factory=list)
     landcover_tiles: List[str] = Field(default_factory=list)
     ndvi_mean: Optional[float] = None
+    ndvi_cache_key: Optional[str] = None
+    ndvi_sync_key: Optional[str] = None
     landcover_dominant: Optional[str] = None
     rainfall_series: List[Dict[str, Any]] = Field(default_factory=list)
     bbox: Optional[List[float]] = None

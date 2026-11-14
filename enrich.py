@@ -13,7 +13,7 @@ and they are read from the signed COG tiles the analysis already produced.
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+from typing import Optional
 
 import rasterio
 from rasterio.warp import transform as warp_transform
@@ -58,7 +58,7 @@ def _month(timestamp: Optional[str]) -> Optional[str]:
     return head if len(head) == 7 and head[4] == "-" else None
 
 
-def enrich_records(request: EnrichRequest) -> list[EnrichedRecord]:
+def enrich_records(request: EnrichRequest, ndvi_tile: Optional[str] = None) -> list[EnrichedRecord]:
     bbox = request.bbox or []
     series = request.rainfall_series or []
     records: list[EnrichedRecord] = []
@@ -83,6 +83,11 @@ def enrich_records(request: EnrichRequest) -> list[EnrichedRecord]:
             flags.append("no DEM tile")
         if landcover is None and not request.landcover_tiles:
             flags.append("no land-cover tile")
+        # Per-point NDVI when the COG is available; the AOI mean is the fallback
+        # for a point outside the COG or a read without a composite.
+        ndvi = sample_point([ndvi_tile], point.lon, point.lat) if ndvi_tile else None
+        if ndvi is None:
+            ndvi = request.ndvi_mean
 
         rainfall = None
         if month:
@@ -97,7 +102,7 @@ def enrich_records(request: EnrichRequest) -> list[EnrichedRecord]:
             lon=point.lon,
             lat=point.lat,
             timestamp=point.timestamp,
-            ndvi=request.ndvi_mean,
+            ndvi=ndvi,
             landcover=landcover or request.landcover_dominant,
             landcover_code=int(round(landcover_code)) if landcover_code is not None else None,
             rainfall_mm=rainfall,

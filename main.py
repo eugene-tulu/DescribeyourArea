@@ -2500,7 +2500,7 @@ def enrich_observations(request: EnrichRequest) -> EnrichResponse:
     rainfall so the record can be defended. It is deliberately independent of
     the connector and of the niche view, so every source feeds one record shape.
     """
-    records = enrich.enrich_records(request)
+    records = enrich.enrich_records(request, _ndvi_tile_for(request))
     point_samples = sum(
         1 for record in records
         if record.elevation_m is not None or record.landcover_code is not None
@@ -2510,6 +2510,26 @@ def enrich_observations(request: EnrichRequest) -> EnrichResponse:
         sampled=len(records),
         point_samples=point_samples,
     )
+
+
+def _ndvi_tile_for(request: EnrichRequest) -> Optional[str]:
+    """Resolve the NDVI COG from a server-side key, never a client path.
+
+    Offline readings store the composite path in the NDVI artefact; synchronous
+    readings write it under the geometry hash. Both are addressed by a 32-hex key
+    so the caller cannot point the sampler at an arbitrary file.
+    """
+    if request.ndvi_cache_key:
+        if not re.fullmatch(r"[0-9a-f]{32}", request.ndvi_cache_key):
+            raise HTTPException(status_code=422, detail="ndvi_cache_key must be 32 hex characters")
+        artefact = jobs.read_artefact(request.ndvi_cache_key, "ndvi")
+        return (artefact or {}).get("tile_path")
+    if request.ndvi_sync_key:
+        if not re.fullmatch(r"[0-9a-f]{32}", request.ndvi_sync_key):
+            raise HTTPException(status_code=422, detail="ndvi_sync_key must be 32 hex characters")
+        candidate = f"/app/.rainfall-cache/tiles/sync/{request.ndvi_sync_key}/ndvi.tif"
+        return candidate if os.path.exists(candidate) else None
+    return None
 
 
 # --------------------------------------------------
