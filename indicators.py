@@ -200,6 +200,9 @@ async def compute_indicator(
             assets["dem"], {"type": "Feature", "properties": {}, "geometry": geojson_geom},
             resolution_m=chosen,
         )
+        # Ship the source COGs so the enrichment endpoint can sample a DEM value
+        # per observation without re-running the STAC search.
+        stats["tiles"] = assets["dem"]
         return interpret_terrain(stats)
 
     if indicator == "landcover":
@@ -208,12 +211,14 @@ async def compute_indicator(
             landcover_year=year,
         )
         used_year = assets.get("_landcover_year", year)
-        return compute_landcover_percentages(
+        result = compute_landcover_percentages(
             assets["landcover"],
             {"type": "Feature", "properties": {}, "geometry": geojson_geom},
             year=used_year,
             resolution_m=chosen,
         )
+        result["tiles"] = assets["landcover"]
+        return result
 
     if indicator == "landcover_history":
         return await _compute_landcover_history(bbox, geojson_geom, window_start, window_end)

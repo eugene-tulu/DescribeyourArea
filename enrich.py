@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+import planetary_computer
 import rasterio
 from rasterio.warp import transform as warp_transform
 from rasterio.windows import Window
@@ -26,14 +27,16 @@ from registry import LULC_CLASS_LABELS
 def sample_point(tiles: list[str], lon: float, lat: float) -> Optional[float]:
     """Sample the first tile that contains the point, or None.
 
-    The tiles are signed COGs covering the AOI. A point on a tile boundary is
-    tried against the next tile; a nodata pixel is treated as no sample rather
-    than as a real value (a 0 m DEM pixel in an inland highland AOI is a void,
-    not sea level).
+    The tiles are COGs covering the AOI. A point on a tile boundary is tried
+    against the next tile; a nodata pixel is treated as no sample rather than as
+    a real value (a 0 m DEM pixel in an inland highland AOI is a void, not sea
+    level). HTTP tiles are signed at read time; local NDVI COGs are opened
+    directly.
     """
     for url in tiles:
         try:
-            with rasterio.open(url) as src:
+            target = planetary_computer.sign(url) if url.startswith("http") else url
+            with rasterio.open(target) as src:
                 xs, ys = warp_transform("EPSG:4326", src.crs, [lon], [lat])
                 row, col = src.index(xs[0], ys[0])
                 if row < 0 or col < 0 or row >= src.height or col >= src.width:
