@@ -31,6 +31,22 @@ cd client && npx tsc --noEmit && npm run lint && npm run build
 
 ---
 
+## Unreleased — KoboToolbox connector
+
+### Field surveys into the same evidence pipeline
+
+`fetch_kobo` pulls KoboToolbox submissions (server URL + asset UID, optional
+token), filters by AOI bbox and submission date, maps `_geolocation` / `_submission_time`
+/ scalar attributes, and returns the same `Observation` shape as Survey123/ArcGIS.
+`/v1/projects/{id}/ingest` dispatches `kobo`; the connect form now selects
+**ArcGIS / Survey123** or **KoboToolbox**.
+
+- `connectors.py`: `fetch_kobo`.
+- `main.py`: `/ingest` dispatch; `_as_feature` normalises a bare geometry or
+  FeatureCollection before the AOI bbox.
+- Evidence: Kobo unit tests pass (11); an invalid asset returns 200 with
+  `observations: []` and a clear 404 error.
+
 ## Unreleased — Saved project dashboard
 
 ### `/d/<id>` renders a saved reading
