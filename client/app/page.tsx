@@ -1705,6 +1705,11 @@ export default function Home() {
   // The cache key the backend reported for this analysis, so a submission state
   // can be matched to the area that produced it and the map can request tiles.
   const [activeCacheKey, setActiveCacheKey] = useState<string | null>(null);
+  // A synchronous read has no artefact, but the worker wrote its NDVI composite
+  // under the geometry hash; this key addresses that tile route.
+  const syncKey = (analysisSummary?.ndvi as { sync_key?: string } | null | undefined)?.sync_key
+    ?? (analysisSummary?.rainfall as { cache_key?: string } | null | undefined)?.cache_key
+    ?? null;
   const [mapLayers, setMapLayers] = useState({
     dem: true, landcover: true, ndvi: false, landcover_history: false,
   });
@@ -1748,8 +1753,18 @@ export default function Home() {
     if (mapLayers.landcover) {
       layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
     }
-    if (mapLayers.ndvi && activeCacheKey) {
-      layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+    if (mapLayers.ndvi) {
+      if (activeCacheKey) {
+        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+      } else if (syncKey) {
+        layers.push({
+          id: 'ndvi',
+          url: `${backendUrl}/tiles/sync/${syncKey}/ndvi/{z}/{x}/{y}.png`,
+          attribution: 'NDVI',
+          opacity: 0.65,
+          zIndex: 420,
+        });
+      }
     }
     if (mapLayers.landcover_history && historyYear) {
       layers.push({
@@ -1761,7 +1776,7 @@ export default function Home() {
       });
     }
     return layers;
-  }, [activeCacheKey, analysisSummary, overlayVisible, mapLayers, historyYear]);
+  }, [activeCacheKey, syncKey, analysisSummary, overlayVisible, mapLayers, historyYear]);
   const [periodAmount, setPeriodAmount] = useState<number>(1);
   const [periodUnit, setPeriodUnit] = useState<'years' | 'months' | 'days'>('years');
   const [customEnd, setCustomEnd] = useState('');
@@ -3473,8 +3488,8 @@ export default function Home() {
                         <input
                           type="checkbox"
                           checked={mapLayers[layer.id]}
-                          disabled={layer.id === 'ndvi' && !activeCacheKey}
-                          title={layer.id === 'ndvi' && !activeCacheKey
+                          disabled={layer.id === 'ndvi' && !activeCacheKey && !syncKey}
+                          title={layer.id === 'ndvi' && !activeCacheKey && !syncKey
                             ? 'NDVI map layer is available for offline readings'
                             : undefined}
                           onChange={(event) => setMapLayers((previous) => ({

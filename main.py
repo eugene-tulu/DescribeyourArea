@@ -2175,6 +2175,11 @@ async def generate_context(
         ndvi_stats = None
         if include_ndvi and "ndvi" in requested:
             vegetation_timer = usage.Timer()
+            # The sync path computes the composite in memory; write it as a tiled
+            # COG so the same map layer works here as offline. The path is derived
+            # from the geometry hash, never from client input.
+            sync_key = rainfall_hash(geom)
+            ndvi_cog_path = f"/app/.rainfall-cache/tiles/sync/{sync_key}/ndvi.tif"
             ndvi_stats = await _timed(vegetation_timer, compute_vegetation_index(
                 bbox=bbox,
                 geojson_geom=geom,
@@ -2185,7 +2190,10 @@ async def generate_context(
                 window_days=window_days,
                 start=window_start,
                 end=window_end,
+                cog_path=ndvi_cog_path,
             ))
+            if isinstance(ndvi_stats, dict) and ndvi_stats.get("status") == "ok":
+                ndvi_stats["sync_key"] = sync_key
             module_ms["ndvi"] = vegetation_timer.elapsed_ms
 
         # Rainfall is read from a precomputed cache. A single ERA5 grid cell takes
@@ -3517,6 +3525,27 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
             _TILE_ASSET_CACHE.clear()
         _TILE_ASSET_CACHE[asset_key] = hrefs
     png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y)
+    return Response(
+        content=png,
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
+
+
+@app.get("/tiles/sync/{sync_key}/ndvi/{z}/{x}/{y}.png")
+async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int):
+    """NDVI tiles for a synchronous read.
+
+    The sync path writes the median composite to a tiled COG keyed by the
+    geometry hash; this route reads that file and renders the requested tile.
+    The path is derived from the key, never from client input.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", sync_key or ""):
+        raise HTTPException(status_code=422, detail="sync key must be 32 hex characters")
+    path = f"/app/.rainfall-cache/tiles/sync/{sync_key}/ndvi.tif"
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="NDVI raster not computed for this area")
+    png = await asyncio.to_thread(_render_tile_png, [path], "ndvi", z, x, y)
     return Response(
         content=png,
         media_type="image/png",
