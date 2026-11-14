@@ -814,6 +814,16 @@ def _equal_area_masked_tiles(asset_hrefs: list[str], geojson: dict, *,
             yield src, clipped
 
 
+def _as_feature(geojson: dict) -> dict:
+    """Return a Feature for a Feature, FeatureCollection or bare geometry."""
+    if geojson.get("type") == "FeatureCollection":
+        features = geojson.get("features") or []
+        return features[0] if features else geojson
+    if geojson.get("type") == "Feature":
+        return geojson
+    return {"type": "Feature", "properties": {}, "geometry": geojson}
+
+
 def _feature_bbox(geojson: dict) -> list[float]:
     minx, miny, maxx, maxy = shape(geojson["geometry"]).bounds
     return [float(minx), float(miny), float(maxx), float(maxy)]
@@ -2585,7 +2595,7 @@ def ingest_project(project_id: str) -> IngestResponse:
         raise HTTPException(status_code=400, detail="The project has no connector.")
     connector = project.connectors[0]
     try:
-        bbox = _feature_bbox(project.geojson)
+        bbox = _feature_bbox(_as_feature(project.geojson))
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Could not read the project AOI: {exc}",
