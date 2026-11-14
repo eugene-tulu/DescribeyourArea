@@ -3556,7 +3556,16 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                     transform = _from_bounds(*image.bounds, 256, 256)
                     inside = geometry_mask([projected], out_shape=(256, 256),
                                            transform=transform, invert=True)
+                    # A single-band COG (land cover) has no alpha band; add one
+                    # so the outside can be transparent. Nodata pixels are
+                    # transparent too: a void is not a class.
+                    if image.array.shape[0] == 1:
+                        gray = image.array[0]
+                        alpha = np.full_like(gray, 255, dtype=gray.dtype)
+                        image.array = np.ma.stack([gray, gray, gray, alpha], axis=0)
                     image.array[3][~inside] = 0
+                    if image.array.mask is not np.ma.nomask:
+                        image.array[3][image.array.mask[3]] = 0
                 return image.render(colormap=colormap, add_alpha=True)
         except Exception:
             continue
