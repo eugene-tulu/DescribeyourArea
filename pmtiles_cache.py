@@ -59,6 +59,7 @@ def get_or_build(
     with _lock(f"{key}:{indicator}:{year}"):
         if path.exists():
             return path
+        from pmtiles.tile import zxy_to_tileid
         from pmtiles.writer import Writer
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -69,7 +70,7 @@ def get_or_build(
                 for x, y in _tiles_for_bbox(bbox, z):
                     data = render(hrefs, indicator, z, x, y, geometry)
                     if data:
-                        writer.write_tile(z, x, y, data)
+                        writer.write_tile(zxy_to_tileid(z, x, y), data)
             writer.finalize()
         os.replace(temporary, path)
     return path
