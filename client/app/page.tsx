@@ -3034,7 +3034,7 @@ export default function Home() {
     const canTile = !!activeCacheKey || (Array.isArray(bbox) && bbox.length === 4);
     if (!canTile) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
-    const base = activeCacheKey ? `${backendUrl}/pmtiles/${activeCacheKey}` : `${backendUrl}/tiles/bbox`;
+    const base = activeCacheKey ? `${backendUrl}/tiles/${activeCacheKey}` : `${backendUrl}/tiles/bbox`;
     const bboxQuery = activeCacheKey || !bbox
       ? ''
       : `bbox=${bbox.map((value) => value.toFixed(5)).join(',')}`;
