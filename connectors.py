@@ -215,3 +215,72 @@ def fetch_kobo(config: dict[str, Any]) -> tuple[list[Observation], list[str]]:
             attributes=attributes,
         ))
     return observations, []
+
+
+def fetch_earthranger(config: dict[str, Any]) -> tuple[list[Observation], list[str]]:
+    """Fetch EarthRanger events and map them to observations.
+
+    EarthRanger is the operations platform for many conservancies and wildlife
+    authorities. Events carry a location, a time, an event type and a bag of
+    event_values; those become the observation's type/attributes.
+    """
+    server = (config.get("server_url") or "").strip().rstrip("/")
+    token = (config.get("token") or "").strip()
+    if not server or not token:
+        return [], ["An EarthRanger server URL and token are required."]
+
+    params: dict[str, Any] = {"limit": int(config.get("limit", 1000))}
+    if config.get("event_type"):
+        params["event_type"] = config["event_type"]
+    if config.get("bbox"):
+        params["bbox"] = ",".join(str(value) for value in config["bbox"])
+    if config.get("start"):
+        params["start"] = config["start"]
+    if config.get("end"):
+        params["end"] = config["end"]
+    headers = {"Authorization": f"Token {token}"}
+
+    try:
+        response = requests.get(f"{server}/api/v1/events/", params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as exc:
+        return [], [f"EarthRanger request failed: {exc}"]
+
+    rows = payload.get("data") or payload.get("events") or payload.get("results") or []
+    observations: list[Observation] = []
+    for index, event in enumerate(rows):
+        if not isinstance(event, dict):
+            continue
+        location = event.get("location") or {}
+        if isinstance(location, dict):
+            lat, lon = location.get("lat"), location.get("lon")
+        elif isinstance(location, list) and len(location) >= 2:
+            lat, lon = location[1], location[0]
+        else:
+            continue
+        if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+            continue
+        attributes: dict[str, Any] = {
+            key: value
+            for key, value in event.items()
+            if isinstance(value, (str, int, float, bool, type(None)))
+        }
+        values = event.get("event_values")
+        if isinstance(values, dict):
+            attributes.update({
+                key: value
+                for key, value in values.items()
+                if isinstance(value, (str, int, float, bool, type(None)))
+            })
+        observer = event.get("reported_by") or event.get("user")
+        observations.append(Observation(
+            id=str(event.get("id") or f"er-{index + 1}"),
+            lon=float(lon),
+            lat=float(lat),
+            timestamp=event.get("time") or event.get("created_at"),
+            observer=str(observer) if isinstance(observer, str) else None,
+            type=event.get("event_type") or event.get("type"),
+            attributes=attributes,
+        ))
+    return observations, []

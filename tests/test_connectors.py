@@ -6,6 +6,7 @@ from connectors import (
     features_to_observations,
     fetch_arcgis,
     fetch_kobo,
+    fetch_earthranger,
 )
 
 FEATURES = [
@@ -156,3 +157,30 @@ class KoboTests(unittest.TestCase):
         observations, errors = fetch_kobo({"server_url": "https://kf.kobotoolbox.org", "asset_uid": "abc"})
         self.assertEqual(observations, [])
         self.assertEqual(errors, [])
+
+
+class EarthRangerTests(unittest.TestCase):
+    @patch("connectors.requests.get")
+    def test_maps_events(self, get):
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"data": [{
+            "id": 1, "event_type": "vegetation_plot",
+            "time": "2026-06-15T10:00:00",
+            "location": {"lat": -1.5, "lon": 35.4},
+            "event_values": {"observer": "A. Kima", "land_use": "grazing"},
+        }]}
+        get.return_value = response
+        observations, errors = fetch_earthranger({
+            "server_url": "https://er.example.org",
+            "token": "abc",
+            "bbox": [35, -2, 36, -1],
+            "start": "2026-06-01",
+            "end": "2026-06-30",
+        })
+        self.assertEqual(errors, [])
+        self.assertEqual(len(observations), 1)
+        self.assertEqual(observations[0].lon, 35.4)
+        self.assertEqual(observations[0].lat, -1.5)
+        self.assertEqual(observations[0].type, "vegetation_plot")
+        self.assertEqual(observations[0].attributes.get("land_use"), "grazing")

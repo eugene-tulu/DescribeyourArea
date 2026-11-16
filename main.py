@@ -2611,6 +2611,13 @@ def ingest_project(project_id: str) -> IngestResponse:
             "start": project.window_start,
             "end": project.window_end,
         })
+    elif connector.kind == "earthranger":
+        observations, errors = connectors.fetch_earthranger({
+            **connector.config,
+            "bbox": bbox,
+            "start": project.window_start,
+            "end": project.window_end,
+        })
     else:
         raise HTTPException(
             status_code=400,

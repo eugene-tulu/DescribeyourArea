@@ -54,7 +54,9 @@ export function FieldDataPanel({
   const [errors, setErrors] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [projectType, setProjectType] = useState('conservancy');
-  const [sourceKind, setSourceKind] = useState<'arcgis' | 'kobo'>('arcgis');
+  const [sourceKind, setSourceKind] = useState<'arcgis' | 'kobo' | 'earthranger'>('arcgis');
+  const [erServer, setErServer] = useState('');
+  const [erEventType, setErEventType] = useState('');
   const [arcgisUrl, setArcgisUrl] = useState('');
   const [layerId, setLayerId] = useState('0');
   const [koboServer, setKoboServer] = useState('https://kf.kobotoolbox.org');
@@ -79,9 +81,15 @@ export function FieldDataPanel({
       setConnectError('Enter the Kobo server URL and asset UID.');
       return;
     }
+    if (sourceKind === 'earthranger' && (!erServer.trim() || !token.trim())) {
+      setConnectError('Enter the EarthRanger server URL and token.');
+      return;
+    }
     const connector = sourceKind === 'arcgis'
       ? { kind: 'arcgis', name: arcgisUrl, config: { url: arcgisUrl, layer_id: layerId, token, date_field: dateField, where } }
-      : { kind: 'kobo', name: `${koboServer}/${koboAsset}`, config: { server_url: koboServer, asset_uid: koboAsset, token, date_field: dateField, type_field: typeField } };
+      : sourceKind === 'kobo'
+        ? { kind: 'kobo', name: `${koboServer}/${koboAsset}`, config: { server_url: koboServer, asset_uid: koboAsset, token, date_field: dateField, type_field: typeField } }
+        : { kind: 'earthranger', name: `${erServer}/events`, config: { server_url: erServer, token, event_type: erEventType } };
     setConnecting(true);
     setConnectError(null);
     try {
@@ -109,7 +117,7 @@ export function FieldDataPanel({
         errors?: string[];
       };
       if (data.errors?.length) setConnectError(data.errors.join(' · '));
-      const label = sourceKind === 'arcgis' ? 'ArcGIS' : 'Kobo';
+      const label = sourceKind === 'arcgis' ? 'ArcGIS' : sourceKind === 'kobo' ? 'Kobo' : 'EarthRanger';
       onObservationsChange(data.observations ?? [], `${label} · ${data.observations?.length ?? 0} observations`);
     } catch (error) {
       setConnectError(error instanceof Error ? error.message : 'Could not connect.');
@@ -227,11 +235,12 @@ export function FieldDataPanel({
             Source
             <select
               value={sourceKind}
-              onChange={(event) => setSourceKind(event.target.value as 'arcgis' | 'kobo')}
+              onChange={(event) => setSourceKind(event.target.value as 'arcgis' | 'kobo' | 'earthranger')}
               className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
             >
               <option value="arcgis">ArcGIS / Survey123</option>
               <option value="kobo">KoboToolbox</option>
+              <option value="earthranger">EarthRanger</option>
             </select>
           </label>
           {sourceKind === 'arcgis' ? (
@@ -263,7 +272,7 @@ export function FieldDataPanel({
                 />
               </label>
             </>
-          ) : (
+          ) : sourceKind === 'kobo' ? (
             <>
               <label className="text-[0.75rem] text-ink-3">
                 Kobo server URL
@@ -289,6 +298,27 @@ export function FieldDataPanel({
                   value={typeField}
                   onChange={(event) => setTypeField(event.target.value)}
                   placeholder="e.g. land_use"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+            </>
+          ) : (
+            <>
+              <label className="text-[0.75rem] text-ink-3">
+                Server URL
+                <input
+                  value={erServer}
+                  onChange={(event) => setErServer(event.target.value)}
+                  placeholder="https://earthranger.example.org"
+                  className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
+                />
+              </label>
+              <label className="text-[0.75rem] text-ink-3">
+                Event type (optional)
+                <input
+                  value={erEventType}
+                  onChange={(event) => setErEventType(event.target.value)}
+                  placeholder="e.g. vegetation_plot"
                   className="mt-1 h-8 w-full rounded-lg border border-rule bg-raised px-2 text-[0.8125rem] text-ink-2"
                 />
               </label>
