@@ -12,6 +12,7 @@ The PMTiles file lives under the writable usage volume, one per area/indicator
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from pathlib import Path
@@ -67,6 +68,13 @@ def get_or_build(
         path.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(prefix="pmtiles-", dir=path.parent))
         try:
+            (staging / "metadata.json").write_text(json.dumps({
+                "name": f"{indicator} {key}",
+                "format": "png",
+                "bounds": [bbox[0], bbox[1], bbox[2], bbox[3]],
+                "minzoom": 0,
+                "maxzoom": low_zoom_max,
+            }))
             for z in range(low_zoom_max + 1):
                 for x, y in _tiles_for_bbox(bbox, z):
                     data = render(hrefs, indicator, z, x, y, geometry)
