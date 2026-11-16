@@ -63,12 +63,14 @@ def get_or_build(
 
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".pmtiles.tmp")
-        with Writer(str(temporary)) as writer:
+        with open(temporary, "wb") as stream:
+            writer = Writer(stream)
             for z in range(low_zoom_max + 1):
                 for x, y in _tiles_for_bbox(bbox, z):
                     data = render(hrefs, indicator, z, x, y, geometry)
                     if data:
                         writer.write_tile(z, x, y, data)
+            writer.finalize()
         os.replace(temporary, path)
     return path
 
@@ -76,5 +78,10 @@ def get_or_build(
 def get_tile(path: Path, z: int, x: int, y: int) -> Optional[bytes]:
     from pmtiles.reader import Reader
 
-    with Reader(str(path)) as reader:
-        return reader.get_tile(z, x, y)
+    with open(path, "rb") as stream:
+        def get_bytes(offset: int, size: int) -> bytes:
+            stream.seek(offset)
+            return stream.read(size)
+
+        reader = Reader(get_bytes)
+        return reader.get(z, x, y)
