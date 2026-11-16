@@ -40,3 +40,6 @@ requests==2.34.2
 rio-tiler>=7.0,<8.0
 morecantile>=5.0,<6.0
 
+
+# Low-zoom PMTiles cache for large AOIs.
+pmtiles>=3.4

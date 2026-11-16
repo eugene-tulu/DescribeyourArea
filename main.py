@@ -33,6 +33,7 @@ import registry
 import sensors
 import measure
 import enrich
+import pmtiles_cache
 import projects
 import connectors
 from dotenv import load_dotenv
@@ -3680,6 +3681,51 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
         media_type="image/png",
         headers={"Cache-Control": "public, max-age=86400"},
     )
+
+
+@app.get("/pmtiles/{cache_key}/{indicator}/{z}/{x}/{y}.png")
+async def pmtiles_tile(cache_key: str, indicator: str, z: int, x: int, y: int,
+                       year: Optional[int] = None):
+    """Low-zoom tiles from a pre-baked PMTiles archive; COG fallback above it.
+
+    At low zoom the map only needs a small image; the PMTiles archive is built
+    once from the AOI's COG overviews (using the same rio-tiler mask/render) and
+    served from a single file. Above the cache zoom, the COG/rio-tiler path is
+    used so the reader still gets real pixels.
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", cache_key or ""):
+        raise HTTPException(status_code=422, detail="cache_key must be 32 hex characters")
+    if indicator not in ("dem", "landcover", "landcover_history", "ndvi"):
+        raise HTTPException(status_code=404, detail="no raster layer for this indicator")
+    artefact = jobs.read_artefact(cache_key, indicator)
+    bbox = (artefact or {}).get("bbox")
+    geometry = (artefact or {}).get("geometry")
+    if not bbox:
+        raise HTTPException(status_code=404, detail="no area for this cache key")
+    if indicator == "ndvi":
+        tile_path = (artefact or {}).get("tile_path")
+        hrefs = [tile_path] if tile_path else []
+    else:
+        assets = await _find_core_assets(
+            bbox,
+            need_dem=indicator == "dem",
+            need_landcover=indicator in ("landcover", "landcover_history"),
+            landcover_year=year,
+        )
+        hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
+    path = await asyncio.to_thread(
+        pmtiles_cache.get_or_build, cache_key, indicator,
+        bbox=bbox, geometry=geometry, hrefs=hrefs, render=_render_tile_png,
+        year=year, low_zoom_max=9,
+    )
+    data = await asyncio.to_thread(pmtiles_cache.get_tile, path, z, x, y)
+    if data:
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Cache-Control": "public, max-age=86400"},
+        )
+    return await tile_png(cache_key, indicator, z, x, y, year)
 
 
 @app.get("/analytics/summary")
