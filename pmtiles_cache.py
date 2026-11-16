@@ -59,20 +59,25 @@ def get_or_build(
     with _lock(f"{key}:{indicator}:{year}"):
         if path.exists():
             return path
-        from pmtiles.tile import zxy_to_tileid
-        from pmtiles.writer import Writer
+        import shutil
+        import tempfile
+
+        from pmtiles.convert import disk_to_pmtiles
 
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(".pmtiles.tmp")
-        with open(temporary, "wb") as stream:
-            writer = Writer(stream)
+        staging = Path(tempfile.mkdtemp(prefix="pmtiles-", dir=path.parent))
+        try:
             for z in range(low_zoom_max + 1):
                 for x, y in _tiles_for_bbox(bbox, z):
                     data = render(hrefs, indicator, z, x, y, geometry)
-                    if data:
-                        writer.write_tile(zxy_to_tileid(z, x, y), data)
-            writer.finalize()
-        os.replace(temporary, path)
+                    if not data:
+                        continue
+                    tile_dir = staging / str(z) / str(x)
+                    tile_dir.mkdir(parents=True, exist_ok=True)
+                    (tile_dir / f"{y}.png").write_bytes(data)
+            disk_to_pmtiles(str(staging), str(path), low_zoom_max)
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
     return path
 
 
