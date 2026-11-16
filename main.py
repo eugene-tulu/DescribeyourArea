@@ -34,6 +34,7 @@ import sensors
 import measure
 import enrich
 import pmtiles_cache
+import mosaic
 import projects
 import connectors
 from dotenv import load_dotenv
@@ -3603,6 +3604,11 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         if len(_TILE_ASSET_CACHE) > 100:
             _TILE_ASSET_CACHE.clear()
         _TILE_ASSET_CACHE[asset_key] = hrefs
+    # The MosaicJSON maps each tile to the source COGs that actually cover
+    # it, so a tile read touches only those instead of every source.
+    index = await asyncio.to_thread(
+        mosaic.get, f"bbox:{bbox}:{indicator}:{year}", indicator, hrefs, bounds, year)
+    hrefs = mosaic.tiles_for(index, z, x, y, hrefs)
     png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
     return Response(
         content=png,
@@ -3674,6 +3680,10 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
             if len(_TILE_ASSET_CACHE) > 100:
                 _TILE_ASSET_CACHE.clear()
             _TILE_ASSET_CACHE[asset_key] = hrefs
+        # The MosaicJSON maps each tile to the source COGs that actually cover
+        # it, so a tile read touches only those instead of every source.
+        index = await asyncio.to_thread(mosaic.get, cache_key, indicator, hrefs, bbox, year)
+        hrefs = mosaic.tiles_for(index, z, x, y, hrefs)
 
     png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
     return Response(
