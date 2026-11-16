@@ -2878,8 +2878,10 @@ export default function Home() {
         datasets: selectedDatasets,
         result_modules: Object.keys(summary),
       });
+      // The rainfall cache key is not the artefact cache key: using it here
+      // sent /tiles to a key with no artefacts, so the map showed only the AOI.
+      // The sync path has no artefact and uses the bbox tile route instead.
       const areaKey = (summary.rainfall as { cache_key?: string } | undefined)?.cache_key;
-      setActiveCacheKey(areaKey ?? null);
       if (areaKey) void loadVegetationSeries(areaKey);
     } catch (err) {
       console.error(err);
