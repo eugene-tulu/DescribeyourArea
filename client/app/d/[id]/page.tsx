@@ -25,6 +25,9 @@ interface ProjectSnapshot {
   dem?: { mean?: number | null } | null;
   landcover?: { dominant_class?: string | null; dominant_percentage?: number | null } | null;
   ndvi?: { mean?: number | null; sensor?: { label?: string | null } | null } | null;
+  landcover_history?: {
+    series?: Array<{ year?: number | null; dominant_class?: string | null }> | null;
+  } | null;
   rainfall?: { series?: RainPoint[]; product?: string | null } | null;
   analysis?: { bbox_area_km2?: number | null } | null;
 }
@@ -96,6 +99,21 @@ export default function DashboardPage() {
   const [basemap, setBasemap] = useState<BasemapId>('hybrid');
   const [terrain3d, setTerrain3d] = useState(false);
   const [layerOpacity, setLayerOpacity] = useState(0.7);
+  const [mapLayers, setMapLayers] = useState({
+    dem: true, landcover: true, ndvi: false, landcover_history: false,
+  });
+  const [historyYear, setHistoryYear] = useState<number | null>(null);
+  const historyYears = useMemo(
+    () => (project?.snapshot?.landcover_history?.series ?? [])
+      .map((row) => row.year)
+      .filter((year): year is number => typeof year === 'number'),
+    [project?.snapshot?.landcover_history?.series],
+  );
+  useEffect(() => {
+    if (historyYear === null && historyYears.length) {
+      setHistoryYear(historyYears[historyYears.length - 1]);
+    }
+  }, [historyYear, historyYears]);
 
   useEffect(() => {
     if (!id) return;
@@ -122,11 +140,29 @@ export default function DashboardPage() {
     if (!project?.cache_key) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     const bounds = boundsOf(project.geojson);
-    return [
-      { id: 'dem', url: `${backendUrl}/tiles/${project.cache_key}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds },
-      { id: 'landcover', url: `${backendUrl}/tiles/${project.cache_key}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: layerOpacity, zIndex: 410, bounds },
-    ];
-  }, [project?.cache_key, project?.geojson, layerOpacity]);
+    const tileUrl = (indicator: string, year?: number) =>
+      `${backendUrl}/tiles/${project.cache_key}/${indicator}/{z}/{x}/{y}.png${year ? `?year=${year}` : ''}`;
+    const layers: Array<{
+      id: string; url: string; attribution: string;
+      opacity?: number; zIndex?: number; bounds?: [number, number, number, number];
+    }> = [];
+    if (mapLayers.dem) {
+      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds });
+    }
+    if (mapLayers.landcover) {
+      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: layerOpacity, zIndex: 410, bounds });
+    }
+    if (mapLayers.ndvi) {
+      layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420, bounds });
+    }
+    if (mapLayers.landcover_history && historyYear) {
+      layers.push({
+        id: 'lch', url: tileUrl('landcover_history', historyYear),
+        attribution: `Land cover ${historyYear}`, opacity: 0.65, zIndex: 430, bounds,
+      });
+    }
+    return layers;
+  }, [project?.cache_key, project?.geojson, layerOpacity, mapLayers, historyYear]);
 
   const rows: EnrichedObservation[] = (project?.records ?? []).map((record) => ({
     id: record.id ?? '',
@@ -237,6 +273,33 @@ export default function DashboardPage() {
                 className="h-1 w-24 accent-signal"
               />
             </label>
+            {([
+              ['dem', 'Elevation'],
+              ['landcover', 'Land cover'],
+              ['ndvi', 'NDVI'],
+              ['landcover_history', 'History'],
+            ] as const).map(([id, label]) => (
+              <label key={id} className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2">
+                <input
+                  type="checkbox"
+                  checked={mapLayers[id]}
+                  disabled={id === 'landcover_history' && historyYears.length === 0}
+                  onChange={(event) => setMapLayers((current) => ({ ...current, [id]: event.target.checked }))}
+                  className="h-3.5 w-3.5 accent-signal disabled:opacity-40"
+                />
+                {label}
+              </label>
+            ))}
+            {mapLayers.landcover_history && historyYears.length > 0 && (
+              <select
+                value={historyYear ?? historyYears[historyYears.length - 1]}
+                onChange={(event) => setHistoryYear(Number(event.target.value))}
+                aria-label="Land-cover history year"
+                className="h-7 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+              >
+                {historyYears.map((year) => <option key={year} value={year}>{year}</option>)}
+              </select>
+            )}
           </div>
           <MapComponent
             aoiGeoJSON={project.geojson as FeatureCollection}
