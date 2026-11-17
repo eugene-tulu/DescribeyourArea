@@ -237,6 +237,8 @@ class DrawToolbarControl implements IControl {
     this.rectangleButton = rectangle;
 
     map.on('draw.modechange' as keyof MapEventType, this.onModeChange as never);
+    map.on('draw.create' as keyof MapEventType, this.finishPolygonMode as never);
+    map.on('draw.delete' as keyof MapEventType, this.finishPolygonMode as never);
     document.addEventListener('keydown', this.onKeyDown);
     this.container = container;
     return container;
@@ -245,6 +247,8 @@ class DrawToolbarControl implements IControl {
   onRemove(): void {
     this.stopRectangle();
     this.map?.off('draw.modechange' as keyof MapEventType, this.onModeChange as never);
+    this.map?.off('draw.create' as keyof MapEventType, this.finishPolygonMode as never);
+    this.map?.off('draw.delete' as keyof MapEventType, this.finishPolygonMode as never);
     document.removeEventListener('keydown', this.onKeyDown);
     this.container?.remove();
     this.container = undefined;
@@ -270,11 +274,19 @@ class DrawToolbarControl implements IControl {
 
   private togglePolygon = (): void => {
     if (this.polygonActive) {
+      this.finishPolygonMode();
       this.draw.changeMode('simple_select');
       return;
     }
     this.stopRectangle();
+    this.polygonActive = true;
+    this.setActive(this.polygonButton, true);
     this.draw.changeMode('draw_polygon');
+  };
+
+  private finishPolygonMode = (): void => {
+    this.polygonActive = false;
+    this.setActive(this.polygonButton, false);
   };
 
   private beginRectangle = (): void => {
@@ -352,7 +364,9 @@ class DrawToolbarControl implements IControl {
 
   private clearArea = (): void => {
     this.stopRectangle();
-    if (this.polygonActive) this.draw.changeMode('simple_select');
+    const wasDrawingPolygon = this.polygonActive;
+    this.finishPolygonMode();
+    if (wasDrawingPolygon) this.draw.changeMode('simple_select');
     this.draw.deleteAll();
     this.onChanged();
   };
