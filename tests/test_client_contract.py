@@ -796,3 +796,20 @@ class BasemapContractTests(unittest.TestCase):
                              f"{marker} implies a keyed basemap")
         for host in ("server.arcgisonline.com", "tile.openstreetmap.org"):
             self.assertIn(host, self.basemaps)
+
+
+class MapBootstrapContractTests(unittest.TestCase):
+    """The map must not depend on a worker URL Next.js never emits."""
+
+    def test_maplibre_worker_is_built_and_addressed_explicitly(self):
+        component = (CLIENT_ROOT / "components" / "MapComponent.tsx").read_text(encoding="utf-8")
+        package = (CLIENT_ROOT / "package.json").read_text(encoding="utf-8")
+        self.assertIn("setWorkerUrl('/maplibre-gl-worker.mjs')", component)
+        self.assertIn("maplibre-gl-worker.mjs", package)
+
+    def test_rectangle_reports_a_created_feature(self):
+        # draw.add() stores the feature but does not fire draw.create; the
+        # callback is what makes a drawn rectangle reach the page state.
+        component = (CLIENT_ROOT / "components" / "MapComponent.tsx").read_text(encoding="utf-8")
+        self.assertIn("this.onCreated();", component)
+        self.assertIn("featureIds: ids", component)
