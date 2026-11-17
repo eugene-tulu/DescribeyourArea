@@ -275,6 +275,11 @@ def resolve_by_name(resolver, query: str, *,
     # county. by_name at level 2 finds it; if none exists, L1 answers.
     try:
         feature = resolver.by_name(country, 2, admin2=name, simplify=simplify)
+        properties = feature.get("properties") or {}
+        if not ("gaul2_code" in properties or "gaul2_name" in properties):
+            # A lookup that silently answers with its parent unit would name
+            # the district and draw the county. Treat it as a miss.
+            raise ResolverError("no district matched", reason="not_found")
         level_name = "district (level 2)"
     except ResolverError:
         feature = resolver.by_name(country, 1, admin1=name, simplify=simplify)

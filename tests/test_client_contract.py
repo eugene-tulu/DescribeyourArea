@@ -161,8 +161,10 @@ class ClientServerContractTests(unittest.TestCase):
                 f"the share link encodes {key!r} and nothing reads it back, so "
                 f"the link restores nothing for that field",
             )
-        self.assertTrue(
-            "setUploadedGeojson" in source.split("useEffect")[-1],
+        restore_at = source.index("const params = new URLSearchParams(window.location.search)")
+        restore_block = source[restore_at:restore_at + 8000]
+        self.assertIn(
+            "setUploadedGeojson", restore_block,
             "the restored area has to reach the state that the map and the "
             "analysis both read",
         )
@@ -686,7 +688,8 @@ class MapFitTests(unittest.TestCase):
     def test_the_boundary_reaches_the_component_that_has_the_map(self):
         # useMap lives in the inner controller, so the prop has to be threaded to
         # it rather than used by the outer component.
-        self.assertIn("uploadedGeoJSON={uploadedGeoJSON}", self.source)
+        self.assertIn("aoiGeoJSON", self.source,
+                      "the map must receive the resolved active AOI, whether it was drawn or uploaded")
 
     def test_it_does_not_zoom_to_the_point_layer(self):
         # Search zooms to a place; a named area zooms to its extent. Confusing
@@ -764,3 +767,33 @@ class AreaEntryTests(unittest.TestCase):
             "submit, plan, the in-card submit and the status poll must all carry "
             "the product; a missing one means a reader is served the other "
             "product's series")
+
+
+class BasemapContractTests(unittest.TestCase):
+    """The map must open on hybrid and never need a provider key."""
+
+    @property
+    def basemaps(self) -> str:
+        return (CLIENT_ROOT / "lib" / "basemaps.ts").read_text(encoding="utf-8")
+
+    def test_hybrid_is_the_default_on_both_map_pages(self):
+        for page in ("app/page.tsx", "app/d/[id]/page.tsx"):
+            source = (CLIENT_ROOT / page).read_text(encoding="utf-8")
+            self.assertIn("useState<BasemapId>('hybrid')", source,
+                          f"{page} must open on the hybrid basemap")
+
+    def test_basemap_selector_is_not_gated_behind_a_result(self):
+        source = (CLIENT_ROOT / "app" / "page.tsx").read_text(encoding="utf-8")
+        selector = source.index("Basemap")
+        # The old control lived inside `analysisSummary && (...)`, so it only
+        # appeared after an upload. It belongs to the map, not the result.
+        before = source[max(0, selector - 1200):selector]
+        self.assertNotIn("analysisSummary && (", before)
+
+    def test_only_keyless_tile_providers_are_listed(self):
+        for marker in ("apiKey", "accessToken", "maptiler", "mapbox://", "Mapbox"):
+            self.assertNotIn(marker, self.basemaps,
+                             f"{marker} implies a keyed basemap")
+        for host in ("server.arcgisonline.com", "tile.openstreetmap.org",
+                     "basemaps.cartocdn.com"):
+            self.assertIn(host, self.basemaps)

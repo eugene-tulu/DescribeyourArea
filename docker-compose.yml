@@ -63,6 +63,16 @@ services:
       GAUL_API_URL: ${GAUL_API_URL:-http://root-gaul-api-1:8000}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # Remote COG ranges are the hot path for every map tile. GDAL's HTTP
+      # multiplexing, block cache and range merging cut the round trips per
+      # 256 px tile without changing the rendering code.
+      GDAL_HTTP_MULTIPLEX: "YES"
+      GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+      GDAL_HTTP_MAX_RETRY: "3"
+      GDAL_HTTP_RETRY_DELAY: "0.5"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "33554432"
+      GDAL_CACHEMAX: "256"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
@@ -114,6 +124,16 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
       RAINFALL_ALERT_WEBHOOK: ${RAINFALL_ALERT_WEBHOOK:-}
       RAINFALL_ALERT_RULES: ${RAINFALL_ALERT_RULES:-}
+      # Remote COG ranges are the hot path for every map tile. GDAL's HTTP
+      # multiplexing, block cache and range merging cut the round trips per
+      # 256 px tile without changing the rendering code.
+      GDAL_HTTP_MULTIPLEX: "YES"
+      GDAL_HTTP_MERGE_CONSECUTIVE_RANGES: "YES"
+      GDAL_HTTP_MAX_RETRY: "3"
+      GDAL_HTTP_RETRY_DELAY: "0.5"
+      VSI_CACHE: "TRUE"
+      VSI_CACHE_SIZE: "33554432"
+      GDAL_CACHEMAX: "256"
       # Keep the CHIRPS store current with DEA's monthly publications, from the
       # worker in the background. Extending is idempotent and isolated (a failure
       # never fails a sweep), and the cadence is a few times a day. Set to 0 to

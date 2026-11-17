@@ -47,6 +47,31 @@ function formatNumber(value: number | null | undefined, digits = 1): string {
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value);
 }
 
+function boundsOf(input: GeoJsonObject): [number, number, number, number] | undefined {
+  let west = Infinity, south = Infinity, east = -Infinity, north = -Infinity;
+  const walk = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    if (typeof value[0] === 'number' && typeof value[1] === 'number') {
+      west = Math.min(west, value[0]); east = Math.max(east, value[0]);
+      south = Math.min(south, value[1]); north = Math.max(north, value[1]);
+      return;
+    }
+    value.forEach(walk);
+  };
+  const visit = (geojson: GeoJsonObject): void => {
+    const value = geojson as unknown as {
+      type: string; features?: Array<{ geometry?: GeoJsonObject | null }>;
+      geometry?: GeoJsonObject | null; geometries?: GeoJsonObject[]; coordinates?: unknown;
+    };
+    if (value.type === 'FeatureCollection') value.features?.forEach((feature) => feature.geometry && visit(feature.geometry));
+    else if (value.type === 'Feature') { if (value.geometry) visit(value.geometry); }
+    else if (value.type === 'GeometryCollection') value.geometries?.forEach(visit);
+    else walk(value.coordinates);
+  };
+  visit(input);
+  return Number.isFinite(west) ? [west, south, east, north] : undefined;
+}
+
 function download(name: string, content: string, type: string): void {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -68,7 +93,7 @@ export default function DashboardPage() {
   const [project, setProject] = useState<ProjectView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [vegetation, setVegetation] = useState<VegPoint[]>([]);
-  const [basemap, setBasemap] = useState<BasemapId>('satellite');
+  const [basemap, setBasemap] = useState<BasemapId>('hybrid');
   const [terrain3d, setTerrain3d] = useState(false);
   const [layerOpacity, setLayerOpacity] = useState(0.7);
 
@@ -96,11 +121,12 @@ export default function DashboardPage() {
   const tileLayers = useMemo(() => {
     if (!project?.cache_key) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
+    const bounds = boundsOf(project.geojson);
     return [
-      { id: 'dem', url: `${backendUrl}/tiles/${project.cache_key}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: layerOpacity, zIndex: 400 },
-      { id: 'landcover', url: `${backendUrl}/tiles/${project.cache_key}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: layerOpacity, zIndex: 410 },
+      { id: 'dem', url: `${backendUrl}/tiles/${project.cache_key}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds },
+      { id: 'landcover', url: `${backendUrl}/tiles/${project.cache_key}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: layerOpacity, zIndex: 410, bounds },
     ];
-  }, [project?.cache_key, layerOpacity]);
+  }, [project?.cache_key, project?.geojson, layerOpacity]);
 
   const rows: EnrichedObservation[] = (project?.records ?? []).map((record) => ({
     id: record.id ?? '',
@@ -213,7 +239,7 @@ export default function DashboardPage() {
             </label>
           </div>
           <MapComponent
-            uploadedGeoJSON={project.geojson as FeatureCollection}
+            aoiGeoJSON={project.geojson as FeatureCollection}
             onBoundingBoxCreated={() => {}}
             onSaveFeatures={() => {}}
             points={project.records.map((record) => ({ id: record.id ?? '', lon: record.lon, lat: record.lat }))}

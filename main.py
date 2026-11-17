@@ -17,7 +17,8 @@ import planetary_computer
 import datetime
 import threading
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
+import hashlib
 import pystac_client
 import asyncio
 import json
@@ -3561,14 +3562,17 @@ _NDVI_RGBA = _ramp([
 
 
 def _geometry_of(geojson: Any) -> Optional[dict]:
+    """Return the whole validated study geometry, never just feature zero.
+
+    Tile URLs on the synchronous path carry GeoJSON.  A FeatureCollection is a
+    perfectly valid way to represent islands or several drawn polygons; taking
+    its first feature exposed data outside every other feature's AOI.  Reuse the
+    same union-and-validation gate used for analysis so rendering and statistics
+    have exactly the same spatial contract.
+    """
     if not isinstance(geojson, dict):
-        return None
-    if geojson.get("type") == "FeatureCollection":
-        features = geojson.get("features") or []
-        return features[0].get("geometry") if features else None
-    if geojson.get("type") == "Feature":
-        return geojson.get("geometry")
-    return geojson
+        raise HTTPException(status_code=422, detail="geom must be a GeoJSON polygon")
+    return canonicalize_geojson(geojson)["geometry"]
 
 
 def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
@@ -3638,6 +3642,64 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
         return _TILE_TRANSPARENT_PNG
 
 
+# Tiles are immutable for a computed area, so repeated pans and shared links
+# should never pay for another COG read. The cache is deliberately small and
+# process-local: PNGs are already compressed, and a bounded read-through cache
+# is enough to make revisits instant without growing without limit.
+_TILE_CACHE: "OrderedDict[tuple, bytes]" = OrderedDict()
+_TILE_CACHE_LOCK = threading.Lock()
+_TILE_CACHE_MAX = 1536
+
+
+def _geometry_hash(geometry: dict) -> str:
+    payload = json.dumps(geometry, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.blake2b(payload, digest_size=12).hexdigest()
+
+
+_GEOM_CACHE: "OrderedDict[str, dict]" = OrderedDict()
+_GEOM_CACHE_MAX = 64
+
+
+def _geometry_from_param(raw: str) -> dict:
+    """Parse the AOI once per tile request, not once per rendered tile."""
+    digest = hashlib.blake2b(raw.encode("utf-8"), digest_size=12).hexdigest()
+    with _TILE_CACHE_LOCK:
+        cached = _GEOM_CACHE.get(digest)
+        if cached is not None:
+            _GEOM_CACHE.move_to_end(digest)
+            return cached
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="geom must be valid GeoJSON") from exc
+    geometry = _geometry_of(parsed)
+    with _TILE_CACHE_LOCK:
+        _GEOM_CACHE[digest] = geometry
+        _GEOM_CACHE.move_to_end(digest)
+        while len(_GEOM_CACHE) > _GEOM_CACHE_MAX:
+            _GEOM_CACHE.popitem(last=False)
+    return geometry
+
+
+def _cached_tile_png(key: tuple, hrefs: list[str], indicator: str,
+                     z: int, x: int, y: int, geometry: Optional[dict]) -> bytes:
+    with _TILE_CACHE_LOCK:
+        cached = _TILE_CACHE.get(key)
+        if cached is not None:
+            _TILE_CACHE.move_to_end(key)
+            return cached
+    png = _render_tile_png(hrefs, indicator, z, x, y, geometry)
+    # A transient source failure returns the 1x1 fallback. Caching that would
+    # turn one bad read into a permanently blank tile.
+    if png != _TILE_TRANSPARENT_PNG:
+        with _TILE_CACHE_LOCK:
+            _TILE_CACHE[key] = png
+            _TILE_CACHE.move_to_end(key)
+            while len(_TILE_CACHE) > _TILE_CACHE_MAX:
+                _TILE_CACHE.popitem(last=False)
+    return png
+
+
 @app.get("/tiles/bbox/{indicator}/{z}/{x}/{y}.png")
 async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
                         bbox: str, year: Optional[int] = None,
@@ -3657,7 +3719,9 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
     if len(bounds) != 4:
         raise HTTPException(status_code=422, detail="bbox must be minLon,minLat,maxLon,maxLat")
-    geometry = _geometry_of(json.loads(geom)) if geom else None
+    if not geom:
+        raise HTTPException(status_code=422, detail="geom is required to render a safely clipped tile")
+    geometry = _geometry_from_param(geom)
 
     asset_key = f"bbox:{bbox}:{indicator}:{year}"
     hrefs = _TILE_ASSET_CACHE.get(asset_key)
@@ -3672,7 +3736,10 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         if len(_TILE_ASSET_CACHE) > 100:
             _TILE_ASSET_CACHE.clear()
         _TILE_ASSET_CACHE[asset_key] = hrefs
-    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
+    key = ("bbox", tuple(bounds), indicator, year, z, x, y, _geometry_hash(geometry))
+    png = await asyncio.to_thread(
+        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry,
+    )
     return Response(
         content=png,
         media_type="image/png",
@@ -3694,8 +3761,13 @@ async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int,
     path = f"/app/.rainfall-cache/tiles/sync/{sync_key}/ndvi.tif"
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="NDVI raster not computed for this area")
-    geometry = _geometry_of(json.loads(geom)) if geom else None
-    png = await asyncio.to_thread(_render_tile_png, [path], "ndvi", z, x, y, geometry)
+    if not geom:
+        raise HTTPException(status_code=422, detail="geom is required to render a safely clipped tile")
+    geometry = _geometry_from_param(geom)
+    key = ("sync", sync_key, z, x, y, _geometry_hash(geometry))
+    png = await asyncio.to_thread(
+        _cached_tile_png, key, [path], "ndvi", z, x, y, geometry,
+    )
     return Response(
         content=png,
         media_type="image/png",
@@ -3719,8 +3791,10 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
     artefact = jobs.read_artefact(cache_key, indicator)
     bbox = (artefact or {}).get("bbox")
     geometry = (artefact or {}).get("geometry")
-    if not bbox:
-        raise HTTPException(status_code=404, detail="no area for this cache key")
+    if not bbox or not geometry:
+        # A legacy artefact without its original polygon cannot be rendered
+        # safely: showing its rectangular raster would break the AOI promise.
+        raise HTTPException(status_code=404, detail="no safely clipped area for this cache key")
 
     if indicator == "ndvi":
         # The worker writes the median composite as a local tiled COG; no STAC
@@ -3744,11 +3818,14 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
                 _TILE_ASSET_CACHE.clear()
             _TILE_ASSET_CACHE[asset_key] = hrefs
 
-    png = await asyncio.to_thread(_render_tile_png, hrefs, indicator, z, x, y, geometry)
+    key = ("area", cache_key, indicator, year, z, x, y)
+    png = await asyncio.to_thread(
+        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry,
+    )
     return Response(
         content=png,
         media_type="image/png",
-        headers={"Cache-Control": "public, max-age=86400"},
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
     )
 
 
@@ -3769,8 +3846,8 @@ async def pmtiles_tile(cache_key: str, indicator: str, z: int, x: int, y: int,
     artefact = jobs.read_artefact(cache_key, indicator)
     bbox = (artefact or {}).get("bbox")
     geometry = (artefact or {}).get("geometry")
-    if not bbox:
-        raise HTTPException(status_code=404, detail="no area for this cache key")
+    if not bbox or not geometry:
+        raise HTTPException(status_code=404, detail="no safely clipped area for this cache key")
     if indicator == "ndvi":
         tile_path = (artefact or {}).get("tile_path")
         hrefs = [tile_path] if tile_path else []

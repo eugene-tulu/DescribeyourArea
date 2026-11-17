@@ -9,3 +9,4 @@ __pycache__/
 .vscode/
 # ERA5 rainfall series cache (regenerate with tools/precompute_rainfall.py)
 .rainfall-cache/
+.firecrawl/

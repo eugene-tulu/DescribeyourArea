@@ -22,11 +22,15 @@ interface BoundingBox {
 
 interface MapComponentProps {
   onBoundingBoxCreated: (bbox: BoundingBox | null) => void;
-  uploadedGeoJSON?: GeoJSON.GeoJsonObject | null;
-  secondaryGeoJSON?: GeoJSON.GeoJsonObject | null;
+  /** The one authoritative study area: uploaded, drawn or resolved by name. */
+  aoiGeoJSON?: GeoJSON.GeoJsonObject | null;
   onSaveFeatures?: (features: GeoJSON.FeatureCollection) => void;
   viewBounds?: [[number, number], [number, number]] | null;
-  tileLayers?: Array<{ id: string; url: string; attribution: string; opacity?: number; zIndex?: number }>;
+  tileLayers?: Array<{
+    id: string; url: string; attribution: string; opacity?: number; zIndex?: number;
+    /** Limits network tile requests to the AOI envelope; the server clips to its exact shape. */
+    bounds?: [number, number, number, number];
+  }>;
   onClearOverlay?: () => void;
   points?: Array<{ id: string; lon: number; lat: number }>;
   basemap?: BasemapId;
@@ -57,6 +61,8 @@ function bboxOf(input: GeoJSON.GeoJsonObject | null | undefined): BoundingBox | 
       collect((geometry as GeoJSON.Feature).geometry);
     } else if (geometry.type === 'GeometryCollection') {
       (geometry as GeoJSON.GeometryCollection).geometries.forEach((g) => collect(g));
+    } else if (geometry.type === 'MultiPolygon') {
+      (geometry as GeoJSON.MultiPolygon).coordinates.forEach(walk);
     } else {
       walk((geometry as { coordinates?: unknown }).coordinates);
     }
@@ -77,17 +83,26 @@ function styleFor(basemap: BasemapId): StyleSpecification {
     },
   };
   const layers: StyleSpecification['layers'] = [];
-  BASEMAPS[basemap].sources.forEach((source, index) => {
-    const id = `basemap-${index}`;
-    sources[id] = {
-      type: 'raster',
-      tiles: source.tiles,
-      tileSize: 256,
-      attribution: source.attribution,
-      maxzoom: source.maxzoom ?? 19,
-    };
-    layers.push({ id, type: 'raster', source: id, paint: { 'raster-fade-duration': 0 } });
-  });
+  for (const [id, base] of Object.entries(BASEMAPS) as Array<[BasemapId, (typeof BASEMAPS)[BasemapId]]>) {
+    const visible = id === basemap;
+    base.sources.forEach((source, index) => {
+      const sourceId = `basemap-${id}-${index}`;
+      sources[sourceId] = {
+        type: 'raster',
+        tiles: source.tiles,
+        tileSize: 256,
+        attribution: source.attribution,
+        maxzoom: source.maxzoom ?? 19,
+      };
+      layers.push({
+        id: sourceId,
+        type: 'raster',
+        source: sourceId,
+        layout: { visibility: visible ? 'visible' : 'none' },
+        paint: { 'raster-fade-duration': 120 },
+      });
+    });
+  }
   layers.push({
     id: 'hillshade',
     type: 'hillshade',
@@ -102,35 +117,42 @@ function styleFor(basemap: BasemapId): StyleSpecification {
   return { version: 8, sources, layers, sky: {} };
 }
 
-function addSecondary(map: MlMap, data: GeoJSON.GeoJsonObject | null | undefined): void {
-  const value = (data ?? EMPTY_FC) as unknown as GeoJSON.FeatureCollection;
-  const source = map.getSource('secondary') as GeoJSONSource | undefined;
-  if (source) {
-    source.setData(value);
-    return;
+function setAoiVisible(map: MlMap, visible: boolean): void {
+  for (const id of ['aoi-glow', 'aoi-fill', 'aoi-line']) {
+    if (map.getLayer(id)) {
+      map.setLayoutProperty(id, 'visibility', visible ? 'visible' : 'none');
+    }
   }
-  map.addSource('secondary', { type: 'geojson', data: value });
-  map.addLayer({
-    id: 'secondary-line',
-    type: 'line',
-    source: 'secondary',
-    paint: { 'line-color': '#8b98ad', 'line-width': 1, 'line-dasharray': [3, 2], 'line-opacity': 0.8 },
-  });
+}
+
+function asFeature(data: GeoJSON.GeoJsonObject | null | undefined): GeoJSON.Feature | GeoJSON.FeatureCollection {
+  if (!data) return EMPTY_FC;
+  if (data.type === 'Feature' || data.type === 'FeatureCollection') {
+    return data as GeoJSON.Feature | GeoJSON.FeatureCollection;
+  }
+  return { type: 'Feature', properties: {}, geometry: data as GeoJSON.Geometry };
 }
 
 function addAoi(map: MlMap, data: GeoJSON.GeoJsonObject | null | undefined): void {
-  const value = (data ?? EMPTY_FC) as unknown as GeoJSON.FeatureCollection;
+  const value = asFeature(data);
   const source = map.getSource('aoi') as GeoJSONSource | undefined;
   if (source) {
     source.setData(value);
     return;
   }
   map.addSource('aoi', { type: 'geojson', data: value });
-  map.addLayer({ id: 'aoi-fill', type: 'fill', source: 'aoi', paint: { 'fill-color': '#b9e84b', 'fill-opacity': 0.06 } });
-  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#b9e84b', 'line-width': 1.6, 'line-opacity': 0.95 } });
+  map.addLayer({ id: 'aoi-fill', type: 'fill', source: 'aoi', paint: { 'fill-color': '#b9e84b', 'fill-opacity': 0.07 } });
+  map.addLayer({
+    id: 'aoi-glow', type: 'line', source: 'aoi',
+    paint: { 'line-color': '#b9e84b', 'line-width': 6, 'line-opacity': 0.16, 'line-blur': 3 },
+  });
+  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#d6ff7a', 'line-width': 1.8, 'line-opacity': 0.98 } });
 }
 
 function addRasters(map: MlMap, layers: MapComponentProps['tileLayers']): void {
+  // Raster source bounds stop the browser asking for a global grid of tiles.
+  // The API also alpha-clips each remaining tile to the actual (not rectangular)
+  // AOI, so the bounding box is only a request optimisation, never a display mask.
   const wanted = new Set((layers ?? []).map((layer) => `raster-${layer.id}`));
   for (const layer of [...(map.getStyle().layers ?? [])]) {
     if (layer.id.startsWith('raster-') && !wanted.has(layer.id)) {
@@ -139,27 +161,213 @@ function addRasters(map: MlMap, layers: MapComponentProps['tileLayers']): void {
       if (map.getSource(sourceId)) map.removeSource(sourceId);
     }
   }
-  for (const layer of layers ?? []) {
+  const before = map.getLayer('aoi-fill') ? 'aoi-fill' : undefined;
+  for (const layer of [...(layers ?? [])].sort((a, b) => (a.zIndex ?? 0) - (b.zIndex ?? 0))) {
     const sourceId = `tile-${layer.id}`;
     const layerId = `raster-${layer.id}`;
-    if (!map.getSource(sourceId)) {
+    const current = map.getStyle().sources[sourceId] as {
+      tiles?: string[]; bounds?: [number, number, number, number];
+    } | undefined;
+    const sameSource = current?.tiles?.[0] === layer.url
+      && JSON.stringify(current?.bounds ?? null) === JSON.stringify(layer.bounds ?? null);
+    if (!sameSource) {
+      if (map.getLayer(layerId)) map.removeLayer(layerId);
+      if (map.getSource(sourceId)) map.removeSource(sourceId);
       map.addSource(sourceId, {
         type: 'raster',
         tiles: [layer.url],
         tileSize: 256,
         attribution: layer.attribution,
+        bounds: layer.bounds,
       });
       map.addLayer({
         id: layerId,
         type: 'raster',
         source: sourceId,
         paint: { 'raster-opacity': layer.opacity ?? 0.7, 'raster-fade-duration': 0 },
-      }, map.getLayer('aoi-fill') ? 'aoi-fill' : undefined);
+      }, before);
     } else {
       map.setPaintProperty(layerId, 'raster-opacity', layer.opacity ?? 0.7);
+      if (before) map.moveLayer(layerId, before);
     }
   }
 }
+
+/** A MapLibre-native rectangle tool. Mapbox Draw has no rectangle mode, and a
+ * type cast on the old control advertised a button that did nothing. */
+class RectangleControl implements IControl {
+  private map?: MlMap;
+  private button?: HTMLButtonElement;
+  private drawing = false;
+  private start?: maplibregl.LngLat;
+
+  constructor(private readonly draw: MapboxDraw) {}
+
+  onAdd(map: MlMap): HTMLElement {
+    this.map = map;
+    const container = document.createElement('div');
+    container.className = 'maplibregl-ctrl maplibregl-ctrl-group';
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'maplibregl-ctrl-icon geocontext-rectangle-control';
+    button.title = 'Draw rectangle';
+    button.setAttribute('aria-label', 'Draw rectangle');
+    button.setAttribute('aria-pressed', 'false');
+    button.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>';
+    button.addEventListener('click', this.begin);
+    map.on('draw.modechange' as keyof MapEventType, this.onModeChange as never);
+    document.addEventListener('keydown', this.onKeyDown);
+    container.appendChild(button);
+    this.button = button;
+    return container;
+  }
+
+  onRemove(): void {
+    this.stop();
+    this.button?.removeEventListener('click', this.begin);
+    this.button?.parentElement?.remove();
+    this.map?.off('draw.modechange' as keyof MapEventType, this.onModeChange as never);
+    document.removeEventListener('keydown', this.onKeyDown);
+    this.map = undefined;
+  }
+
+  private begin = (): void => {
+    const map = this.map;
+    if (!map) return;
+    this.stop();
+    this.draw.changeMode('simple_select');
+    this.drawing = true;
+    map.getCanvas().style.cursor = 'crosshair';
+    this.button?.classList.add('active');
+    this.button?.setAttribute('aria-pressed', 'true');
+    map.dragPan.disable();
+    map.once('mousedown', this.onDown);
+  };
+
+  private onDown = (event: maplibregl.MapMouseEvent): void => {
+    const map = this.map;
+    if (!map || !this.drawing) return;
+    this.start = event.lngLat;
+    map.on('mousemove', this.onMove);
+    map.on('mouseup', this.onUp);
+    this.renderPreview(this.start, this.start);
+  };
+
+  private onMove = (event: maplibregl.MapMouseEvent): void => {
+    if (this.start) this.renderPreview(this.start, event.lngLat);
+  };
+
+  private onUp = (event: maplibregl.MapMouseEvent): void => {
+    if (!this.start) return;
+    const polygon = this.rectangle(this.start, event.lngLat);
+    if (polygon) {
+      this.draw.add({ type: 'Feature', properties: {}, geometry: polygon });
+      this.draw.changeMode('simple_select');
+    }
+    this.stop();
+  };
+
+  private rectangle(a: maplibregl.LngLat, b: maplibregl.LngLat): GeoJSON.Polygon | null {
+    const west = Math.min(a.lng, b.lng);
+    const east = Math.max(a.lng, b.lng);
+    const south = Math.min(a.lat, b.lat);
+    const north = Math.max(a.lat, b.lat);
+    if (east - west <= 0 || north - south <= 0) return null;
+    return {
+      type: 'Polygon',
+      coordinates: [[[west, south], [east, south], [east, north], [west, north], [west, south]]],
+    };
+  }
+
+  private renderPreview(a: maplibregl.LngLat, b: maplibregl.LngLat): void {
+    const map = this.map;
+    if (!map) return;
+    if (!map.getSource('rectangle-preview')) {
+      map.addSource('rectangle-preview', { type: 'geojson', data: EMPTY_FC });
+      map.addLayer({
+        id: 'rectangle-preview',
+        type: 'line',
+        source: 'rectangle-preview',
+        paint: { 'line-color': '#d6ff7a', 'line-width': 1.5, 'line-dasharray': [2, 1.5] },
+      }, map.getLayer('aoi-fill') ? 'aoi-fill' : undefined);
+    }
+    const polygon = this.rectangle(a, b);
+    const source = map.getSource('rectangle-preview') as GeoJSONSource;
+    source.setData(polygon
+      ? { type: 'Feature', properties: {}, geometry: polygon }
+      : EMPTY_FC);
+  }
+
+  private onModeChange = (event: { mode: string }): void => {
+    if (this.drawing && event.mode.startsWith('draw_')) this.stop();
+  };
+
+  private onKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') this.stop();
+  };
+
+  private stop = (): void => {
+    const map = this.map;
+    if (!map) return;
+    this.drawing = false;
+    this.start = undefined;
+    map.dragPan.enable();
+    map.getCanvas().style.cursor = '';
+    this.button?.classList.remove('active');
+    this.button?.setAttribute('aria-pressed', 'false');
+    map.off('mousedown', this.onDown);
+    map.off('mousemove', this.onMove);
+    map.off('mouseup', this.onUp);
+    const source = map.getSource('rectangle-preview') as GeoJSONSource | undefined;
+    if (source) source.setData(EMPTY_FC);
+  };
+}
+
+const DRAW_STYLES: object[] = [
+  {
+    id: 'gl-draw-polygon-fill',
+    type: 'fill',
+    filter: ['all', ['==', '$type', 'Polygon']],
+    paint: {
+      'fill-color': ['case', ['==', ['get', 'active'], 'true'], '#d6ff7a', '#b9e84b'],
+      'fill-opacity': 0.1,
+    },
+  },
+  {
+    id: 'gl-draw-lines',
+    type: 'line',
+    filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: {
+      'line-color': ['case', ['==', ['get', 'active'], 'true'], '#d6ff7a', '#b9e84b'],
+      'line-width': 2,
+    },
+  },
+  {
+    id: 'gl-draw-vertex-outer',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
+    paint: {
+      'circle-radius': ['case', ['==', ['get', 'active'], 'true'], 7, 5],
+      'circle-color': '#0b1020',
+    },
+  },
+  {
+    id: 'gl-draw-vertex-inner',
+    type: 'circle',
+    filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
+    paint: {
+      'circle-radius': ['case', ['==', ['get', 'active'], 'true'], 5, 3],
+      'circle-color': '#d6ff7a',
+    },
+  },
+  {
+    id: 'gl-draw-midpoint',
+    type: 'circle',
+    filter: ['all', ['==', 'meta', 'midpoint']],
+    paint: { 'circle-radius': 3, 'circle-color': '#d6ff7a' },
+  },
+];
 
 function addPoints(map: MlMap, points: MapComponentProps['points']): void {
   const handles = points ?? [];
@@ -219,14 +427,13 @@ function addPoints(map: MlMap, points: MapComponentProps['points']): void {
 
 export default function MapComponent({
   onBoundingBoxCreated,
-  uploadedGeoJSON,
-  secondaryGeoJSON,
+  aoiGeoJSON,
   onSaveFeatures,
   viewBounds,
   tileLayers,
   onClearOverlay,
   points,
-  basemap = 'satellite',
+  basemap = 'hybrid',
   terrain3d = false,
 }: MapComponentProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -254,13 +461,18 @@ export default function MapComponent({
 
     const draw = new MapboxDraw({
       displayControlsDefault: false,
-      controls: { polygon: true, rectangle: true, trash: true } as never,
+      controls: { polygon: true, trash: true },
+      styles: DRAW_STYLES,
     });
     map.addControl(draw as unknown as IControl, 'top-left');
+    map.addControl(new RectangleControl(draw), 'top-left');
     const syncDraw = () => {
       const features = draw.getAll() as GeoJSON.FeatureCollection;
       saveRef.current?.(features);
       bboxRef.current?.(bboxOf(features));
+      // While a feature is editable, Mapbox Draw renders it. Hide the duplicate
+      // read-only AOI layer so the boundary is drawn once, in one style.
+      setAoiVisible(map, features.features.length === 0);
     };
     map.on('draw.create' as keyof MapEventType, syncDraw);
     map.on('draw.update' as keyof MapEventType, syncDraw);
@@ -268,8 +480,8 @@ export default function MapComponent({
 
     map.on('load', () => {
       loadedRef.current = true;
-      addSecondary(map, secondaryGeoJSON);
-      addAoi(map, uploadedGeoJSON);
+      addAoi(map, aoiGeoJSON);
+      setAoiVisible(map, !!aoiGeoJSON);
       addRasters(map, tileLayers);
       addPoints(map, points);
       if (terrain3d) {
@@ -277,8 +489,8 @@ export default function MapComponent({
         if (map.getLayer('hillshade')) map.setLayoutProperty('hillshade', 'visibility', 'visible');
         map.easeTo({ pitch: 55, duration: 0 });
       }
-      if (uploadedGeoJSON) {
-        const box = bboxOf(uploadedGeoJSON);
+      if (aoiGeoJSON) {
+        const box = bboxOf(aoiGeoJSON);
         if (box) map.fitBounds([[box.west, box.south], [box.east, box.north]], { padding: 60, maxZoom: 14, duration: 0 });
       }
     });
@@ -297,25 +509,14 @@ export default function MapComponent({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current) return;
-    const style = map.getStyle();
-    for (const layer of [...(style.layers ?? [])]) {
-      if (layer.id.startsWith('basemap-')) map.removeLayer(layer.id);
-    }
-    for (const id of Object.keys(style.sources ?? {})) {
-      if (id.startsWith('basemap-')) map.removeSource(id);
-    }
-    const before = map.getLayer('hillshade') ? 'hillshade' : undefined;
-    BASEMAPS[basemap].sources.forEach((source, index) => {
-      const id = `basemap-${index}`;
-      map.addSource(id, {
-        type: 'raster',
-        tiles: source.tiles,
-        tileSize: 256,
-        attribution: source.attribution,
-        maxzoom: source.maxzoom ?? 19,
+    for (const [id, base] of Object.entries(BASEMAPS) as Array<[BasemapId, (typeof BASEMAPS)[BasemapId]]>) {
+      base.sources.forEach((_source, index) => {
+        const layerId = `basemap-${id}-${index}`;
+        if (map.getLayer(layerId)) {
+          map.setLayoutProperty(layerId, 'visibility', id === basemap ? 'visible' : 'none');
+        }
       });
-      map.addLayer({ id, type: 'raster', source: id, paint: { 'raster-fade-duration': 0 } }, before);
-    });
+    }
   }, [basemap]);
 
   useEffect(() => {
@@ -332,19 +533,23 @@ export default function MapComponent({
     const map = mapRef.current;
     const draw = drawRef.current;
     if (!map || !loadedRef.current) return;
-    if (uploadedGeoJSON && draw) draw.deleteAll();
-    addAoi(map, uploadedGeoJSON);
-    if (uploadedGeoJSON) {
-      const box = bboxOf(uploadedGeoJSON);
+    // An uploaded, searched or restored AOI replaces anything that was drawn.
+    // When the AOI came from the draw itself, keep the editable feature.
+    if (draw && aoiGeoJSON) {
+      const drawn = draw.getAll() as GeoJSON.FeatureCollection;
+      if (drawn.features.length > 0
+          && JSON.stringify(drawn) !== JSON.stringify(aoiGeoJSON)) {
+        draw.deleteAll();
+      }
+    }
+    addAoi(map, aoiGeoJSON);
+    const drawing = !!(draw && draw.getAll().features.length);
+    setAoiVisible(map, !drawing && !!aoiGeoJSON);
+    if (aoiGeoJSON) {
+      const box = bboxOf(aoiGeoJSON);
       if (box) map.fitBounds([[box.west, box.south], [box.east, box.north]], { padding: 60, maxZoom: 14, duration: 600 });
     }
-  }, [uploadedGeoJSON]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map || !loadedRef.current) return;
-    addSecondary(map, secondaryGeoJSON);
-  }, [secondaryGeoJSON]);
+  }, [aoiGeoJSON]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -361,7 +566,7 @@ export default function MapComponent({
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !loadedRef.current || !viewBounds) return;
-    map.fitBounds(viewBounds, { padding: 60, maxZoom: 14, duration: 700 });
+    map.fitBounds(viewBounds, { padding: 60, maxZoom: 11, duration: 700 });
   }, [viewBounds]);
 
   return (
@@ -384,6 +589,9 @@ export default function MapComponent({
         .maplibregl-ctrl-attrib a{color:#aab5cb}
         .maplibregl-ctrl-scale{background:rgba(11,16,32,.8);border-color:#24314a;color:#aab5cb}
         .mapbox-gl-draw_ctrl-draw-btn{filter:invert(1)}
+        .geocontext-rectangle-control{display:flex;align-items:center;justify-content:center;color:#e8ecf4;filter:none!important}
+        .geocontext-rectangle-control svg{pointer-events:none}
+        .geocontext-rectangle-control.active{background:#b9e84b;color:#0b1020}
       `}</style>
     </div>
   );

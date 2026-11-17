@@ -31,7 +31,7 @@ const MapComponent = dynamic(() => import('@/components/MapComponent'), {
     <div className="flex h-[600px] items-center justify-center bg-void">
       <div className="flex items-center gap-2.5">
         <Globe className="h-5 w-5 animate-spin text-signal" />
-        <span className="label">Loading satellite basemap</span>
+        <span className="label">Loading map</span>
       </div>
     </div>
   )
@@ -1714,7 +1714,7 @@ export default function Home() {
   // The overlay is a reading aid, not part of the result. Clearing it must not
   // clear the numbers (the old onClearOverlay reset the whole summary).
   const [overlayVisible, setOverlayVisible] = useState(true);
-  const [basemap, setBasemap] = useState<BasemapId>('satellite');
+  const [basemap, setBasemap] = useState<BasemapId>('hybrid');
   const [terrain3d, setTerrain3d] = useState(false);
   const [layerOpacity, setLayerOpacity] = useState(0.7);
   const [mapLayers, setMapLayers] = useState({
@@ -1852,7 +1852,6 @@ export default function Home() {
   // real value, so prefer that and fall back to the documented default.
    const [syncLimitKm2, setSyncLimitKm2] = useState<number | null>(null);
    const [uploadedGeojson, setUploadedGeojson] = useState<GeoJsonObject | null>(null);
-   const [secondaryGeojson, setSecondaryGeojson] = useState<GeoJsonObject | null>(null);
   // An administrative boundary, named rather than drawn.
   const [adminArea, setAdminArea] = useState<{ id: string | null; name: string | null; level: number | null } | null>(null);
   const [adminQuery, setAdminQuery] = useState('');
@@ -1987,6 +1986,8 @@ export default function Home() {
         `/api/areas/resolve?id=${encodeURIComponent(containingArea.id)}&level=${containingArea.level}`);
       if (!response.ok) throw new Error('could not fetch that boundary');
       const area = await response.json();
+      setDrawnFeatures(null);
+      setBoundingBox(null);
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAdminArea({ id: area.id ?? containingArea.id, name: area.name ?? containingArea.name,
                      level: area.level ?? containingArea.level });
@@ -2018,7 +2019,8 @@ export default function Home() {
         throw new Error(failure?.detail || `No administrative area found for ${query}`);
       }
       const area = await response.json();
-      setSecondaryGeojson(uploadedGeojson);
+      setDrawnFeatures(null);
+      setBoundingBox(null);
       setUploadedGeojson(area.geometry as GeoJsonObject);
       setAreaKm2(typeof area.area_km2 === 'number' ? area.area_km2 : null);
       setAdminArea({ id: area.id ?? null, name: area.name ?? query, level: area.level ?? null });
@@ -2143,7 +2145,9 @@ export default function Home() {
           throw new Error(failure?.detail || 'The file could not be read as WGS84.');
         }
         const canonical = await response.json();
-        setSecondaryGeojson(uploadedGeojson);
+        setDrawnFeatures(null);
+        setBoundingBox(null);
+        setAdminArea(null);
         setUploadedGeojson((canonical?.geometry ?? canonical) as GeoJsonObject);
         setAreaKm2(bboxAreaKm2(geojsonBbox(canonical?.geometry ?? canonical)));
         trackEvent('area_selected', { source: 'geojson_upload' });
@@ -3024,14 +3028,9 @@ export default function Home() {
     });
   }, [activeCacheKey, analysisSummary?.rainfall?.status]);
 
-  // Keep a restored share-link area in the state the map and analysis read.
-  useEffect(() => {
-    if (uploadedGeojson) setUploadedGeojson(uploadedGeojson);
-  }, [uploadedGeojson]);
-
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- currentGeojson closes over these three values
   const aoiGeojson = useMemo(
     () => currentGeojson(),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- currentGeojson closes over these three values
     [uploadedGeojson, drawnFeatures, boundingBox],
   );
 
@@ -3059,19 +3058,23 @@ export default function Home() {
       if (year) query.push(`year=${year}`);
       return `${base}/${indicator}/{z}/{x}/{y}.png${query.length ? `?${query.join('&')}` : ''}`;
     };
+    const sourceBounds = (Array.isArray(bbox) && bbox.length === 4
+      ? [bbox[0], bbox[1], bbox[2], bbox[3]]
+      : aoiGeojson ? geojsonBbox(aoiGeojson) : null) as
+      [number, number, number, number] | null;
     const layers: Array<{
       id: string; url: string; attribution: string;
-      opacity?: number; zIndex?: number;
+      opacity?: number; zIndex?: number; bounds?: [number, number, number, number];
     }> = [];
     if (mapLayers.dem) {
-      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400 });
+      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds: sourceBounds ?? undefined });
     }
     if (mapLayers.landcover) {
-      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: layerOpacity, zIndex: 410 });
+      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: layerOpacity, zIndex: 410, bounds: sourceBounds ?? undefined });
     }
     if (mapLayers.ndvi) {
       if (activeCacheKey) {
-        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420 });
+        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420, bounds: sourceBounds ?? undefined });
       } else if (syncKey) {
         layers.push({
           id: 'ndvi',
@@ -3079,6 +3082,7 @@ export default function Home() {
           attribution: 'NDVI',
           opacity: layerOpacity,
           zIndex: 420,
+          bounds: sourceBounds ?? undefined,
         });
       }
     }
@@ -3089,6 +3093,7 @@ export default function Home() {
         attribution: `Land cover ${historyYear}`,
         opacity: 0.65,
         zIndex: 430,
+        bounds: sourceBounds ?? undefined,
       });
     }
     return layers;
@@ -3532,12 +3537,11 @@ export default function Home() {
                   <p className="fig text-[0.8125rem] text-ink-3">
                     {boundingBox || drawnFeatures?.features.length || uploadedGeojson
                       ? 'Area selected — ready to read'
-                      : 'Esri World Imagery · draw, search or upload an area'}
+                      : 'Hybrid basemap · draw, search or upload an area'}
                   </p>
                 </div>
 
-                {analysisSummary && (
-                  <div className="mb-3 flex flex-wrap items-center gap-2" data-print-hide>
+                <div className="flex flex-wrap items-center gap-2 border-b border-rule px-5 py-2.5" data-print-hide>
                     <label className="flex items-center gap-1.5 text-[0.75rem] text-ink-3">
                       Basemap
                       <select
@@ -3550,6 +3554,7 @@ export default function Home() {
                         ))}
                       </select>
                     </label>
+                    <span className="text-[0.6875rem] text-ink-3">No API key required</span>
                     <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2">
                       <input
                         type="checkbox"
@@ -3598,13 +3603,13 @@ export default function Home() {
                         {layer.label}
                       </label>
                     ))}
-                    {mapLayers.landcover_history && (analysisSummary.landcover_history?.series?.length ?? 0) > 0 && (
+                    {mapLayers.landcover_history && (analysisSummary?.landcover_history?.series?.length ?? 0) > 0 && (
                       <select
                         value={historyYear ?? ''}
                         onChange={(event) => setHistoryYear(event.target.value ? Number(event.target.value) : null)}
                         className="h-7 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
                       >
-                        {(analysisSummary.landcover_history?.series ?? []).map((entry) => (
+                        {(analysisSummary?.landcover_history?.series ?? []).map((entry) => (
                           <option key={entry.year} value={entry.year}>{entry.year}</option>
                         ))}
                       </select>
@@ -3612,13 +3617,11 @@ export default function Home() {
                     <span className="text-[0.75rem] text-ink-3">
                       Rainfall and the vegetation series are charts below.
                     </span>
-                  </div>
-                )}
+                </div>
                 <div className="relative">
                   <MapComponent
                     onBoundingBoxCreated={handleBoundingBoxCreated}
-                    uploadedGeoJSON={uploadedGeojson}
-                    secondaryGeoJSON={secondaryGeojson}
+                    aoiGeoJSON={aoiGeojson ?? null}
                     onSaveFeatures={handleFeaturesChange}
                     viewBounds={placeBounds}
                     tileLayers={tileLayers}
