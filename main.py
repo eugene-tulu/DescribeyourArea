@@ -1,7 +1,7 @@
 # --------------------------------------------------
 # IMPORTS
 # --------------------------------------------------
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
@@ -3552,12 +3552,17 @@ _DEM_RGBA = _ramp([
     (0.75, (205, 190, 160)),
     (1.0, (245, 245, 245)),
 ])
+# A sequential yellow-green ramp, not the old brown-to-teal diverging one.
+# It keeps a monotonic lightness direction, so low vegetation is visible to
+# colour-blind readers as well as to everyone else, and green means vegetation.
 _NDVI_RGBA = _ramp([
-    (0.0, (140, 81, 10)),
-    (0.35, (216, 179, 101)),
-    (0.5, (246, 232, 195)),
-    (0.65, (128, 205, 193)),
-    (1.0, (1, 102, 94)),
+    (0.0, (120, 84, 46)),
+    (0.18, (196, 158, 90)),
+    (0.38, (231, 224, 160)),
+    (0.55, (180, 218, 140)),
+    (0.72, (103, 183, 97)),
+    (0.88, (43, 129, 68)),
+    (1.0, (8, 77, 44)),
 ])
 
 
@@ -3575,8 +3580,74 @@ def _geometry_of(geojson: Any) -> Optional[dict]:
     return canonicalize_geojson(geojson)["geometry"]
 
 
+def _majority_filter(image, passes: int = 1):
+    """Remove single-pixel class speckle without moving class boundaries.
+
+    A 10 m categorical raster at z8-z9 is mostly texture at the screen scale.
+    A 3x3 majority filter is a cartographic generalisation: it keeps the major
+    patches and drops isolated class pixels. Only the display raster is changed;
+    zonal statistics keep the native classification.
+    """
+    data = np.asarray(image.array[0])
+    mask = image.array.mask
+    if mask is np.ma.nomask:
+        valid = np.ones(data.shape, dtype=bool)
+    else:
+        mask_array = np.asarray(mask)
+        if mask_array.ndim == 3:
+            mask_array = mask_array[0]
+        valid = ~mask_array
+    if not valid.any():
+        return image
+    classes = np.unique(data[valid])
+    if classes.size < 2:
+        return image
+    out = data.copy()
+    for _ in range(max(1, passes)):
+        padded = np.pad(out, 1, mode="edge")
+        padded_valid = np.pad(valid, 1, constant_values=False)
+        counts = np.zeros((classes.size,) + out.shape, dtype=np.uint8)
+        for dy in range(3):
+            for dx in range(3):
+                patch = padded[dy:dy + out.shape[0], dx:dx + out.shape[1]]
+                window_valid = padded_valid[dy:dy + out.shape[0], dx:dx + out.shape[1]]
+                for index, klass in enumerate(classes):
+                    counts[index] += (patch == klass) & window_valid
+        majority = classes[np.argmax(counts, axis=0)]
+        out = np.where(valid, majority, out)
+    result = np.ma.masked_array(out, mask=~valid)
+    image.array = result.reshape(image.array.shape)
+    return image
+
+
+def _stretch_for(indicator: str,
+                 stretch: Optional[tuple[float, float]] = None) -> tuple[float, float]:
+    if stretch and all(math.isfinite(value) for value in stretch) and stretch[1] > stretch[0]:
+        return stretch
+    return (0.0, 3000.0) if indicator == "dem" else (-1.0, 1.0)
+
+
+def _parse_stretch(indicator: str,
+                   min_value: Optional[float], max_value: Optional[float]
+                   ) -> Optional[tuple[float, float]]:
+    if indicator not in ("dem", "ndvi"):
+        return None
+    if min_value is None and max_value is None:
+        return None
+    if min_value is None or max_value is None:
+        raise HTTPException(status_code=422, detail="min and max must be supplied together")
+    if not math.isfinite(min_value) or not math.isfinite(max_value) or max_value <= min_value:
+        raise HTTPException(status_code=422, detail="min must be less than max")
+    return (min_value, max_value)
+
+
+def _stretch_token(stretch: Optional[tuple[float, float]]) -> str:
+    return f"{stretch[0]:.4f}:{stretch[1]:.4f}" if stretch else ""
+
+
 def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
-                    geometry: Optional[dict] = None) -> bytes:
+                    geometry: Optional[dict] = None,
+                    stretch: Optional[tuple[float, float]] = None) -> bytes:
     """Render one XYZ tile from the source COGs.
 
     rio-tiler reads the COG overview that matches the zoom, so a 16,000 km2 AOI
@@ -3617,10 +3688,9 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
         return _TILE_TRANSPARENT_PNG
 
     try:
-        if indicator == "dem":
-            image = image.rescale([(0.0, 3000.0)], [(0, 255)])
-        elif indicator == "ndvi":
-            image = image.rescale([(-1.0, 1.0)], [(0, 255)])
+        if indicator in ("dem", "ndvi"):
+            low, high = _stretch_for(indicator, stretch)
+            image = image.rescale([(low, high)], [(0, 255)])
         if geometry:
             from rasterio.features import geometry_mask
             from rasterio.transform import from_bounds as _from_bounds
@@ -3631,9 +3701,14 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                                    transform=transform, invert=True)
             outside = ~inside
             if image.array.mask is not np.ma.nomask:
-                outside = outside | image.array.mask[0]
+                mask_array = np.asarray(image.array.mask)
+                if mask_array.ndim == 3:
+                    mask_array = mask_array[0]
+                outside = outside | mask_array
             image.array.mask = np.broadcast_to(outside, image.array.shape)
         if indicator in ("landcover", "landcover_history"):
+            if z <= 9:
+                image = _majority_filter(image)
             return image.render(colormap=_LULC_RGBA, add_mask=True)
         if indicator == "dem":
             return image.render(colormap=_DEM_RGBA, add_mask=True)
@@ -3682,13 +3757,14 @@ def _geometry_from_param(raw: str) -> dict:
 
 
 def _cached_tile_png(key: tuple, hrefs: list[str], indicator: str,
-                     z: int, x: int, y: int, geometry: Optional[dict]) -> bytes:
+                     z: int, x: int, y: int, geometry: Optional[dict],
+                     stretch: Optional[tuple[float, float]] = None) -> bytes:
     with _TILE_CACHE_LOCK:
         cached = _TILE_CACHE.get(key)
         if cached is not None:
             _TILE_CACHE.move_to_end(key)
             return cached
-    png = _render_tile_png(hrefs, indicator, z, x, y, geometry)
+    png = _render_tile_png(hrefs, indicator, z, x, y, geometry, stretch)
     # A transient source failure returns the 1x1 fallback. Caching that would
     # turn one bad read into a permanently blank tile.
     if png != _TILE_TRANSPARENT_PNG:
@@ -3703,7 +3779,9 @@ def _cached_tile_png(key: tuple, hrefs: list[str], indicator: str,
 @app.get("/tiles/bbox/{indicator}/{z}/{x}/{y}.png")
 async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
                         bbox: str, year: Optional[int] = None,
-                        geom: Optional[str] = None):
+                        geom: Optional[str] = None,
+                        min_value: Optional[float] = Query(None, alias="min"),
+                        max_value: Optional[float] = Query(None, alias="max")):
     """Tiles for a synchronous read, addressed by its bounding box.
 
     The sync path computes on the fly and writes no artefact, so there is no
@@ -3722,6 +3800,7 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
     if not geom:
         raise HTTPException(status_code=422, detail="geom is required to render a safely clipped tile")
     geometry = _geometry_from_param(geom)
+    stretch = _parse_stretch(indicator, min_value, max_value)
 
     asset_key = f"bbox:{bbox}:{indicator}:{year}"
     hrefs = _TILE_ASSET_CACHE.get(asset_key)
@@ -3736,9 +3815,10 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
         if len(_TILE_ASSET_CACHE) > 100:
             _TILE_ASSET_CACHE.clear()
         _TILE_ASSET_CACHE[asset_key] = hrefs
-    key = ("bbox", tuple(bounds), indicator, year, z, x, y, _geometry_hash(geometry))
+    key = ("bbox", tuple(bounds), indicator, year, z, x, y,
+           _geometry_hash(geometry), stretch)
     png = await asyncio.to_thread(
-        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry,
+        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry, stretch,
     )
     return Response(
         content=png,
@@ -3749,7 +3829,9 @@ async def tile_png_bbox(indicator: str, z: int, x: int, y: int,
 
 @app.get("/tiles/sync/{sync_key}/ndvi/{z}/{x}/{y}.png")
 async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int,
-                             geom: Optional[str] = None):
+                             geom: Optional[str] = None,
+                             min_value: Optional[float] = Query(None, alias="min"),
+                             max_value: Optional[float] = Query(None, alias="max")):
     """NDVI tiles for a synchronous read.
 
     The sync path writes the median composite to a tiled COG keyed by the
@@ -3764,9 +3846,10 @@ async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int,
     if not geom:
         raise HTTPException(status_code=422, detail="geom is required to render a safely clipped tile")
     geometry = _geometry_from_param(geom)
-    key = ("sync", sync_key, z, x, y, _geometry_hash(geometry))
+    stretch = _parse_stretch("ndvi", min_value, max_value)
+    key = ("sync", sync_key, z, x, y, _geometry_hash(geometry), stretch)
     png = await asyncio.to_thread(
-        _cached_tile_png, key, [path], "ndvi", z, x, y, geometry,
+        _cached_tile_png, key, [path], "ndvi", z, x, y, geometry, stretch,
     )
     return Response(
         content=png,
@@ -3777,7 +3860,9 @@ async def tile_png_sync_ndvi(sync_key: str, z: int, x: int, y: int,
 
 @app.get("/tiles/{cache_key}/{indicator}/{z}/{x}/{y}.png")
 async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
-                   year: Optional[int] = None):
+                   year: Optional[int] = None,
+                   min_value: Optional[float] = Query(None, alias="min"),
+                   max_value: Optional[float] = Query(None, alias="max")):
     """XYZ tiles for a computed area, rendered from the source COGs.
 
     The browser asks for tiles in WebMercator (EPSG:3857), the same grid Leaflet
@@ -3795,6 +3880,7 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
         # A legacy artefact without its original polygon cannot be rendered
         # safely: showing its rectangular raster would break the AOI promise.
         raise HTTPException(status_code=404, detail="no safely clipped area for this cache key")
+    stretch = _parse_stretch(indicator, min_value, max_value)
 
     if indicator == "ndvi":
         # The worker writes the median composite as a local tiled COG; no STAC
@@ -3818,9 +3904,9 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
                 _TILE_ASSET_CACHE.clear()
             _TILE_ASSET_CACHE[asset_key] = hrefs
 
-    key = ("area", cache_key, indicator, year, z, x, y)
+    key = ("area", cache_key, indicator, year, z, x, y, stretch)
     png = await asyncio.to_thread(
-        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry,
+        _cached_tile_png, key, hrefs, indicator, z, x, y, geometry, stretch,
     )
     return Response(
         content=png,
@@ -3831,7 +3917,9 @@ async def tile_png(cache_key: str, indicator: str, z: int, x: int, y: int,
 
 @app.get("/pmtiles/{cache_key}/{indicator}/{z}/{x}/{y}.png")
 async def pmtiles_tile(cache_key: str, indicator: str, z: int, x: int, y: int,
-                       year: Optional[int] = None):
+                       year: Optional[int] = None,
+                       min_value: Optional[float] = Query(None, alias="min"),
+                       max_value: Optional[float] = Query(None, alias="max")):
     """Low-zoom tiles from a pre-baked PMTiles archive; COG fallback above it.
 
     At low zoom the map only needs a small image; the PMTiles archive is built
@@ -3848,6 +3936,7 @@ async def pmtiles_tile(cache_key: str, indicator: str, z: int, x: int, y: int,
     geometry = (artefact or {}).get("geometry")
     if not bbox or not geometry:
         raise HTTPException(status_code=404, detail="no safely clipped area for this cache key")
+    stretch = _parse_stretch(indicator, min_value, max_value)
     if indicator == "ndvi":
         tile_path = (artefact or {}).get("tile_path")
         hrefs = [tile_path] if tile_path else []
@@ -3861,8 +3950,9 @@ async def pmtiles_tile(cache_key: str, indicator: str, z: int, x: int, y: int,
         hrefs = assets.get("dem" if indicator == "dem" else "landcover") or []
     path = await asyncio.to_thread(
         pmtiles_cache.get_or_build, cache_key, indicator,
-        bbox=bbox, geometry=geometry, hrefs=hrefs, render=_render_tile_png,
-        year=year, low_zoom_max=9,
+        bbox=bbox, geometry=geometry, hrefs=hrefs,
+        render=lambda *args: _render_tile_png(*args, stretch=stretch),
+        year=year, low_zoom_max=9, style=_stretch_token(stretch),
     )
     data = await asyncio.to_thread(pmtiles_cache.get_tile, path, z, x, y)
     if data:

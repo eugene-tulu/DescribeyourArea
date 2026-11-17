@@ -107,7 +107,7 @@ function styleFor(basemap: BasemapId): StyleSpecification {
         type: 'raster',
         source: sourceId,
         layout: { visibility: visible ? 'visible' : 'none' },
-        paint: { 'raster-fade-duration': 120 },
+        paint: { 'raster-fade-duration': 120, 'raster-opacity': source.opacity ?? 1 },
       });
     });
   }
@@ -154,9 +154,9 @@ function addAoi(map: MlMap, data: GeoJSON.GeoJsonObject | null | undefined): voi
   // land-cover layer and the light basemaps. Lime-on-green disappeared.
   map.addLayer({
     id: 'aoi-glow', type: 'line', source: 'aoi',
-    paint: { 'line-color': '#08101f', 'line-width': 7, 'line-opacity': 0.55, 'line-blur': 2 },
+    paint: { 'line-color': '#06202b', 'line-width': 7, 'line-opacity': 0.6, 'line-blur': 2 },
   });
-  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 1 } });
+  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#4de2ff', 'line-width': 2.2, 'line-opacity': 1 } });
 }
 
 function addRasters(map: MlMap, layers: MapComponentProps['tileLayers']): void {
@@ -361,7 +361,7 @@ const DRAW_STYLES: object[] = [
     filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': ['case', ['==', ['get', 'active'], 'true'], '#4de2ff', '#ffffff'],
+      'line-color': ['case', ['==', ['get', 'active'], 'true'], '#ffffff', '#4de2ff'],
       'line-width': 2,
     },
   },

@@ -6,8 +6,11 @@ import { useParams } from 'next/navigation';
 import dynamic from 'next/dynamic';
 import type { FeatureCollection, GeoJsonObject } from 'geojson';
 import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
+import MapLegend, { type LegendClass } from '@/components/MapLegend';
 import { observationsToCsv, observationsToGeojson, type EnrichedObservation } from '@/lib/observations';
 import { BASEMAPS, type BasemapId } from '@/lib/basemaps';
+import { LANDCOVER_COLOURS, LANDCOVER_LABELS, LANDCOVER_NAME_TO_CODE } from '@/lib/landcover';
+import { DEM_FALLBACK, NDVI_FALLBACK, numericRange, rangeQuery } from '@/lib/mapScales';
 
 interface ProjectRecord {
   id?: string | null;
@@ -22,14 +25,42 @@ interface ProjectRecord {
 }
 
 interface ProjectSnapshot {
-  dem?: { mean?: number | null } | null;
-  landcover?: { dominant_class?: string | null; dominant_percentage?: number | null } | null;
-  ndvi?: { mean?: number | null; sensor?: { label?: string | null } | null } | null;
+  dem?: {
+    mean?: number | null; min?: number | null; max?: number | null;
+    p05?: number | null; p95?: number | null; terrain_type?: string | null;
+    evidence?: { source?: string | null } | null;
+  } | null;
+  landcover?: {
+    dominant_class?: string | null; dominant_percentage?: number | null;
+    classes?: Record<string, number> | null; year?: number | null;
+    evidence?: { source?: string | null } | null;
+  } | null;
+  ndvi?: {
+    mean?: number | null; min?: number | null; max?: number | null;
+    p25?: number | null; p75?: number | null;
+    sensor?: { label?: string | null } | null;
+    window?: { start?: string | null; end?: string | null } | null;
+  } | null;
   landcover_history?: {
-    series?: Array<{ year?: number | null; dominant_class?: string | null }> | null;
+    series?: Array<{
+      year?: number | null;
+      dominant_class?: string | null;
+      classes?: Record<string, number> | null;
+    }> | null;
   } | null;
   rainfall?: { series?: RainPoint[]; product?: string | null } | null;
   analysis?: { bbox_area_km2?: number | null } | null;
+}
+
+type ThematicLayer = 'dem' | 'landcover' | 'ndvi' | 'landcover_history';
+
+interface LegendData {
+  title: string;
+  subtitle?: string | null;
+  gradient?: string;
+  minLabel?: string;
+  maxLabel?: string;
+  classes?: LegendClass[];
 }
 
 interface ProjectView {
@@ -48,6 +79,36 @@ interface ProjectView {
 function formatNumber(value: number | null | undefined, digits = 1): string {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—';
   return new Intl.NumberFormat(undefined, { maximumFractionDigits: digits }).format(value);
+}
+
+function landcoverClassesFromCodes(classes: Record<string, number>): LegendClass[] {
+  return Object.entries(classes)
+    .filter(([, percentage]) => Number.isFinite(percentage))
+    .sort(([, first], [, second]) => second - first)
+    .map(([code, percentage]) => ({
+      label: LANDCOVER_LABELS[code] || code,
+      color: LANDCOVER_COLOURS[code] || '#6b7280',
+      value: `${formatNumber(percentage, 1)}%`,
+    }));
+}
+
+function landcoverClassesFromNames(classes: Record<string, number>): LegendClass[] {
+  return Object.entries(classes)
+    .filter(([, percentage]) => Number.isFinite(percentage))
+    .sort(([, first], [, second]) => second - first)
+    .map(([name, percentage]) => {
+      const code = LANDCOVER_NAME_TO_CODE[name.toLowerCase()];
+      return {
+        label: name,
+        color: code ? LANDCOVER_COLOURS[code] : '#6b7280',
+        value: `${formatNumber(percentage, 1)}%`,
+      };
+    });
+}
+
+function landcoverClasses(classes: Record<string, number>): LegendClass[] {
+  const numericCodes = Object.keys(classes).some((key) => /^\d+$/.test(key));
+  return numericCodes ? landcoverClassesFromCodes(classes) : landcoverClassesFromNames(classes);
 }
 
 function boundsOf(input: GeoJsonObject): [number, number, number, number] | undefined {
@@ -98,16 +159,24 @@ export default function DashboardPage() {
   const [vegetation, setVegetation] = useState<VegPoint[]>([]);
   const [basemap, setBasemap] = useState<BasemapId>('hybrid');
   const [terrain3d, setTerrain3d] = useState(false);
-  const [layerOpacity, setLayerOpacity] = useState(0.7);
-  const [mapLayers, setMapLayers] = useState({
-    dem: true, landcover: true, ndvi: false, landcover_history: false,
-  });
+  const [layerOpacity, setLayerOpacity] = useState(0.85);
+  const [activeLayer, setActiveLayer] = useState<ThematicLayer>('landcover');
   const [historyYear, setHistoryYear] = useState<number | null>(null);
   const historyYears = useMemo(
     () => (project?.snapshot?.landcover_history?.series ?? [])
       .map((row) => row.year)
       .filter((year): year is number => typeof year === 'number'),
     [project?.snapshot?.landcover_history?.series],
+  );
+  const demStretch = useMemo(
+    () => project?.snapshot?.dem ? numericRange(project.snapshot.dem, DEM_FALLBACK) : null,
+    [project?.snapshot?.dem],
+  );
+  const ndviStretch = useMemo(
+    () => project?.snapshot?.ndvi
+      ? numericRange(project.snapshot.ndvi, NDVI_FALLBACK, [-0.1, 1])
+      : null,
+    [project?.snapshot?.ndvi],
   );
   useEffect(() => {
     if (historyYear === null && historyYears.length) {
@@ -140,29 +209,78 @@ export default function DashboardPage() {
     if (!project?.cache_key) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     const bounds = boundsOf(project.geojson);
-    const tileUrl = (indicator: string, year?: number) =>
-      `${backendUrl}/tiles/${project.cache_key}/${indicator}/{z}/{x}/{y}.png${year ? `?year=${year}` : ''}`;
+    const tileUrl = (indicator: string, year?: number,
+                     stretch?: [number, number] | null) => {
+      const query: string[] = [];
+      if (year) query.push(`year=${year}`);
+      const range = rangeQuery(stretch);
+      if (range) query.push(range);
+      return `${backendUrl}/tiles/${project.cache_key}/${indicator}/{z}/{x}/{y}.png${query.length ? `?${query.join('&')}` : ''}`;
+    };
     const layers: Array<{
       id: string; url: string; attribution: string;
       opacity?: number; zIndex?: number; bounds?: [number, number, number, number];
     }> = [];
-    if (mapLayers.dem) {
-      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds });
+    if (activeLayer === 'dem') {
+      layers.push({ id: 'dem', url: tileUrl('dem', undefined, demStretch), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400, bounds });
     }
-    if (mapLayers.landcover) {
+    if (activeLayer === 'landcover') {
       layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: layerOpacity, zIndex: 410, bounds });
     }
-    if (mapLayers.ndvi) {
-      layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420, bounds });
+    if (activeLayer === 'ndvi') {
+      layers.push({ id: 'ndvi', url: tileUrl('ndvi', undefined, ndviStretch), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420, bounds });
     }
-    if (mapLayers.landcover_history && historyYear) {
+    if (activeLayer === 'landcover_history' && historyYear) {
       layers.push({
         id: 'lch', url: tileUrl('landcover_history', historyYear),
-        attribution: `Land cover ${historyYear}`, opacity: 0.65, zIndex: 430, bounds,
+        attribution: `Land cover ${historyYear}`, opacity: layerOpacity, zIndex: 430, bounds,
       });
     }
     return layers;
-  }, [project?.cache_key, project?.geojson, layerOpacity, mapLayers, historyYear]);
+  }, [project?.cache_key, project?.geojson, layerOpacity, activeLayer, historyYear, demStretch, ndviStretch]);
+
+  const activeLegend = useMemo<LegendData | null>(() => {
+    if (activeLayer === 'dem' && demStretch) {
+      return {
+        title: 'Elevation',
+        subtitle: project?.snapshot?.dem?.evidence?.source?.split('(')[0]?.trim() || 'Copernicus DEM GLO-30',
+        gradient: 'linear-gradient(90deg,#1a3a5c,#2e6b3a,#78964c,#a8844a,#cdbea0,#f5f5f5)',
+        minLabel: `${formatNumber(demStretch[0], 0)} m`,
+        maxLabel: `${formatNumber(demStretch[1], 0)} m`,
+      };
+    }
+    if (activeLayer === 'ndvi' && ndviStretch) {
+      const sensor = project?.snapshot?.ndvi?.sensor?.label?.split('(')[0]?.trim();
+      const start = project?.snapshot?.ndvi?.window?.start?.slice(0, 10);
+      const end = project?.snapshot?.ndvi?.window?.end?.slice(0, 10);
+      return {
+        title: 'NDVI',
+        subtitle: [sensor || 'Vegetation index', start && end ? `${start} → ${end}` : null].filter(Boolean).join(' · '),
+        gradient: 'linear-gradient(90deg,#78542e,#c49e5a,#e7e0a0,#b4da8c,#67b761,#2b8144,#084d2c)',
+        minLabel: formatNumber(ndviStretch[0], 2),
+        maxLabel: formatNumber(ndviStretch[1], 2),
+      };
+    }
+    if (activeLayer === 'landcover') {
+      const classes = project?.snapshot?.landcover?.classes;
+      if (!classes || Object.keys(classes).length === 0) return null;
+      return {
+        title: `Land cover${project?.snapshot?.landcover?.year ? ` · ${project.snapshot.landcover.year}` : ''}`,
+        subtitle: 'Esri 10 m annual classification',
+        classes: landcoverClasses(classes),
+      };
+    }
+    if (activeLayer === 'landcover_history' && historyYear) {
+      const row = project?.snapshot?.landcover_history?.series?.find((entry) => entry.year === historyYear);
+      if (!row) return null;
+      return {
+        title: `Land cover · ${historyYear}`,
+        subtitle: 'Esri 10 m annual classification',
+        classes: landcoverClassesFromNames(row.classes ?? {}),
+      };
+    }
+    return null;
+  }, [activeLayer, project, historyYear, demStretch, ndviStretch]);
 
   const rows: EnrichedObservation[] = (project?.records ?? []).map((record) => ({
     id: record.id ?? '',
@@ -273,24 +391,31 @@ export default function DashboardPage() {
                 className="h-1 w-24 accent-signal"
               />
             </label>
-            {([
-              ['dem', 'Elevation'],
-              ['landcover', 'Land cover'],
-              ['ndvi', 'NDVI'],
-              ['landcover_history', 'History'],
-            ] as const).map(([id, label]) => (
-              <label key={id} className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2">
-                <input
-                  type="checkbox"
-                  checked={mapLayers[id]}
+            <span className="label text-ink-3">Thematic layer</span>
+            <div role="group" aria-label="Thematic layer" className="flex flex-wrap items-center gap-1.5">
+              {([
+                ['dem', 'Elevation'],
+                ['landcover', 'Land cover'],
+                ['ndvi', 'NDVI'],
+                ['landcover_history', 'History'],
+              ] as const).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-pressed={activeLayer === id}
                   disabled={id === 'landcover_history' && historyYears.length === 0}
-                  onChange={(event) => setMapLayers((current) => ({ ...current, [id]: event.target.checked }))}
-                  className="h-3.5 w-3.5 accent-signal disabled:opacity-40"
-                />
-                {label}
-              </label>
-            ))}
-            {mapLayers.landcover_history && historyYears.length > 0 && (
+                  onClick={() => setActiveLayer(id)}
+                  className={`rounded-full border px-2.5 py-1 text-[0.75rem] transition ${
+                    activeLayer === id
+                      ? 'border-signal bg-signal/15 text-signal'
+                      : 'border-rule bg-surface text-ink-2 hover:border-ink-3'
+                  } disabled:cursor-not-allowed disabled:opacity-40`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {activeLayer === 'landcover_history' && historyYears.length > 0 && (
               <select
                 value={historyYear ?? historyYears[historyYears.length - 1]}
                 onChange={(event) => setHistoryYear(Number(event.target.value))}
@@ -301,17 +426,20 @@ export default function DashboardPage() {
               </select>
             )}
           </div>
-          <MapComponent
-            aoiGeoJSON={project.geojson as FeatureCollection}
-            onBoundingBoxCreated={() => {}}
-            onSaveFeatures={() => {}}
-            points={project.records.map((record) => ({ id: record.id ?? '', lon: record.lon, lat: record.lat }))}
-            tileLayers={tileLayers}
-            basemap={basemap}
-            terrain3d={terrain3d}
-          />
+          <div className="relative">
+            <MapComponent
+              aoiGeoJSON={project.geojson as FeatureCollection}
+              onBoundingBoxCreated={() => {}}
+              onSaveFeatures={() => {}}
+              points={project.records.map((record) => ({ id: record.id ?? '', lon: record.lon, lat: record.lat }))}
+              tileLayers={tileLayers}
+              basemap={basemap}
+              terrain3d={terrain3d}
+            />
+            {activeLegend && <MapLegend {...activeLegend} />}
+          </div>
           <p className="mt-2 text-[0.75rem] text-ink-3">
-            Points are the saved observations; the raster layers are the AOI’s elevation and land cover.
+            Points are the saved observations; the raster layer is the selected thematic dataset, clipped to the AOI.
           </p>
         </div>
         <div className="rounded-xl border border-rule bg-raised/40 p-4">

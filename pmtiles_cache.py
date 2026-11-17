@@ -29,8 +29,11 @@ def _lock(key: str) -> threading.Lock:
         return _LOCKS.setdefault(key, threading.Lock())
 
 
-def path_for(key: str, indicator: str, year: Optional[int] = None) -> Path:
+def path_for(key: str, indicator: str, year: Optional[int] = None,
+             style: str = "") -> Path:
     suffix = f"{indicator}:{year}" if year else indicator
+    if style:
+        suffix = f"{suffix}:{style}"
     return Path(os.environ.get("PROJECTS_DIR", "/app/.usage/projects")) / "tiles" / key / f"{suffix}.pmtiles"
 
 
@@ -53,11 +56,12 @@ def get_or_build(
     render: Callable[..., bytes],
     year: Optional[int] = None,
     low_zoom_max: int = 9,
+    style: str = "",
 ) -> Path:
-    path = path_for(key, indicator, year)
+    path = path_for(key, indicator, year, style)
     if path.exists():
         return path
-    with _lock(f"{key}:{indicator}:{year}"):
+    with _lock(f"{key}:{indicator}:{year}:{style}"):
         if path.exists():
             return path
         import shutil

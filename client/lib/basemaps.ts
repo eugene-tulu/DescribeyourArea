@@ -4,6 +4,8 @@ export interface BasemapSource {
   tiles: string[];
   attribution: string;
   maxzoom?: number;
+  /** Labels and boundaries sit behind the thematic layer, not beside it. */
+  opacity?: number;
 }
 
 export const BASEMAPS: Record<BasemapId, { label: string; sources: BasemapSource[] }> = {
@@ -27,6 +29,7 @@ export const BASEMAPS: Record<BasemapId, { label: string; sources: BasemapSource
         tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}'],
         attribution: 'Esri',
         maxzoom: 19,
+        opacity: 0.76,
       },
     ],
   },
