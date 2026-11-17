@@ -3573,7 +3573,9 @@ export default function Home() {
                         step={5}
                         value={Math.round(layerOpacity * 100)}
                         onChange={(event) => setLayerOpacity(Number(event.target.value) / 100)}
-                        className="h-1 w-24 accent-signal"
+                        disabled={!analysisSummary}
+                        title={!analysisSummary ? 'Run a read to enable raster layers' : undefined}
+                        className="h-1 w-24 accent-signal disabled:opacity-40"
                       />
                     </label>
                     <span className="label text-ink-3">Map layers</span>
@@ -3590,10 +3592,12 @@ export default function Home() {
                         <input
                           type="checkbox"
                           checked={mapLayers[layer.id]}
-                          disabled={layer.id === 'ndvi' && !activeCacheKey && !syncKey}
-                          title={layer.id === 'ndvi' && !activeCacheKey && !syncKey
-                            ? 'NDVI map layer is available for offline readings'
-                            : undefined}
+                          disabled={!analysisSummary || (layer.id === 'ndvi' && !activeCacheKey && !syncKey)}
+                          title={!analysisSummary
+                            ? 'Run a read to enable raster layers'
+                            : layer.id === 'ndvi' && !activeCacheKey && !syncKey
+                              ? 'NDVI map layer is available for offline readings'
+                              : undefined}
                           onChange={(event) => setMapLayers((previous) => ({
                             ...previous,
                             [layer.id]: event.target.checked,
