@@ -3515,7 +3515,7 @@ async def context_for_key(cache_key: str, indicators: Optional[str] = None,
 # --------------------------------------------------
 _TILE_ASSET_CACHE: dict[str, list[str]] = {}
 _TILE_TRANSPARENT_PNG = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBgAAAABQABpfZFQAAAAABJRU5ErkJggg=="
 )
 # Esri 10 m class colours, as RGBA for rio-tiler's colormap.
 _LULC_RGBA = {
