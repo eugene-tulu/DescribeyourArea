@@ -10,6 +10,14 @@ import type * as GeoJSON from 'geojson';
 
 import { BASEMAPS, type BasemapId } from '@/lib/basemaps';
 
+// Next.js does not copy MapLibre's sibling worker bundle next to the emitted
+// chunk, so the default import.meta.url lookup 404s. Serve the worker from
+// /public and point MapLibre at it explicitly; without it GeoJSON sources
+// (the AOI and drawn features) can fail to render depending on the browser.
+if (typeof window !== 'undefined') {
+  maplibregl.setWorkerUrl('/maplibre-gl-worker.mjs');
+}
+
 const TERRAIN_TILES = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png';
 const EMPTY_FC: GeoJSON.FeatureCollection = { type: 'FeatureCollection', features: [] };
 
