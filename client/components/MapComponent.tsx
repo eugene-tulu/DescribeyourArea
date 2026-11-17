@@ -211,7 +211,7 @@ class RectangleControl implements IControl {
   private drawing = false;
   private start?: maplibregl.LngLat;
 
-  constructor(private readonly draw: MapboxDraw) {}
+  constructor(private readonly draw: MapboxDraw, private readonly onCreated: () => void) {}
 
   onAdd(map: MlMap): HTMLElement {
     this.map = map;
@@ -273,6 +273,9 @@ class RectangleControl implements IControl {
     if (polygon) {
       this.draw.add({ type: 'Feature', properties: {}, geometry: polygon });
       this.draw.changeMode('simple_select');
+      // Draw's API add() stores the feature but does not fire draw.create.
+      // Without this callback the rectangle is visible and invisible to the app.
+      this.onCreated();
     }
     this.stop();
   };
@@ -482,7 +485,6 @@ export default function MapComponent({
       styles: DRAW_STYLES,
     });
     map.addControl(draw as unknown as IControl, 'top-left');
-    map.addControl(new RectangleControl(draw), 'top-left');
     const syncDraw = () => {
       const features = draw.getAll() as GeoJSON.FeatureCollection;
       saveRef.current?.(features);
@@ -491,6 +493,7 @@ export default function MapComponent({
       // read-only AOI layer so the boundary is drawn once, in one style.
       setAoiVisible(map, features.features.length === 0);
     };
+    map.addControl(new RectangleControl(draw, syncDraw), 'top-left');
     map.on('draw.create' as keyof MapEventType, syncDraw);
     map.on('draw.update' as keyof MapEventType, syncDraw);
     map.on('draw.delete' as keyof MapEventType, syncDraw);
