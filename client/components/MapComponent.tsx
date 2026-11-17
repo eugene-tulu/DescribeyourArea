@@ -668,8 +668,8 @@ export default function MapComponent({
         .maplibregl-ctrl-attrib{background:rgba(11,16,32,.85);color:#8b98ad}
         .maplibregl-ctrl-attrib a{color:#aab5cb}
         .maplibregl-ctrl-scale{background:rgba(11,16,32,.8);border-color:#24314a;color:#aab5cb}
-        .geocontext-draw-control{display:flex;align-items:center;justify-content:center;color:#e8ecf4}
-        .geocontext-draw-control svg{pointer-events:none}
+        .maplibregl-ctrl-group button.geocontext-draw-control{display:flex;align-items:center;justify-content:center;padding:0;line-height:0;color:#e8ecf4}
+        .geocontext-draw-control svg{display:block;pointer-events:none}
         .geocontext-draw-control:hover{background:#1a2439;color:#fff}
         .geocontext-draw-control.active{background:#b9e84b;color:#0b1020}
       `}</style>
