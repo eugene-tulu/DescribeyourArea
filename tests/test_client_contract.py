@@ -794,6 +794,5 @@ class BasemapContractTests(unittest.TestCase):
         for marker in ("apiKey", "accessToken", "maptiler", "mapbox://", "Mapbox"):
             self.assertNotIn(marker, self.basemaps,
                              f"{marker} implies a keyed basemap")
-        for host in ("server.arcgisonline.com", "tile.openstreetmap.org",
-                     "basemaps.cartocdn.com"):
+        for host in ("server.arcgisonline.com", "tile.openstreetmap.org"):
             self.assertIn(host, self.basemaps)

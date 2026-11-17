@@ -48,18 +48,32 @@ export const BASEMAPS: Record<BasemapId, { label: string; sources: BasemapSource
   },
   light: {
     label: 'Light',
-    sources: [{
-      tiles: ['https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png'],
-      attribution: '© OpenStreetMap contributors © CARTO',
-      maxzoom: 20,
-    }],
+    sources: [
+      {
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Basemap © Esri',
+        maxzoom: 16,
+      },
+      {
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Labels © Esri',
+        maxzoom: 16,
+      },
+    ],
   },
   dark: {
     label: 'Dark',
-    sources: [{
-      tiles: ['https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png'],
-      attribution: '© OpenStreetMap contributors © CARTO',
-      maxzoom: 20,
-    }],
+    sources: [
+      {
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Basemap © Esri',
+        maxzoom: 16,
+      },
+      {
+        tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Reference/MapServer/tile/{z}/{y}/{x}'],
+        attribution: 'Labels © Esri',
+        maxzoom: 16,
+      },
+    ],
   },
 };
