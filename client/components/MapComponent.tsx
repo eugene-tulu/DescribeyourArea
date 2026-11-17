@@ -271,8 +271,10 @@ class RectangleControl implements IControl {
     if (!this.start) return;
     const polygon = this.rectangle(this.start, event.lngLat);
     if (polygon) {
-      this.draw.add({ type: 'Feature', properties: {}, geometry: polygon });
-      this.draw.changeMode('simple_select');
+      const ids = this.draw.add({ type: 'Feature', properties: {}, geometry: polygon });
+      // Select the new rectangle so Draw's trash control and vertex editing work
+      // immediately, as they do for a polygon that finishes in draw mode.
+      this.draw.changeMode('simple_select', { featureIds: ids });
       // Draw's API add() stores the feature but does not fire draw.create.
       // Without this callback the rectangle is visible and invisible to the app.
       this.onCreated();
