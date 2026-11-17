@@ -142,11 +142,13 @@ function addAoi(map: MlMap, data: GeoJSON.GeoJsonObject | null | undefined): voi
   }
   map.addSource('aoi', { type: 'geojson', data: value });
   map.addLayer({ id: 'aoi-fill', type: 'fill', source: 'aoi', paint: { 'fill-color': '#b9e84b', 'fill-opacity': 0.07 } });
+  // A white core on a dark halo is legible over satellite imagery, the green
+  // land-cover layer and the light basemaps. Lime-on-green disappeared.
   map.addLayer({
     id: 'aoi-glow', type: 'line', source: 'aoi',
-    paint: { 'line-color': '#b9e84b', 'line-width': 6, 'line-opacity': 0.16, 'line-blur': 3 },
+    paint: { 'line-color': '#08101f', 'line-width': 7, 'line-opacity': 0.55, 'line-blur': 2 },
   });
-  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#d6ff7a', 'line-width': 1.8, 'line-opacity': 0.98 } });
+  map.addLayer({ id: 'aoi-line', type: 'line', source: 'aoi', paint: { 'line-color': '#ffffff', 'line-width': 2, 'line-opacity': 1 } });
 }
 
 function addRasters(map: MlMap, layers: MapComponentProps['tileLayers']): void {
@@ -288,7 +290,7 @@ class RectangleControl implements IControl {
         id: 'rectangle-preview',
         type: 'line',
         source: 'rectangle-preview',
-        paint: { 'line-color': '#d6ff7a', 'line-width': 1.5, 'line-dasharray': [2, 1.5] },
+        paint: { 'line-color': '#4de2ff', 'line-width': 1.5, 'line-dasharray': [2, 1.5] },
       }, map.getLayer('aoi-fill') ? 'aoi-fill' : undefined);
     }
     const polygon = this.rectangle(a, b);
@@ -334,12 +336,19 @@ const DRAW_STYLES: object[] = [
     },
   },
   {
+    id: 'gl-draw-lines-halo',
+    type: 'line',
+    filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']],
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': '#08101f', 'line-width': 6, 'line-opacity': 0.55 },
+  },
+  {
     id: 'gl-draw-lines',
     type: 'line',
     filter: ['any', ['==', '$type', 'LineString'], ['==', '$type', 'Polygon']],
     layout: { 'line-cap': 'round', 'line-join': 'round' },
     paint: {
-      'line-color': ['case', ['==', ['get', 'active'], 'true'], '#d6ff7a', '#b9e84b'],
+      'line-color': ['case', ['==', ['get', 'active'], 'true'], '#4de2ff', '#ffffff'],
       'line-width': 2,
     },
   },
@@ -349,7 +358,7 @@ const DRAW_STYLES: object[] = [
     filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
     paint: {
       'circle-radius': ['case', ['==', ['get', 'active'], 'true'], 7, 5],
-      'circle-color': '#0b1020',
+      'circle-color': '#08101f',
     },
   },
   {
@@ -358,14 +367,14 @@ const DRAW_STYLES: object[] = [
     filter: ['all', ['==', '$type', 'Point'], ['==', 'meta', 'vertex'], ['!=', 'mode', 'simple_select']],
     paint: {
       'circle-radius': ['case', ['==', ['get', 'active'], 'true'], 5, 3],
-      'circle-color': '#d6ff7a',
+      'circle-color': '#4de2ff',
     },
   },
   {
     id: 'gl-draw-midpoint',
     type: 'circle',
     filter: ['all', ['==', 'meta', 'midpoint']],
-    paint: { 'circle-radius': 3, 'circle-color': '#d6ff7a' },
+    paint: { 'circle-radius': 3, 'circle-color': '#4de2ff' },
   },
 ];
 
