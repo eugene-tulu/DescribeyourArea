@@ -20,6 +20,7 @@ import { computeStartDate } from '@/lib/window';
 import { fractionOfEstimate, secondsSince } from '@/lib/elapsed';
 import { trackEvent } from '@/lib/analytics';
 import { enrichObservations, type EnrichedObservation, type Observation } from '@/lib/observations';
+import { BASEMAPS, type BasemapId } from '@/lib/basemaps';
 
 
 import { buildSeriesCsv, type RainRow, type VegRow } from '@/lib/exportCsv';
@@ -1713,6 +1714,9 @@ export default function Home() {
   // The overlay is a reading aid, not part of the result. Clearing it must not
   // clear the numbers (the old onClearOverlay reset the whole summary).
   const [overlayVisible, setOverlayVisible] = useState(true);
+  const [basemap, setBasemap] = useState<BasemapId>('satellite');
+  const [terrain3d, setTerrain3d] = useState(false);
+  const [layerOpacity, setLayerOpacity] = useState(0.7);
   const [mapLayers, setMapLayers] = useState({
     dem: true, landcover: true, ndvi: false, landcover_history: false,
   });
@@ -2097,6 +2101,9 @@ export default function Home() {
   }, [clearAnalysis]);
 
   const handleFeaturesChange = useCallback((geojson: FeatureCollection) => {
+    // A draw replaces the searched/uploaded area (and its admin context).
+    setUploadedGeojson(null);
+    setAdminArea(null);
     setDrawnFeatures(geojson);
     setAreaKm2(bboxAreaKm2(geojsonBbox(geojson)));
     trackEvent('area_selected', { source: 'drawn', feature_count: geojson.features.length });
@@ -3057,20 +3064,20 @@ export default function Home() {
       opacity?: number; zIndex?: number;
     }> = [];
     if (mapLayers.dem) {
-      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: 0.55, zIndex: 400 });
+      layers.push({ id: 'dem', url: tileUrl('dem'), attribution: 'Elevation', opacity: layerOpacity, zIndex: 400 });
     }
     if (mapLayers.landcover) {
-      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: 0.65, zIndex: 410 });
+      layers.push({ id: 'landcover', url: tileUrl('landcover'), attribution: 'Land cover', opacity: layerOpacity, zIndex: 410 });
     }
     if (mapLayers.ndvi) {
       if (activeCacheKey) {
-        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: 0.65, zIndex: 420 });
+        layers.push({ id: 'ndvi', url: tileUrl('ndvi'), attribution: 'NDVI', opacity: layerOpacity, zIndex: 420 });
       } else if (syncKey) {
         layers.push({
           id: 'ndvi',
           url: `${backendUrl}/tiles/sync/${syncKey}/ndvi/{z}/{x}/{y}.png${geomQuery ? `?${geomQuery}` : ''}`,
           attribution: 'NDVI',
-          opacity: 0.65,
+          opacity: layerOpacity,
           zIndex: 420,
         });
       }
@@ -3085,7 +3092,7 @@ export default function Home() {
       });
     }
     return layers;
-  }, [activeCacheKey, syncKey, analysisSummary, overlayVisible, mapLayers, historyYear, aoiGeojson]);
+  }, [activeCacheKey, syncKey, analysisSummary, overlayVisible, mapLayers, historyYear, aoiGeojson, layerOpacity]);
 
   return (
     <div className="min-h-screen bg-void text-ink">
@@ -3531,6 +3538,39 @@ export default function Home() {
 
                 {analysisSummary && (
                   <div className="mb-3 flex flex-wrap items-center gap-2" data-print-hide>
+                    <label className="flex items-center gap-1.5 text-[0.75rem] text-ink-3">
+                      Basemap
+                      <select
+                        value={basemap}
+                        onChange={(event) => setBasemap(event.target.value as BasemapId)}
+                        className="h-7 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+                      >
+                        {Object.entries(BASEMAPS).map(([id, base]) => (
+                          <option key={id} value={id}>{base.label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2">
+                      <input
+                        type="checkbox"
+                        checked={terrain3d}
+                        onChange={(event) => setTerrain3d(event.target.checked)}
+                        className="h-3.5 w-3.5 accent-signal"
+                      />
+                      3D terrain
+                    </label>
+                    <label className="flex items-center gap-1.5 text-[0.75rem] text-ink-3">
+                      Opacity
+                      <input
+                        type="range"
+                        min={20}
+                        max={100}
+                        step={5}
+                        value={Math.round(layerOpacity * 100)}
+                        onChange={(event) => setLayerOpacity(Number(event.target.value) / 100)}
+                        className="h-1 w-24 accent-signal"
+                      />
+                    </label>
                     <span className="label text-ink-3">Map layers</span>
                     {[
                       { id: 'dem' as const, label: 'Elevation' },
@@ -3584,13 +3624,15 @@ export default function Home() {
                     tileLayers={tileLayers}
                     onClearOverlay={analysisSummary && overlayVisible ? () => setOverlayVisible(false) : undefined}
                     points={fieldRows.map((row) => ({ id: row.id, lon: row.lon, lat: row.lat }))}
+                    basemap={basemap}
+                    terrain3d={terrain3d}
                   />
                   {analysisSummary && overlayVisible && tileLayers && tileLayers.length > 0 && (
                     <div className="absolute left-4 top-4 z-[1000] max-w-[16rem] rounded-lg border border-rule bg-void/90 px-3 py-2.5 text-[0.75rem] leading-relaxed text-ink-2 backdrop-blur">
                       {mapLayers.dem && (
                         <div className="mb-2">
                           <p className="label mb-1 text-ink-3">Elevation</p>
-                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#0b1d3a,#1e5631,#a3a33a,#8b5a2b,#ffffff)' }} />
+                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#1a3a5c,#2e6b3a,#78964c,#a8844a,#cdbea0,#f5f5f5)' }} />
                           <span className="mt-0.5 flex justify-between text-[0.625rem] text-ink-3"><span>low</span><span>high</span></span>
                         </div>
                       )}
@@ -3612,7 +3654,7 @@ export default function Home() {
                       {mapLayers.ndvi && (
                         <div>
                           <p className="label mb-1 text-ink-3">NDVI</p>
-                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#8b5a2b,#e8d8a0,#2f7d3a)' }} />
+                          <span className="block h-2 w-full rounded-full" style={{ background: 'linear-gradient(90deg,#8c510a,#d8b365,#f6e8c3,#80cdc1,#01665e)' }} />
                           <span className="mt-0.5 flex justify-between text-[0.625rem] text-ink-3"><span>low</span><span>high</span></span>
                         </div>
                       )}

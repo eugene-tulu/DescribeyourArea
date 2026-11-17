@@ -3525,6 +3525,41 @@ _LULC_RGBA = {
 }
 
 
+def _ramp(stops):
+    """A 256-entry RGBA ramp from (position, (r, g, b)) stops."""
+    cmap = {}
+    for index in range(256):
+        t = index / 255.0
+        for (p0, c0), (p1, c1) in zip(stops, stops[1:]):
+            if p0 <= t <= p1:
+                factor = (t - p0) / (p1 - p0) if p1 > p0 else 0.0
+                cmap[index] = tuple(
+                    int(round(c0[channel] + (c1[channel] - c0[channel]) * factor))
+                    for channel in range(3)
+                ) + (255,)
+                break
+    return cmap
+
+
+# Terrain and vegetation ramps. The DEM is rescaled to 0-3000 m and NDVI to
+# -1..1 before rendering; categorical land cover keeps its class colours.
+_DEM_RGBA = _ramp([
+    (0.0, (26, 58, 92)),
+    (0.15, (46, 107, 58)),
+    (0.35, (120, 150, 76)),
+    (0.55, (168, 132, 74)),
+    (0.75, (205, 190, 160)),
+    (1.0, (245, 245, 245)),
+])
+_NDVI_RGBA = _ramp([
+    (0.0, (140, 81, 10)),
+    (0.35, (216, 179, 101)),
+    (0.5, (246, 232, 195)),
+    (0.65, (128, 205, 193)),
+    (1.0, (1, 102, 94)),
+])
+
+
 def _geometry_of(geojson: Any) -> Optional[dict]:
     if not isinstance(geojson, dict):
         return None
@@ -3550,7 +3585,6 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
     """
     from rio_tiler.io import COGReader
 
-    colormap = _LULC_RGBA if indicator in ("landcover", "landcover_history") else None
     for href in hrefs:
         try:
             signed = href if href.startswith("/") else planetary_computer.sign(href)
@@ -3558,6 +3592,10 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                 image = cog.tile(x, y, z)
                 if image.array.size == 0:
                     continue
+                if indicator == "dem":
+                    image = image.rescale((0.0, 3000.0), (0, 255))
+                elif indicator == "ndvi":
+                    image = image.rescale((-1.0, 1.0), (0, 255))
                 if geometry:
                     from rasterio.features import geometry_mask
                     from rasterio.transform import from_bounds as _from_bounds
@@ -3570,7 +3608,11 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                     if image.array.mask is not np.ma.nomask:
                         outside = outside | image.array.mask[0]
                     image.array.mask = np.broadcast_to(outside, image.array.shape)
-                return image.render(colormap=colormap, add_alpha=True)
+                if indicator in ("landcover", "landcover_history"):
+                    return image.render(colormap=_LULC_RGBA, add_alpha=True)
+                if indicator == "dem":
+                    return image.render(colormap=_DEM_RGBA, add_alpha=True)
+                return image.render(colormap=_NDVI_RGBA, add_alpha=True)
         except Exception:
             continue
     return _TILE_TRANSPARENT_PNG

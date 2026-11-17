@@ -7,6 +7,7 @@ import dynamic from 'next/dynamic';
 import type { FeatureCollection, GeoJsonObject } from 'geojson';
 import TimeSection, { type RainPoint, type VegPoint } from '@/components/TimeSection';
 import { observationsToCsv, observationsToGeojson, type EnrichedObservation } from '@/lib/observations';
+import { BASEMAPS, type BasemapId } from '@/lib/basemaps';
 
 interface ProjectRecord {
   id?: string | null;
@@ -67,6 +68,9 @@ export default function DashboardPage() {
   const [project, setProject] = useState<ProjectView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [vegetation, setVegetation] = useState<VegPoint[]>([]);
+  const [basemap, setBasemap] = useState<BasemapId>('satellite');
+  const [terrain3d, setTerrain3d] = useState(false);
+  const [layerOpacity, setLayerOpacity] = useState(0.7);
 
   useEffect(() => {
     if (!id) return;
@@ -93,10 +97,10 @@ export default function DashboardPage() {
     if (!project?.cache_key) return undefined;
     const backendUrl = (process.env.NEXT_PUBLIC_BACKEND_URL || '/api').replace(/\/$/, '');
     return [
-      { id: 'dem', url: `${backendUrl}/tiles/${project.cache_key}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: 0.5, zIndex: 400 },
-      { id: 'landcover', url: `${backendUrl}/tiles/${project.cache_key}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: 0.6, zIndex: 410 },
+      { id: 'dem', url: `${backendUrl}/tiles/${project.cache_key}/dem/{z}/{x}/{y}.png`, attribution: 'Elevation', opacity: layerOpacity, zIndex: 400 },
+      { id: 'landcover', url: `${backendUrl}/tiles/${project.cache_key}/landcover/{z}/{x}/{y}.png`, attribution: 'Land cover', opacity: layerOpacity, zIndex: 410 },
     ];
-  }, [project?.cache_key]);
+  }, [project?.cache_key, layerOpacity]);
 
   const rows: EnrichedObservation[] = (project?.records ?? []).map((record) => ({
     id: record.id ?? '',
@@ -173,12 +177,49 @@ export default function DashboardPage() {
 
       <section className="mt-6 grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
         <div>
+          <div className="mb-3 flex flex-wrap items-center gap-2" data-print-hide>
+            <label className="flex items-center gap-1.5 text-[0.75rem] text-ink-3">
+              Basemap
+              <select
+                value={basemap}
+                onChange={(event) => setBasemap(event.target.value as BasemapId)}
+                className="h-7 rounded-lg border border-rule bg-raised px-2 text-[0.75rem] text-ink-2"
+              >
+                {Object.entries(BASEMAPS).map(([id, base]) => (
+                  <option key={id} value={id}>{base.label}</option>
+                ))}
+              </select>
+            </label>
+            <label className="flex cursor-pointer items-center gap-1.5 rounded-full border border-rule bg-surface px-2.5 py-1 text-[0.75rem] text-ink-2">
+              <input
+                type="checkbox"
+                checked={terrain3d}
+                onChange={(event) => setTerrain3d(event.target.checked)}
+                className="h-3.5 w-3.5 accent-signal"
+              />
+              3D terrain
+            </label>
+            <label className="flex items-center gap-1.5 text-[0.75rem] text-ink-3">
+              Opacity
+              <input
+                type="range"
+                min={20}
+                max={100}
+                step={5}
+                value={Math.round(layerOpacity * 100)}
+                onChange={(event) => setLayerOpacity(Number(event.target.value) / 100)}
+                className="h-1 w-24 accent-signal"
+              />
+            </label>
+          </div>
           <MapComponent
             uploadedGeoJSON={project.geojson as FeatureCollection}
             onBoundingBoxCreated={() => {}}
             onSaveFeatures={() => {}}
             points={project.records.map((record) => ({ id: record.id ?? '', lon: record.lon, lat: record.lat }))}
             tileLayers={tileLayers}
+            basemap={basemap}
+            terrain3d={terrain3d}
           />
           <p className="mt-2 text-[0.75rem] text-ink-3">
             Points are the saved observations; the raster layers are the AOI’s elevation and land cover.
