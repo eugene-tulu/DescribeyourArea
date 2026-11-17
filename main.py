@@ -3573,11 +3573,15 @@ def _geometry_of(geojson: Any) -> Optional[dict]:
 
 def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                     geometry: Optional[dict] = None) -> bytes:
-    """Render one XYZ tile from the first source COG that covers it.
+    """Render one XYZ tile from the source COGs.
 
     rio-tiler reads the COG overview that matches the zoom, so a 16,000 km2 AOI
     pans and zooms without re-reading 10 m native pixels. The signed URL is
     created per request, so an expired token is never served to the browser.
+
+    At low zoom a tile spans several source COGs; they are mosaicked so the tile
+    is not limited to the first source that overlaps it. At high zoom one source
+    covers the tile and is read directly.
 
     Clipping is the rio-tiler pattern: rasterize the AOI onto the tile grid, set
     it as the image mask, and render with the mask as alpha. No Pillow, no full
@@ -3585,37 +3589,53 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
     """
     from rio_tiler.io import COGReader
 
-    for href in hrefs:
+    def read(asset: str, tx: int, ty: int, tz: int):
+        signed = asset if asset.startswith("/") else planetary_computer.sign(asset)
+        with COGReader(signed) as cog:
+            return cog.tile(tx, ty, tz)
+
+    image = None
+    if z <= 9 and len(hrefs) > 1:
+        from rio_tiler.mosaic import mosaic_reader
         try:
-            signed = href if href.startswith("/") else planetary_computer.sign(href)
-            with COGReader(signed) as cog:
-                image = cog.tile(x, y, z)
-                if image.array.size == 0:
-                    continue
-                if indicator == "dem":
-                    image = image.rescale([(0.0, 3000.0)], [(0, 255)])
-                elif indicator == "ndvi":
-                    image = image.rescale([(-1.0, 1.0)], [(0, 255)])
-                if geometry:
-                    from rasterio.features import geometry_mask
-                    from rasterio.transform import from_bounds as _from_bounds
-                    from rasterio.warp import transform_geom as _transform_geom
-                    projected = _transform_geom(CRS.from_epsg(4326), "EPSG:3857", geometry)
-                    transform = _from_bounds(*image.bounds, 256, 256)
-                    inside = geometry_mask([projected], out_shape=(256, 256),
-                                           transform=transform, invert=True)
-                    outside = ~inside
-                    if image.array.mask is not np.ma.nomask:
-                        outside = outside | image.array.mask[0]
-                    image.array.mask = np.broadcast_to(outside, image.array.shape)
-                if indicator in ("landcover", "landcover_history"):
-                    return image.render(colormap=_LULC_RGBA, add_mask=True)
-                if indicator == "dem":
-                    return image.render(colormap=_DEM_RGBA, add_mask=True)
-                return image.render(colormap=_NDVI_RGBA, add_mask=True)
+            image, _ = mosaic_reader(hrefs, read, x, y, z,
+                                     allowed_exceptions=(Exception,))
         except Exception:
-            continue
-    return _TILE_TRANSPARENT_PNG
+            image = None
+    if image is None:
+        for href in hrefs:
+            try:
+                image = read(href, x, y, z)
+                break
+            except Exception:
+                continue
+    if image is None or image.array.size == 0:
+        return _TILE_TRANSPARENT_PNG
+
+    try:
+        if indicator == "dem":
+            image = image.rescale([(0.0, 3000.0)], [(0, 255)])
+        elif indicator == "ndvi":
+            image = image.rescale([(-1.0, 1.0)], [(0, 255)])
+        if geometry:
+            from rasterio.features import geometry_mask
+            from rasterio.transform import from_bounds as _from_bounds
+            from rasterio.warp import transform_geom as _transform_geom
+            projected = _transform_geom(CRS.from_epsg(4326), "EPSG:3857", geometry)
+            transform = _from_bounds(*image.bounds, 256, 256)
+            inside = geometry_mask([projected], out_shape=(256, 256),
+                                   transform=transform, invert=True)
+            outside = ~inside
+            if image.array.mask is not np.ma.nomask:
+                outside = outside | image.array.mask[0]
+            image.array.mask = np.broadcast_to(outside, image.array.shape)
+        if indicator in ("landcover", "landcover_history"):
+            return image.render(colormap=_LULC_RGBA, add_mask=True)
+        if indicator == "dem":
+            return image.render(colormap=_DEM_RGBA, add_mask=True)
+        return image.render(colormap=_NDVI_RGBA, add_mask=True)
+    except Exception:
+        return _TILE_TRANSPARENT_PNG
 
 
 @app.get("/tiles/bbox/{indicator}/{z}/{x}/{y}.png")
