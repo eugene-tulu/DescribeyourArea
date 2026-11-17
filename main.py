@@ -3580,7 +3580,7 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
     created per request, so an expired token is never served to the browser.
 
     Clipping is the rio-tiler pattern: rasterize the AOI onto the tile grid, set
-    it as the image mask, and render with add_alpha=True. No Pillow, no full
+    it as the image mask, and render with the mask as alpha. No Pillow, no full
     float64 copy. The mask also keeps nodata transparent.
     """
     from rio_tiler.io import COGReader
@@ -3593,9 +3593,9 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                 if image.array.size == 0:
                     continue
                 if indicator == "dem":
-                    image = image.rescale((0.0, 3000.0), (0, 255))
+                    image = image.rescale([(0.0, 3000.0)], [(0, 255)])
                 elif indicator == "ndvi":
-                    image = image.rescale((-1.0, 1.0), (0, 255))
+                    image = image.rescale([(-1.0, 1.0)], [(0, 255)])
                 if geometry:
                     from rasterio.features import geometry_mask
                     from rasterio.transform import from_bounds as _from_bounds
@@ -3609,10 +3609,10 @@ def _render_tile_png(hrefs: list[str], indicator: str, z: int, x: int, y: int,
                         outside = outside | image.array.mask[0]
                     image.array.mask = np.broadcast_to(outside, image.array.shape)
                 if indicator in ("landcover", "landcover_history"):
-                    return image.render(colormap=_LULC_RGBA, add_alpha=True)
+                    return image.render(colormap=_LULC_RGBA, add_mask=True)
                 if indicator == "dem":
-                    return image.render(colormap=_DEM_RGBA, add_alpha=True)
-                return image.render(colormap=_NDVI_RGBA, add_alpha=True)
+                    return image.render(colormap=_DEM_RGBA, add_mask=True)
+                return image.render(colormap=_NDVI_RGBA, add_mask=True)
         except Exception:
             continue
     return _TILE_TRANSPARENT_PNG
