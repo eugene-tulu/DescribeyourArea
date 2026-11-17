@@ -83,7 +83,7 @@ function formatNumber(value: number | null | undefined, digits = 1): string {
 
 function landcoverClassesFromCodes(classes: Record<string, number>): LegendClass[] {
   return Object.entries(classes)
-    .filter(([, percentage]) => Number.isFinite(percentage))
+    .filter(([, percentage]) => Number.isFinite(percentage) && percentage > 0.05)
     .sort(([, first], [, second]) => second - first)
     .map(([code, percentage]) => ({
       label: LANDCOVER_LABELS[code] || code,
@@ -94,7 +94,7 @@ function landcoverClassesFromCodes(classes: Record<string, number>): LegendClass
 
 function landcoverClassesFromNames(classes: Record<string, number>): LegendClass[] {
   return Object.entries(classes)
-    .filter(([, percentage]) => Number.isFinite(percentage))
+    .filter(([, percentage]) => Number.isFinite(percentage) && percentage > 0.05)
     .sort(([, first], [, second]) => second - first)
     .map(([name, percentage]) => {
       const code = LANDCOVER_NAME_TO_CODE[name.toLowerCase()];

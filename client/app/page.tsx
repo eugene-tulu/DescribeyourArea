@@ -445,7 +445,7 @@ function landcoverEntries(landcover: LandcoverStats): Array<[string, number]> {
       ) as Record<string, number>;
 
   return Object.entries(classes)
-    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+    .filter(([, value]) => typeof value === 'number' && Number.isFinite(value) && value > 0.05)
     .sort(([, first], [, second]) => second - first);
 }
 
@@ -464,7 +464,7 @@ function landcoverLegend(classes: Record<string, number>): LegendClass[] {
 
 function landcoverLegendFromNames(classes: Record<string, number>): LegendClass[] {
   return Object.entries(classes)
-    .filter(([, percentage]) => typeof percentage === 'number' && Number.isFinite(percentage))
+    .filter(([, percentage]) => typeof percentage === 'number' && Number.isFinite(percentage) && percentage > 0.05)
     .sort(([, first], [, second]) => second - first)
     .map(([name, percentage]) => {
       const code = LANDCOVER_NAME_TO_CODE[name.toLowerCase()];

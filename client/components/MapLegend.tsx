@@ -25,7 +25,7 @@ export default function MapLegend({
   classes,
 }: MapLegendProps) {
   return (
-    <div className="pointer-events-auto absolute bottom-16 left-4 z-[1000] max-h-[46%] w-[15rem] overflow-auto rounded-lg border border-rule bg-void/92 px-3 py-2.5 text-[0.75rem] leading-relaxed text-ink-2 shadow-lg backdrop-blur">
+    <div className="pointer-events-auto absolute bottom-16 left-4 z-[1000] max-h-[46%] w-[16rem] overflow-auto rounded-lg border border-rule bg-void/92 px-3 py-2.5 text-[0.75rem] leading-relaxed text-ink-2 shadow-lg backdrop-blur">
       <p className="label mb-0.5 text-ink-3">{title}</p>
       {subtitle && <p className="mb-1.5 text-[0.6875rem] leading-snug text-ink-3">{subtitle}</p>}
       {gradient && (
@@ -38,7 +38,7 @@ export default function MapLegend({
         </>
       )}
       {classes && classes.length > 0 && (
-        <ul className="grid grid-cols-2 gap-x-3 gap-y-0.5">
+        <ul className="space-y-0.5">
           {classes.map((entry) => (
             <li key={entry.label} className="flex min-w-0 items-center gap-1.5">
               <span
