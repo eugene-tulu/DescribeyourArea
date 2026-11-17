@@ -203,60 +203,95 @@ function addRasters(map: MlMap, layers: MapComponentProps['tileLayers']): void {
   }
 }
 
-/** A MapLibre-native rectangle tool. Mapbox Draw has no rectangle mode, and a
- * type cast on the old control advertised a button that did nothing. */
-class RectangleControl implements IControl {
+const POLYGON_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 6-3 10H7L4 9l8-6z"/></svg>';
+const RECTANGLE_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>';
+const TRASH_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 7h16M9 7V5a1 1 0 011-1h4a1 1 0 011 1v2M6 7l1 13h10l1-13M10 11v5M14 11v5"/></svg>';
+
+/** One native MapLibre toolbar for every draw action.
+ *
+ * Mapbox Draw's own buttons live in a differently styled control group with
+ * its own event handling; the rectangle tool is ours, so the three actions are
+ * presented together here instead of looking like two foreign widgets.
+ */
+class DrawToolbarControl implements IControl {
   private map?: MlMap;
-  private button?: HTMLButtonElement;
-  private drawing = false;
+  private container?: HTMLDivElement;
+  private polygonButton?: HTMLButtonElement;
+  private rectangleButton?: HTMLButtonElement;
+  private drawingRect = false;
+  private polygonActive = false;
   private start?: maplibregl.LngLat;
 
-  constructor(private readonly draw: MapboxDraw, private readonly onCreated: () => void) {}
+  constructor(private readonly draw: MapboxDraw, private readonly onChanged: () => void) {}
 
   onAdd(map: MlMap): HTMLElement {
     this.map = map;
     const container = document.createElement('div');
-    container.className = 'maplibregl-ctrl maplibregl-ctrl-group';
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'maplibregl-ctrl-icon geocontext-rectangle-control';
-    button.title = 'Draw rectangle';
-    button.setAttribute('aria-label', 'Draw rectangle');
-    button.setAttribute('aria-pressed', 'false');
-    button.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><rect x="4" y="6" width="16" height="12" rx="1"/></svg>';
-    button.addEventListener('click', this.begin);
+    container.className = 'maplibregl-ctrl maplibregl-ctrl-group geocontext-draw-controls';
+
+    const polygon = this.button('Draw polygon', POLYGON_ICON, this.togglePolygon);
+    const rectangle = this.button('Draw rectangle', RECTANGLE_ICON, this.beginRectangle);
+    const trash = this.button('Delete area', TRASH_ICON, this.clearArea);
+    container.append(polygon, rectangle, trash);
+    this.polygonButton = polygon;
+    this.rectangleButton = rectangle;
+
     map.on('draw.modechange' as keyof MapEventType, this.onModeChange as never);
     document.addEventListener('keydown', this.onKeyDown);
-    container.appendChild(button);
-    this.button = button;
+    this.container = container;
     return container;
   }
 
   onRemove(): void {
-    this.stop();
-    this.button?.removeEventListener('click', this.begin);
-    this.button?.parentElement?.remove();
+    this.stopRectangle();
     this.map?.off('draw.modechange' as keyof MapEventType, this.onModeChange as never);
     document.removeEventListener('keydown', this.onKeyDown);
+    this.container?.remove();
+    this.container = undefined;
     this.map = undefined;
   }
 
-  private begin = (): void => {
+  private button(title: string, icon: string, onClick: () => void): HTMLButtonElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'geocontext-draw-control';
+    button.title = title;
+    button.setAttribute('aria-label', title);
+    button.setAttribute('aria-pressed', 'false');
+    button.innerHTML = icon;
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  private setActive(button: HTMLButtonElement | undefined, active: boolean): void {
+    button?.classList.toggle('active', active);
+    button?.setAttribute('aria-pressed', active ? 'true' : 'false');
+  }
+
+  private togglePolygon = (): void => {
+    if (this.polygonActive) {
+      this.draw.changeMode('simple_select');
+      return;
+    }
+    this.stopRectangle();
+    this.draw.changeMode('draw_polygon');
+  };
+
+  private beginRectangle = (): void => {
     const map = this.map;
     if (!map) return;
-    this.stop();
+    this.stopRectangle();
     this.draw.changeMode('simple_select');
-    this.drawing = true;
+    this.drawingRect = true;
+    this.setActive(this.rectangleButton, true);
     map.getCanvas().style.cursor = 'crosshair';
-    this.button?.classList.add('active');
-    this.button?.setAttribute('aria-pressed', 'true');
     map.dragPan.disable();
     map.once('mousedown', this.onDown);
   };
 
   private onDown = (event: maplibregl.MapMouseEvent): void => {
     const map = this.map;
-    if (!map || !this.drawing) return;
+    if (!map || !this.drawingRect) return;
     this.start = event.lngLat;
     map.on('mousemove', this.onMove);
     map.on('mouseup', this.onUp);
@@ -272,14 +307,10 @@ class RectangleControl implements IControl {
     const polygon = this.rectangle(this.start, event.lngLat);
     if (polygon) {
       const ids = this.draw.add({ type: 'Feature', properties: {}, geometry: polygon });
-      // Select the new rectangle so Draw's trash control and vertex editing work
-      // immediately, as they do for a polygon that finishes in draw mode.
       this.draw.changeMode('simple_select', { featureIds: ids });
-      // Draw's API add() stores the feature but does not fire draw.create.
-      // Without this callback the rectangle is visible and invisible to the app.
-      this.onCreated();
+      this.onChanged();
     }
-    this.stop();
+    this.stopRectangle();
   };
 
   private rectangle(a: maplibregl.LngLat, b: maplibregl.LngLat): GeoJSON.Polygon | null {
@@ -314,22 +345,32 @@ class RectangleControl implements IControl {
   }
 
   private onModeChange = (event: { mode: string }): void => {
-    if (this.drawing && event.mode.startsWith('draw_')) this.stop();
+    this.polygonActive = event.mode === 'draw_polygon';
+    this.setActive(this.polygonButton, this.polygonActive);
+    if (event.mode.startsWith('draw_')) this.stopRectangle();
+  };
+
+  private clearArea = (): void => {
+    this.stopRectangle();
+    if (this.polygonActive) this.draw.changeMode('simple_select');
+    this.draw.deleteAll();
+    this.onChanged();
   };
 
   private onKeyDown = (event: KeyboardEvent): void => {
-    if (event.key === 'Escape') this.stop();
+    if (event.key !== 'Escape') return;
+    this.stopRectangle();
+    if (this.polygonActive) this.draw.changeMode('simple_select');
   };
 
-  private stop = (): void => {
+  private stopRectangle = (): void => {
     const map = this.map;
     if (!map) return;
-    this.drawing = false;
+    this.drawingRect = false;
     this.start = undefined;
     map.dragPan.enable();
     map.getCanvas().style.cursor = '';
-    this.button?.classList.remove('active');
-    this.button?.setAttribute('aria-pressed', 'false');
+    this.setActive(this.rectangleButton, false);
     map.off('mousedown', this.onDown);
     map.off('mousemove', this.onMove);
     map.off('mouseup', this.onUp);
@@ -483,10 +524,12 @@ export default function MapComponent({
 
     const draw = new MapboxDraw({
       displayControlsDefault: false,
-      controls: { polygon: true, trash: true },
+      controls: { polygon: false, trash: false },
       styles: DRAW_STYLES,
     });
-    map.addControl(draw as unknown as IControl, 'top-left');
+    // Initialize Draw without mounting its foreign-looking control group. The
+    // one toolbar below owns polygon, rectangle and delete for a single UI.
+    draw.onAdd(map as unknown as Parameters<typeof draw.onAdd>[0]);
     const syncDraw = () => {
       const features = draw.getAll() as GeoJSON.FeatureCollection;
       saveRef.current?.(features);
@@ -495,7 +538,7 @@ export default function MapComponent({
       // read-only AOI layer so the boundary is drawn once, in one style.
       setAoiVisible(map, features.features.length === 0);
     };
-    map.addControl(new RectangleControl(draw, syncDraw), 'top-left');
+    map.addControl(new DrawToolbarControl(draw, syncDraw), 'top-left');
     map.on('draw.create' as keyof MapEventType, syncDraw);
     map.on('draw.update' as keyof MapEventType, syncDraw);
     map.on('draw.delete' as keyof MapEventType, syncDraw);
@@ -520,6 +563,7 @@ export default function MapComponent({
     mapRef.current = map;
     drawRef.current = draw;
     return () => {
+      draw.onRemove(map as unknown as Parameters<typeof draw.onRemove>[0]);
       map.remove();
       mapRef.current = null;
       drawRef.current = null;
@@ -610,10 +654,10 @@ export default function MapComponent({
         .maplibregl-ctrl-attrib{background:rgba(11,16,32,.85);color:#8b98ad}
         .maplibregl-ctrl-attrib a{color:#aab5cb}
         .maplibregl-ctrl-scale{background:rgba(11,16,32,.8);border-color:#24314a;color:#aab5cb}
-        .mapbox-gl-draw_ctrl-draw-btn{filter:invert(1)}
-        .geocontext-rectangle-control{display:flex;align-items:center;justify-content:center;color:#e8ecf4;filter:none!important}
-        .geocontext-rectangle-control svg{pointer-events:none}
-        .geocontext-rectangle-control.active{background:#b9e84b;color:#0b1020}
+        .geocontext-draw-control{display:flex;align-items:center;justify-content:center;color:#e8ecf4}
+        .geocontext-draw-control svg{pointer-events:none}
+        .geocontext-draw-control:hover{background:#1a2439;color:#fff}
+        .geocontext-draw-control.active{background:#b9e84b;color:#0b1020}
       `}</style>
     </div>
   );
